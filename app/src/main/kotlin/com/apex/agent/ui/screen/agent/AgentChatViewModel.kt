@@ -16,6 +16,8 @@ import com.apex.agent.core.llm.ReasoningEffort
 import com.apex.agent.core.engine.modes.ModePreset
 import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.tools.ToolRegistry
+import com.apex.agent.core.tools.skill.SkillActivationStore
+import com.apex.agent.core.tools.skill.SkillAutoActivator
 import com.apex.agent.platform.csmem.session.CsMemSessionManager
 import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.net.NetworkMonitor
@@ -76,6 +78,9 @@ class AgentChatViewModel @Inject constructor(
     private val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
     // P2：删除/清空历史会话时同步清理附件文件（AgentChatHistoryController 扩展使用）
     internal val attachmentCleanup: AttachmentCleanupManager,
+    // 技能渐进披露：自动装备（消息命中 tags 零成本预激活）+ 斜杠装备写入。
+    private val skillAutoActivator: SkillAutoActivator,
+    internal val skillActivation: SkillActivationStore,
     // ═══ v1.4.4 新增（全部 internal —— 扩展文件共用）═══
     /** #6 用量账本：每轮 LLM 真实 usage 落盘（EventApplier UsageUpdated 钩子）。 */
     internal val usageLedger: UsageLedger,
@@ -670,6 +675,10 @@ class AgentChatViewModel @Inject constructor(
         text: String,
         currentAttachments: List<Attachment>
     ) {
+        // 技能自动装备（渐进披露零成本路）：消息命中已安装技能的 tags/id/name
+        // → 发送前预激活（≤ 2 个），本轮提示词即携带方法论全文；异常静默不阻断发送。
+        runCatching { skillAutoActivator.autoEquip(text) }
+
         // 异步落盘附件（IO 线程）
         // 优先使用预拷贝结果，未预拷贝的回退到同步拷贝
         val persistedAttachments = try {
@@ -1082,7 +1091,9 @@ class AgentChatViewModel @Inject constructor(
         val result = SlashCommands.handle(
             command,
             githubTokenManager,
-            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet())
+            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet()),
+            // /skill:<id> 路由时同步装备（写入激活存储，本轮提示词即携带方法论）
+            skillActivation = skillActivation
         )
 
         // 指令会取消上一个流式任务：先清空流式缓冲，防残留文本串入新一轮。

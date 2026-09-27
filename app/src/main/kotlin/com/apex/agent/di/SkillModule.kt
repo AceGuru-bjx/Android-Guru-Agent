@@ -4,6 +4,8 @@ import android.content.Context
 import com.apex.agent.core.logging.AppLogger
 import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.core.tools.mcp.McpManager
+import com.apex.agent.core.tools.skill.SkillActivationStore
+import com.apex.agent.core.tools.skill.SkillAutoActivator
 import com.apex.agent.core.tools.skill.SkillHotReloadLogLevel
 import com.apex.agent.core.tools.skill.SkillMenuProvider
 import com.apex.agent.core.tools.skill.SkillRegistry
@@ -103,6 +105,30 @@ object SkillModule {
     @Singleton
     fun provideSkillMenuProvider(skillRegistry: SkillRegistry): SkillMenuProvider {
         return SkillMenuProvider(skillRegistry)
+    }
+
+    /**
+     * 技能会话激活存储（渐进披露）：与引擎 / skill_activate 工具 /
+     * 斜杠指令 / 自动装备器四处共享同一 @Singleton 实例。FIFO 上限 8
+     * （每个技能方法论 2-4KB，激活集封顶 ≈ 30KB，请求体积有界）。
+     */
+    @Provides
+    @Singleton
+    fun provideSkillActivationStore(): SkillActivationStore {
+        return SkillActivationStore(maxActive = 8)
+    }
+
+    /**
+     * 技能自动装备器：用户消息与技能 tags/id/name 字面命中 → 零成本预激活。
+     * 由 AgentChatViewModel 发送路径调用（发送前装备，本轮系统提示词即携带）。
+     */
+    @Provides
+    @Singleton
+    fun provideSkillAutoActivator(
+        skillRegistry: SkillRegistry,
+        activationStore: SkillActivationStore
+    ): SkillAutoActivator {
+        return SkillAutoActivator(skillRegistry, activationStore, maxActivations = 2)
     }
 
     /** 连接器注册表（市场页「连接器」页签 + 斜杠菜单数据源）。 */

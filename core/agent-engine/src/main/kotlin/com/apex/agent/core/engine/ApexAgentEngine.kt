@@ -26,6 +26,7 @@ import com.apex.agent.core.tools.ToolRegistry
 import com.apex.agent.core.tools.ToolStreamEvent
 import com.apex.agent.core.tools.catalog.ToolActivationStore
 import com.apex.agent.core.tools.catalog.ToolRequestBudget
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -114,7 +115,15 @@ class ApexAgentEngine(
     private val hookRunner: HookRunner? = null,
     /** #168 六档思考：AUTO 选档/迭代倍率/工具自检/自评清单全在此，引擎仅三个钩子。 */
     // internal —— EngineCompressionGate.kt 压缩阈值解析直调。
-    internal val thinkingController: ThinkingModeController = ThinkingModeController() // 默认值兼容旧测试
+    internal val thinkingController: ThinkingModeController = ThinkingModeController(), // 默认值兼容旧测试
+    /**
+     * 技能会话激活存储（技能渐进披露）。非空时：系统提示词携带
+     * 「Skill Catalog」目录段，且 skillPrompts 只注入已激活技能的方法论
+     * 全文（SkillRegistry.getActivePromptInjections）；模型经 skill_activate
+     * 工具装载。为空时回退 legacy 行为（全部启用技能全量注入），
+     * 既有单测与子代理零改动兼容。
+     */
+    private val skillActivation: SkillActivationStore? = null
 ) : AgentEngine, ConfirmationSink {
 
     /** #165 插桩句柄（null 安全派生；开号时快照当前模式名）。 */
@@ -137,6 +146,26 @@ class ApexAgentEngine(
      */
     @Volatile
     private var executionTags: Pair<String?, String?>? = null
+
+    /**
+     * 本轮为「会话首条用户消息且纯问候」（SmallTalkDetector 判定）。
+     * execute() 入口置位 / finally 复位；系统提示词据此注入
+     * First-Turn Greeting 硬约束段（见 EnginePrompts）。
+     */
+    @Volatile
+    private var firstGreetingTurn = false
+
+    /**
+     * 本轮召回的聊天长期记忆（已格式化文本；null = 无可召回内容）。
+     * execute() 入口经 memoryObserver.recallChatMemory 填充，finally 复位；
+     * 系统提示词据此注入 "## Remembered About You" 段。
+     */
+    @Volatile
+    private var chatMemoryNote: String? = null
+
+    /** 本轮聊天信号（共情/澄清，ChatSignalDetector）。execute() 入口填充，finally 复位。 */
+    @Volatile
+    private var chatSignal: ChatSignal? = null
 
     /** T76 — 压缩后重注入的任务状态 system 消息（N-9，TaskRuntime 调用）。 */
     fun injectSystemContext(content: String) {
@@ -359,6 +388,9 @@ class ApexAgentEngine(
         var totalToolCalls = 0
         var totalIterations = 0
         var taskHadFailure = false
+        // 本轮历史起点（记忆沉淀用）：try 外声明，finally 里从该下标之后找
+        // 最终助手回复；异常路径下若尚未进入 try 体则为 -1（跳过沉淀）。
+        var turnHistoryStart = -1
 
         try {
             // 隐式记忆采集（P2）：观察者异常再包一层防线（与编排器一致），
@@ -371,6 +403,27 @@ class ApexAgentEngine(
                     "memoryObserver.onTaskStart threw: ${e.message}"
                 )
             }
+
+            // ═══ 首轮问候检测 + 聊天记忆召回（发送前、历史追加前）═══
+            // 首轮判定口径：追加本轮用户消息前，历史里还没有任何 User 消息
+            // （含从 ConversationMemory 载入的跨启动历史）——即「本次对话的第
+            // 一句话」。纯问候 → firstTurnGreeting 置位，系统提示词注入硬约束段。
+            firstGreetingTurn =
+                conversationHistory.none { it is LlmMessage.User } &&
+                    SmallTalkDetector.isGreetingOnly(input.text)
+            chatSignal = ChatSignalDetector.detect(input.text)
+            // 聊天长期记忆召回：失败折叠为 null（记忆子系统异常绝不阻断主对话）。
+            chatMemoryNote = try {
+                memoryObserver?.recallChatMemory(input.text)?.takeIf { it.isNotBlank() }
+            } catch (e: Throwable) {
+                AppLogger.instance.warn(
+                    LogCategory.ENGINE, "ApexAgentEngine",
+                    "recallChatMemory threw (ignored): ${e.message}"
+                )
+                null
+            }
+            // 本轮起点（记忆沉淀用）：finally 里从该下标之后找最终助手回复。
+            turnHistoryStart = conversationHistory.size
 
             val userText = buildUserText(input)
             val userMessage = LlmMessage.User(content = userText, images = input.images)
@@ -477,6 +530,29 @@ class ApexAgentEngine(
                     "memoryObserver.onTaskFinish threw: ${e.message}"
                 )
             }
+            // ═══ 聊天记忆自动沉淀：本轮（用户原文 + 最终助手回复）交观察者 ═══
+            // 从本轮起点之后取「最后一条有正文的 Assistant」——多轮工具循环里
+            // 中间轮次的叙述性文本不是最终答案；失败/中止（无助手回复）跳过。
+            // 异常兜底同 onTaskFinish：绝不因记忆沉淀阻断 Complete 事件。
+            try {
+                val finalAssistantText = if (turnHistoryStart >= 0) {
+                    conversationHistory.drop(turnHistoryStart)
+                        .filterIsInstance<LlmMessage.Assistant>()
+                        .lastOrNull { it.content.isNotBlank() }?.content
+                } else null
+                if (finalAssistantText != null) {
+                    memoryObserver?.onConversationTurn(input.text, finalAssistantText)
+                }
+            } catch (e: Throwable) {
+                AppLogger.instance.warn(
+                    LogCategory.ENGINE, "ApexAgentEngine",
+                    "memoryObserver.onConversationTurn threw: ${e.message}"
+                )
+            }
+            // 复位轮次级注入态（防止下一轮携带上一轮的问候约束/记忆快照）。
+            firstGreetingTurn = false
+            chatMemoryNote = null
+            chatSignal = null
             // Cancel any dangling plan-confirmation deferred so it doesn't leak.
             planConfirmationDeferred?.complete(PlanDecision.legacy(false))
             planConfirmationDeferred = null
@@ -1054,11 +1130,22 @@ class ApexAgentEngine(
         toolNameMap = EngineToolPlanner.idToProviderName(currentToolPlan),
         toolsUnavailable = currentToolPlan?.tools?.isEmpty() == true &&
             toolDegradationLevel >= EngineToolPlanner.DEGRADATION_NO_TOOLS,
-        skillPrompts = skillRegistry?.getPromptInjections() ?: emptyList(),
+        // 技能渐进披露：激活存储注入时双层结构（目录 + 仅激活技能全文），
+        // 否则 legacy 全量注入（单测/子代理零改动）。
+        skillPrompts = if (skillActivation != null) {
+            skillRegistry?.getActivePromptInjections(skillActivation.activeIds.value) ?: emptyList()
+        } else {
+            skillRegistry?.getPromptInjections() ?: emptyList()
+        },
+        skillCatalog = if (skillActivation != null) skillRegistry?.getSkillDigests() ?: emptyList() else emptyList(),
         environmentSummary = environmentInfoProvider?.environmentSummary(),
         connectedServices = connectedServicesProvider?.connectedServicesSummary(),
         // Issue #164：全局规则（Agent 模式通道；coding 实例不设值，见 updateGlobalRules KDoc）
-        globalRules = globalRulesText
+        globalRules = globalRulesText,
+        // 首轮纯问候硬约束 + 聊天记忆召回（execute() 置位，finally 复位）。
+        firstTurnGreeting = firstGreetingTurn,
+        memoryContext = chatMemoryNote,
+        chatSignal = chatSignal
     )
 
     // SPEC / Reflection 模式 prompt 包装器已迁至 EnginePromptDelegates.kt（#168 零净增腾挪，调用点零改动）。
