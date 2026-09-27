@@ -165,7 +165,11 @@ object CodeModule {
         codeMemory: CodeConversationMemory,
         codeContextProvider: CodeContextProvider,
         // Issue #165：生命周期钩子派发口（coding 引擎实例同样接入）
-        hookRunner: com.apex.agent.core.engine.HookRunner
+        hookRunner: com.apex.agent.core.engine.HookRunner,
+        // 技能渐进披露：与 Agent 模式共享同一激活存储（skill_activate 工具
+        // 写入的是全局单例；coding 引擎读同一份才能让装备即时生效——
+        // 也避免 46 技能全量注入撞爆 coding 请求体积）。
+        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore
     ): AgentEngine {
         val codeConfig = AgentConfig(
             mode = AgentMode.BUILD,
@@ -192,7 +196,9 @@ object CodeModule {
             // 独立激活存储：tool_open 的会话激活不与 Agent 模式互相污染
             toolActivation = ToolActivationStore(),
             // Issue #165：coding 引擎同样接入生命周期钩子（会话/回合/压缩事件）
-            hookRunner = hookRunner
+            hookRunner = hookRunner,
+            // 技能激活共享（见参数 KDoc）：目录 + 已装备方法论注入。
+            skillActivation = skillActivation
         )
         return CodeAgentEngine(
             delegate = inner,

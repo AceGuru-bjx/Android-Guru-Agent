@@ -4,6 +4,7 @@ import com.apex.agent.core.engine.thinking.ThinkingProfile
 import com.apex.agent.core.tools.AgentTool
 import com.apex.agent.core.tools.ToolCategory
 import com.apex.agent.core.tools.ToolRisk
+import com.apex.agent.core.tools.skill.SkillDigest
 
 /**
  * Prompt construction for every [ApexAgentEngine] mode.
@@ -86,7 +87,31 @@ internal object EnginePrompts {
          * (READ-ONLY)」约束段（仅产出计划 JSON、不执行任何工具/写操作）。
          * 仅 executePlanMode 的计划生成/反思两处置 true，其余调用方默认 false。
          */
-        planningPhase: Boolean = false
+        planningPhase: Boolean = false,
+        /**
+         * 首轮纯问候硬约束（动态层）。true = 本轮是会话首条用户消息且
+         * [SmallTalkDetector] 判定为纯问候（你好/hi/在吗…）。注入
+         * FIRST_TURN_GREETING 段：要求一句话极简回应（≤ 20 字，如
+         * 「需要帮助吗？哪方面的？」），禁止能力清单/工具列表/长篇开场白。
+         * 默认 false = 段落省略（既有行为零变化）。
+         */
+        firstTurnGreeting: Boolean = false,
+        /**
+         * 聊天记忆召回上下文（对话自动记忆）。非空时渲染
+         * "## Remembered About You" 段——引擎每轮 execute 入口经
+         * ExecutionMemoryObserver.recallChatMemory 取回的用户长期记忆
+         * （偏好/背景/历史结论），指引模型利用而非重复询问。
+         * null/空白 = 段落省略（未接入或无可召回内容）。
+         */
+        memoryContext: String? = null,
+        /**
+         * 技能目录（渐进披露）。非空时渲染 "## Skill Catalog" 段：全部已
+         * 安装技能的一行摘要 + skill_activate 装载指引。此时 [skillPrompts]
+         * 应只携带已激活技能的注入（见 SkillRegistry.getActivePromptInjections）
+         * ——目录+激活双层结构，请求体积有界。空 = 省略目录段（兼容旧调用：
+         * skillPrompts 全量注入的 legacy 行为）。
+         */
+        skillCatalog: List<SkillDigest> = emptyList()
     ): String {
         val thinking = currentProfile?.promptInstruction ?: config.thinkingLevel.toPromptInstruction()
         return buildString {
@@ -99,6 +124,23 @@ internal object EnginePrompts {
             // 全空 → 段落整体省略（历史行为零变化）。人设只塑造表达方式，
             // 绝不覆盖工具策略/安全规则 —— 末行显式声明优先级。
             appendRoleSection(config)
+            appendLine()
+
+            // ═══ 对话开放性（静态层）：问候/闲聊也是合法输入 ═══
+            // 用户反馈根因：发「你好」回一大段编程能力介绍——旧提示词只有
+            // 「You are not a chatbot」的任务而向，模型把所有输入都当任务
+            // 处理。本段把「闲聊优先短回应」写成静态策略；首轮纯问候另有
+            // 动态硬约束段（firstTurnGreeting）双保险。
+            appendLine("## Conversational Openness")
+            appendLine("You are task-driven, but greetings and small talk are legitimate input — respond like a")
+            appendLine("natural assistant, not a capabilities brochure:")
+            appendLine("- Greetings / chitchat / mood talk (你好、在吗、无聊聊聊) → reply briefly and warmly in the")
+            appendLine("  user's language, then invite the topic. NEVER dump tool lists, skill catalogs, or")
+            appendLine("  self-introductions unless explicitly asked '你能做什么'.")
+            appendLine("- Casual questions get casual-length answers; match the user's energy and message length.")
+            appendLine("- Life / emotional / non-programming topics are FIRST-CLASS: chat, travel, cooking, health,")
+            appendLine("  fitness, fashion, gifts, study, career... Do NOT steer every topic toward coding.")
+            appendLine("- Only escalate to tool use when there is an actual task to perform or a fact to verify.")
             appendLine()
 
             // ═══ 主动工具使用策略（根因修复：模型不主动调工具）═══
@@ -244,6 +286,23 @@ internal object EnginePrompts {
                 appendLine("## Custom Instructions")
                 appendLine(config.customInstruction)
             }
+
+            // ═══ 首轮纯问候硬约束（动态层，SmallTalkDetector 判定置位）═══
+            // 与静态 Conversational Openness 段双保险：静态段约束所有闲聊的
+            // 「形状」，本段针对「会话第一条消息就是你好」的极端情形给出
+            // 不可误读的硬性行为规格（一句话 + 反问需要，禁止一切清单式输出）。
+            if (firstTurnGreeting) {
+                appendLine()
+                appendLine("## First-Turn Greeting (THIS TURN)")
+                appendLine("The user just opened this conversation with a bare greeting (no task attached).")
+                appendLine("Reply with EXACTLY ONE short friendly sentence in the user's language — an example shape:")
+                appendLine("『需要帮助吗？想聊哪方面的？』. Then STOP.")
+                appendLine("Hard limits for this turn:")
+                appendLine("- ≤ 20 characters (Chinese) or ≤ 15 words (English); no second sentence, no lists,")
+                appendLine("  no headers, no markdown, no emoji spam.")
+                appendLine("- Do NOT call any tools; do NOT list skills/tools/capabilities; do NOT introduce yourself.")
+                appendLine("- Match the user's persona/language settings if a role is configured.")
+            }
             // ═══ #168 六档思考：档位声明 + AUTO 决策理由 + MAXIMUM 自评清单 ═══
             // currentProfile = null → 旧 5 档行为（仅指令文本，既有测试零改动）。
             if (thinking.isNotBlank() || currentProfile != null) {
@@ -331,7 +390,24 @@ internal object EnginePrompts {
             }
             }
 
-            // Skill prompt 注入
+            // ═══ 技能目录（渐进披露）：一行摘要 + 装载指引 ═══
+            // 目录与激活分层：目录让模型知道「有哪些领域方法论」，激活集的
+            // 全文注入由 skillPrompts 携带（见 Active Skills 段）。模型用
+            // skill_activate 装载，宿主也可经斜杠指令/自动装备预激活。
+            if (skillCatalog.isNotEmpty()) {
+                appendLine()
+                appendLine("## Skill Catalog (${skillCatalog.size} installed)")
+                appendLine("Domain expert methodologies are installed but NOT loaded by default (keeps requests small).")
+                appendLine("When the task matches a domain below, call skill_activate(skill_id) FIRST — the full")
+                appendLine("methodology loads instantly and stays for the session. Activated skills appear under")
+                appendLine("'Active Skills'.")
+                skillCatalog.forEach { digest ->
+                    appendLine("- ${digest.id}: ${digest.name} — ${digest.summary}")
+                }
+                appendLine("Also call skill_list() for the full inventory with versions/status.")
+            }
+
+            // Skill prompt 注入（渐进披露：仅激活技能的全文；空目录 = legacy 全量）
             if (skillPrompts.isNotEmpty()) {
                 appendLine()
                 appendLine("## Active Skills")
@@ -347,6 +423,19 @@ internal object EnginePrompts {
                 appendLine()
                 appendLine("## Session Context")
                 appendLine(config.additionalSystemContext.trim())
+            }
+
+            // ═══ 聊天记忆召回（对话自动记忆的注入面）═══
+            // 位置紧跟 Session Context：记忆是对「这个用户」的先验，先于
+            // 通用规则生效。内容已由实现方格式化（实体 + 观察列表），
+            // 这里只包一层段标题与使用指引。
+            if (!memoryContext.isNullOrBlank()) {
+                appendLine()
+                appendLine("## Remembered About You")
+                appendLine("Long-term memories distilled from past conversations (auto-captured, newest first):")
+                appendLine(memoryContext.trim())
+                appendLine("Use these naturally — do not re-ask what is already known; if a memory looks")
+                appendLine("outdated, confirm gently instead of silently trusting it.")
             }
 
             // ═══ 全局行为规则（#164 Rules 系统）═══

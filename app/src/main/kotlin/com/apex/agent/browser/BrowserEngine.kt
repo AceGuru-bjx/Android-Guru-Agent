@@ -547,6 +547,154 @@ class BrowserEngine @Inject constructor(
         }.getOrDefault(false)
     }
 
+    // ═════════ 独立条件等待 + 页面类型推断（网页自动化完善）═════════
+
+    /** [waitForCondition] 的结果。 */
+    data class WaitOutcome(
+        val matched: Boolean,
+        val detail: String,
+        val elapsedMs: Long
+    )
+
+    /**
+     * 独立条件等待（`browser_wait_for` 工具的引擎面）。
+     *
+     * [BrowserEngine.navigate] 的 waitForSelector 只覆盖「导航后」窗口；
+     * 点击/提交后的异步内容到达（SPA 局部刷新、搜索结果、登录跳转）没有
+     * 等待手段——旧方案只能盲 sleep 或反复 snapshot 轮询。本方法补齐三态：
+     *  - `selector`：CSS 选择器出现（同步检查 + 轮询，不经 Promise——
+     *    evaluateJavascript 不等待 Promise 完成，异步形态拿到的恒为 null）；
+     *  - `text`：页面可见文本包含子串；
+     *  - `url`：当前 URL 包含子串（跳转完成判定）。
+     *
+     * 轮询 [pollMs]（默认 300ms）+ 总超时 [timeoutMs]（默认 10s，上限 60s
+     * 防呆）；在 Main dispatcher 执行（WebView 约束），每次检查为一次
+     * evaluateJavascript（毫秒级），不阻塞渲染。
+     */
+    suspend fun waitForCondition(
+        mode: String,
+        value: String,
+        timeoutMs: Long = 10_000,
+        pollMs: Long = 300
+    ): WaitOutcome = withContext(Dispatchers.Main) {
+        val tab = activeTab()
+            ?: return@withContext WaitOutcome(false, "no active tab", 0)
+        val effectiveTimeout = timeoutMs.coerceIn(500, 60_000)
+        val start = SystemClock.uptimeMillis()
+        while (true) {
+            val elapsed = SystemClock.uptimeMillis() - start
+            if (elapsed >= effectiveTimeout) {
+                return@withContext WaitOutcome(
+                    false, "timeout (${effectiveTimeout}ms) waiting for $mode '$value'", elapsed
+                )
+            }
+            val hit = when (mode) {
+                "selector" -> runCatching {
+                    evaluateBoolean(tab.webView, selectorCheckJs(value))
+                }.getOrDefault(false)
+                "text" -> runCatching {
+                    evaluateBoolean(tab.webView, textContainsJs(value))
+                }.getOrDefault(false)
+                "url" -> tab.webView.url?.contains(value, ignoreCase = true) == true
+                else -> return@withContext WaitOutcome(
+                    false, "unknown mode '$mode' (use selector|text|url)", elapsed
+                )
+            }
+            if (hit) return@withContext WaitOutcome(true, "matched $mode", elapsed)
+            delay(pollMs.coerceIn(100, 2000))
+        }
+    }
+
+    /** 同步选择器存在性检查（无 Promise——evaluateJavascript 回调不等 Promise）。 */
+    private fun selectorCheckJs(selector: String): String {
+        val escaped = selector.replace("\\", "\\\\").replace("'", "\\'")
+        return "(function(){try{return !!document.querySelector('$escaped');" +
+            "}catch(e){return false;}})()"
+    }
+
+    /** 可见文本包含检查（body.innerText，大小写不敏感由调用方预处理）。 */
+    private fun textContainsJs(text: String): String {
+        val escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+        return "(function(){try{var b=document.body;return !!b && " +
+            "b.innerText.indexOf('$escaped')>=0;}catch(e){return false;}})()"
+    }
+
+    /** [pageType] 的推断结果。 */
+    data class PageTypeInfo(
+        val type: String,
+        val hint: String,
+        val signals: Map<String, Int>
+    )
+
+    /**
+     * 页面类型推断（gap audit「缺失 H」的 Agent 框架层落点）。
+     *
+     * 一次 JS 采集页面形态信号（输入框/密码框/按钮/链接/正文/视频/列表项/
+     * 搜索框/导航/文本量），Kotlin 侧按优先级分类，返回「类型 + 该类型的
+     * 典型动作建议」——帮模型在 snapshot 全量元素前先建立页面心智模型，
+     * 决定 focus 策略（表单页抓 FORM_FIELDS、文章页抓 CONTENT_SUMMARY）。
+     */
+    suspend fun pageType(): PageTypeInfo = withContext(Dispatchers.Main) {
+        val tab = activeTab()
+            ?: return@withContext PageTypeInfo("unknown", "无激活标签页", emptyMap())
+        val raw = runCatching { evaluateJson(tab.webView, PAGE_TYPE_JS) }.getOrDefault("null")
+        val signals = parsePageSignals(raw)
+        classifyPage(signals)
+    }
+
+    /** 防御式解析信号 JSON：任何形状异常返回空表（分类退化到 generic）。 */
+    private fun parsePageSignals(raw: String): Map<String, Int> {
+        if (raw.isEmpty() || raw == "null") return emptyMap()
+        val json = Json.parseToJsonElement(raw)
+        if (json !is JsonObject) return emptyMap()
+        val out = LinkedHashMap<String, Int>()
+        for ((key, value) in json) {
+            val v = runCatching { value.jsonPrimitive.content.toInt() }.getOrNull() ?: continue
+            out[key] = v
+        }
+        return out
+    }
+
+    /** 信号 → 类型（优先级从高到低：认证 > 视频 > 表单 > 文章 > 列表/搜索 > 门户）。 */
+    private fun classifyPage(s: Map<String, Int>): PageTypeInfo {
+        val inputs = s["inputs"] ?: 0
+        val password = s["password"] ?: 0
+        val buttons = s["buttons"] ?: 0
+        val links = s["links"] ?: 0
+        val articles = s["articles"] ?: 0
+        val videos = s["videos"] ?: 0
+        val listItems = s["listItems"] ?: 0
+        val searchBox = s["searchBox"] ?: 0
+        val nav = s["nav"] ?: 0
+        val textLen = s["textLen"] ?: 0
+        return when {
+            password > 0 -> PageTypeInfo(
+                "auth", "登录/注册页：先 browser_snapshot(focus=form) 找输入框，凭据类操作注意确认", s
+            )
+            videos > 0 && textLen < 6000 -> PageTypeInfo(
+                "video", "视频/播放页：控件多为自定义 DOM，建议 browser_snapshot 后按 ref 点击", s
+            )
+            inputs >= 4 && buttons >= 1 -> PageTypeInfo(
+                "form", "表单页：browser_snapshot(focus=form) 拿全字段，逐项 browser_input/select/date_input", s
+            )
+            articles > 0 && textLen > 1500 -> PageTypeInfo(
+                "article", "文章/详情页：browser_snapshot(focus=content) 抓正文；交互元素通常在评论区", s
+            )
+            searchBox > 0 && links >= 8 -> PageTypeInfo(
+                "search", "搜索/结果页：可在搜索框继续输入，结果项用列表 ref 定位", s
+            )
+            links >= 20 && listItems >= 15 -> PageTypeInfo(
+                "list", "列表/信息流页：元素多且分页，建议 focus 策略 + scroll 翻页", s
+            )
+            nav > 0 && links >= 10 -> PageTypeInfo(
+                "portal", "门户/首页：导航入口为主，先想清楚目标路径再点击", s
+            )
+            else -> PageTypeInfo(
+                "generic", "普通页面：browser_snapshot 全量观察后再决策", s
+            )
+        }
+    }
+
     suspend fun goBack(): Boolean = withContext(Dispatchers.Main) {
         val wv = activeTab()?.webView ?: return@withContext false
         if (wv.canGoBack()) { wv.goBack(); return@withContext true }
@@ -895,6 +1043,32 @@ class BrowserEngine @Inject constructor(
         private const val MAX_HISTORY = 100
         /** 导航次数阈值：超过后下次 navigate 前重建 WebView（P2 #15） */
         private const val MAX_NAVIGATIONS_BEFORE_REBUILD = 50
+
+        /**
+         * 页面形态信号采集（[pageType] 用）：一次 JS 拿全部计数，返回 JSON 字符串。
+         * 纯同步（无 Promise——evaluateJavascript 回调不等待 Promise 完成）；
+         * querySelectorAll 的广义选择器在老旧内核上可能抛错，逐项 try 兜底。
+         */
+        private val PAGE_TYPE_JS = """
+            (function(){
+              try {
+                var q = function(s){ try { return document.querySelectorAll(s).length; } catch(e){ return 0; } };
+                var b = document.body;
+                return JSON.stringify({
+                  inputs: q('input,select,textarea'),
+                  password: q('input[type=password]'),
+                  buttons: q('button,input[type=submit],input[type=button],[role=button]'),
+                  links: q('a[href]'),
+                  articles: q('article,[itemprop=articleBody],.article-content,main h1'),
+                  videos: q('video,iframe[src*=youtube],iframe[src*=bilibili],iframe[src*=vimeo],[class*=player]'),
+                  listItems: q('li'),
+                  searchBox: q('input[type=search],input[placeholder*=搜],input[placeholder*=search],input[name*=search]'),
+                  nav: q('nav,[role=navigation]'),
+                  textLen: b ? b.innerText.length : 0
+                });
+              } catch(e) { return '{}'; }
+            })();
+        """.trimIndent()
 
         /**
          * 反检测隐身 JS（#13 轻量版）：隐藏自动化痕迹，降低被反爬识别概率。

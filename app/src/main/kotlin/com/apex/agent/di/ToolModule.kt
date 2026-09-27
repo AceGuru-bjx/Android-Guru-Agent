@@ -520,7 +520,9 @@ object ToolModule {
         // #167 加密剪切板金库（vault_* 工具族 + 执行器脱敏装饰）
         vaultRepository: VaultRepository,
         // #172 上下文回顾三件套的数据源：当前会话持久化消息（SharedPrefs 单例）。
-        conversationMemory: com.apex.agent.core.engine.ConversationMemory
+        conversationMemory: com.apex.agent.core.engine.ConversationMemory,
+        // 技能渐进披露：skill_activate 工具 + 子代理引擎工厂共享的激活存储。
+        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore
     ): ToolRegistry {
         val registry = DefaultToolRegistry()
 
@@ -866,6 +868,9 @@ object ToolModule {
         registry.register(SafeAgentTool(SkillCreateTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillListTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillUninstallTool(skillRegistry)))
+        // 技能渐进披露：模型侧装载入口。目录在系统提示词，方法论全文经本工具
+        // 装载（工具结果即时返回全文 + 写入激活集持续注入后续轮次）。
+        registry.register(SafeAgentTool(SkillActivateTool(skillRegistry, skillActivation)))
 
         // ═══ 14. Tool System v3 新工具（纯 JVM，零新依赖）═══
         // wait：Anthropic computer-use 语义的有界可取消等待（UI 稳定窗口）；
@@ -977,7 +982,11 @@ object ToolModule {
                     skillRegistry = skillRegistry,
                     privilegeInfoProvider = privilegeInfoProvider,
                     environmentInfoProvider = environmentInfoProvider,
-                    modelRuntime = modelRuntime
+                    modelRuntime = modelRuntime,
+                    // 渐进披露：子代理共享主代理的技能激活集（主代理装备的
+                    // 方法论在子代理上下文同样生效；未激活则仅目录可见，
+                    // 避免 46 技能全量注入撞爆子代理请求）。
+                    skillActivation = skillActivation
                 )
             },
             // Issue #165 —— SubagentStop：子代理回合收官（结果返回前）非阻断派发。

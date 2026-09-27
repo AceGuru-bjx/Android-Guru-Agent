@@ -1,6 +1,7 @@
 package com.apex.agent.core.tools.builtin
 
 import com.apex.agent.core.tools.AgentTool
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -530,6 +531,77 @@ class SkillUninstallTool(
             "✅ Skill '$skillId' uninstalled"
         } else {
             "Error: Skill '$skillId' not found, or it is a bundled skill (bundled skills cannot be uninstalled, only disabled)"
+        }
+    }
+}
+
+/**
+ * Skill 激活工具（技能渐进披露的模型侧入口，对齐 tool_open 的装载语义）。
+ *
+ * 系统提示词只携带「Skill Catalog」（全部技能的一行摘要）；技能的完整
+ * 方法论（promptInjection，通常 2-4KB）默认不注入。模型判定任务命中
+ * 某技能领域时调用本工具：
+ *  - 工具结果**即时返回该技能的完整方法论全文**（当轮即可遵循）；
+ *  - 同时写入 [SkillActivationStore]，后续轮次系统提示词持续注入
+ *    （见 SkillRegistry.getActivePromptInjections）；
+ *  - FIFO 上限淘汰最旧激活，请求体积有界。
+ *
+ * 与 tool_search/tool_open 的关系：工具目录装载「能力」（函数），技能
+ * 目录装载「方法论」（领域专家流程）——两者互补，模型可自由组合
+ * （例：装备 travel-planner 技能 + web_search 工具做行程规划）。
+ */
+class SkillActivateTool(
+    private val skillRegistry: SkillRegistry,
+    private val activationStore: SkillActivationStore
+) : AgentTool {
+
+    override val id = "skill_activate"
+    override val name = "Activate Skill"
+    override val description = """
+        Load a skill's full domain methodology into the session.
+        The system prompt only lists one-line skill summaries; call this with a
+        skill_id from the Skill Catalog when a task matches that domain. The
+        complete methodology returns immediately and stays active for the rest
+        of the session. Prefer this BEFORE answering domain-specific questions
+        (cooking, travel, fitness, resume, negotiation, ...).
+    """.trimIndent()
+
+    override val parametersSchema = """
+        {
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "Skill ID from the Skill Catalog (e.g. travel-planner)"}
+            },
+            "required": ["skill_id"]
+        }
+    """.trimIndent()
+
+    override suspend fun execute(arguments: String): String = withContext(Dispatchers.Default) {
+        val json = Json.parseToJsonElement(arguments).jsonObject
+        val skillId = json["skill_id"]?.jsonPrimitive?.contentOrNull
+            ?: return@withContext "Error: 'skill_id' required"
+
+        val installed = skillRegistry.getInstalled().firstOrNull { it.manifest.id == skillId }
+            ?: return@withContext "Error: skill '$skillId' not installed. Call skill_list() to see installed skills."
+        if (!installed.enabled) {
+            return@withContext "Error: skill '$skillId' is disabled. Ask the user to enable it in the skill market."
+        }
+
+        activationStore.activate(skillId)
+        val manifest = installed.manifest
+        val methodology = manifest.promptInjection
+            ?: return@withContext buildString {
+                appendLine("✅ Skill '${manifest.name}' ($skillId) has no prompt methodology; it contributes tools:")
+                manifest.tools.forEach { appendLine("- ${it.id}: ${it.description.take(120)}") }
+                appendLine("(These tools are registered and callable now.)")
+            }
+
+        buildString {
+            appendLine("✅ Skill '${manifest.name}' ($skillId) activated — full methodology below; it stays in your system prompt for the rest of the session.")
+            appendLine("---")
+            appendLine(methodology)
+            appendLine("---")
+            appendLine("Follow this methodology for matching tasks from now on.")
         }
     }
 }
