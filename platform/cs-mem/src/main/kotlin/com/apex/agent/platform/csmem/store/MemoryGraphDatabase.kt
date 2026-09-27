@@ -40,8 +40,12 @@ abstract class MemoryGraphDatabase : RoomDatabase() {
          */
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // 修复：列必须与 NodeEntity.appVersion 的可空声明（String?，无 defaultValue）
+                // 完全一致。NOT NULL DEFAULT '' 迁移后 notNull=1，与实体 notNull=0 失配，
+                // Room 迁移校验会抛 IllegalStateException: Migration didn't properly handle
+                // nodes —— v1 老用户升级后整个记忆库不可用。
                 db.execSQL(
-                    "ALTER TABLE nodes ADD COLUMN app_version TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE nodes ADD COLUMN app_version TEXT"
                 )
                 db.execSQL(
                     """
@@ -95,7 +99,7 @@ abstract class MemoryGraphDatabase : RoomDatabase() {
                     """.trimIndent()
                 )
                 db.execSQL(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS index_edges_episode_label " +
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_edges_episode_id_edge_label " +
                         "ON edges(episode_id, edge_label)"
                 )
             }

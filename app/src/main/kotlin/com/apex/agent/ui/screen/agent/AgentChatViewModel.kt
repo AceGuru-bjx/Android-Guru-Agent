@@ -1159,8 +1159,25 @@ class AgentChatViewModel @Inject constructor(
         activeBannerId = execute.banner.id
 
         currentJob = viewModelScope.launch {
-            taskController.execute(com.apex.agent.core.engine.UserInput.text(execute.agentPrompt))
-                .collect { event -> handleEvent(event) }
+            // 竞态防护：TaskRuntime.execute 对并发执行是同步 check(tryClaim()) —— 用户在
+            // "停止"后 isLoading 已复位但引擎 claim 尚未释放的窗口期内发送斜杠指令，
+            // 会直接抛 IllegalStateException 且此处原本无 catch → 进程闪退。
+            // 与 runEngine 保持一致的兜底：捕获后降级为错误卡片并复位 isLoading。
+            try {
+                taskController.execute(com.apex.agent.core.engine.UserInput.text(execute.agentPrompt))
+                    .collect { event -> handleEvent(event) }
+            } catch (e: CancellationException) {
+                throw e // 协程取消必须重抛（发送新指令会 cancel 旧 job）
+            } catch (e: Exception) {
+                _uiState.update { s ->
+                    s.copy(
+                        messages = s.messages + AgentUiMessage.Error(
+                            message = "指令执行失败：${e.message ?: e::class.simpleName}"
+                        ),
+                        isLoading = false
+                    )
+                }
+            }
         }.apply {
             invokeOnCompletion {
                 routeContextKind = null

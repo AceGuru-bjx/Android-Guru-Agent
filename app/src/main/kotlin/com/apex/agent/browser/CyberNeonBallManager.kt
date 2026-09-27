@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.CycleInterpolator
@@ -53,6 +54,9 @@ class CyberNeonBallManager @Inject constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val tag = "cyber_neon_ball"
 
+    /** 脉冲动画引用：INFINITE ObjectAnimator 必须保留引用才能 cancel（内存泄漏修复）。 */
+    private var pulseAnim: ObjectAnimator? = null
+
     @Volatile private var ballView: View? = null
     @Volatile private var currentState = CyberState.RUNNING
 
@@ -69,6 +73,7 @@ class CyberNeonBallManager @Inject constructor(
      */
     fun dismiss() = mainHandler.post {
         ballView = null
+        cancelPulse()
         runCatching { EasyFloat.dismiss(tag) }
     }
 
@@ -155,6 +160,9 @@ class CyberNeonBallManager @Inject constructor(
         } else {
             pulseRing.visibility = View.INVISIBLE
             pulseRing.clearAnimation()
+            // 修复：clearAnimation() 只清 View 补间动画，停不掉 INFINITE 属性动画——
+            // 无限循环的 ObjectAnimator 强持有 pulseRing 及整棵球 View 树，dismiss 后依然每帧 invalidate。
+            cancelPulse()
         }
     }
 
@@ -197,23 +205,38 @@ class CyberNeonBallManager @Inject constructor(
 
     private fun startPulse(pulseView: View) {
         pulseView.clearAnimation()
+        cancelPulse()
         val pX = PropertyValuesHolder.ofFloat(View.SCALE_X, 1.0f, 1.4f)
         val pY = PropertyValuesHolder.ofFloat(View.SCALE_Y, 1.0f, 1.4f)
         val pA = PropertyValuesHolder.ofFloat(View.ALPHA, 0.8f, 0.0f)
-        ObjectAnimator.ofPropertyValuesHolder(pulseView, pX, pY, pA).apply {
+        pulseAnim = ObjectAnimator.ofPropertyValuesHolder(pulseView, pX, pY, pA).apply {
             duration = 1200
             repeatCount = ObjectAnimator.INFINITE
             start()
         }
     }
 
+    private fun cancelPulse() {
+        runCatching { pulseAnim?.cancel() }
+        pulseAnim = null
+    }
+
     private fun triggerVibration() {
-        val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(150)
+        // 修复：vibrate() 隐式依赖 android.permission.VIBRATE（此前 manifest 未声明），
+        // 且部分 ROM 在勿扰/权限异常时也会抛 SecurityException —— 震动是体验增强，
+        // 任何失败都必须静默吞掉，绝不能让 NEED_HUMAN 脉冲路径炸掉主线程 runnable。
+        runCatching {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (
+                    appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                    )?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            } ?: return
+            if (vibrator.hasVibrator() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE))
+            }
         }
     }
 }
