@@ -283,6 +283,28 @@ class TerminalViewModel @Inject constructor(
         }
     }
 
+    // ═══ T87：本地 Shell profile（mksh rc 播种）═══
+
+    /** 本地 shell home（$filesDir/linux/shell —— 可写，untrusted_app 域内）。 */
+    private val localShellHome by lazy {
+        java.io.File(context.filesDir, "linux/shell")
+    }
+
+    /**
+     * 确保 mksh rc 就绪并返回注入 env（HOME/ENV/TERM/COLORTERM）。
+     *
+     * 失败（磁盘满等）→ 空 map：会话照常创建（回到旧行为 —— 裸提示符），
+     * 绝不因 profile 失败拒绝创建 shell。
+     */
+    private fun ensureLocalShellProfile(): Map<String, String> = runCatching {
+        val home = com.apex.agent.platform.terminal.profile.GuestShellProfile.ensureShellHome(localShellHome)
+        val rc = java.io.File(home, com.apex.agent.platform.terminal.profile.GuestShellProfile.RC_FILENAME)
+        if (!rc.isFile || rc.length() == 0L) {
+            rc.writeText(com.apex.agent.platform.terminal.profile.GuestShellProfile.generate(android.os.Build.MODEL ?: "android"))
+        }
+        com.apex.agent.platform.terminal.profile.GuestShellProfile.shellEnv(home.absolutePath, rc.absolutePath)
+    }.getOrDefault(emptyMap())
+
     private suspend fun createSessionInternal(backendId: String) {
         if (backendId == BACKEND_UBUNTU) {
             // Ubuntu 会话：先确保 rootfs + bootstrap 就绪（长时操作，进度经
@@ -303,8 +325,11 @@ class TerminalViewModel @Inject constructor(
         //（proot --version 探针，create 内各做一次共 2 次）、符号链接创建、home
         // skel 拷贝、workspace mkdirs、forkpty 本身。旧实现直接跑在
         // viewModelScope(Main.immediate)，慢设备上卡顿/StrictMode 违例/ANR 风险。
+        // T87：LOCAL 会话注入 mksh profile（可写 HOME + $ENV rc + TERM）——
+        // Shell 模式补 user@host:cwd 提示符、历史记录、cmds/help 命令发现。
+        val localEnv = if (backendId == BACKEND_LOCAL) ensureLocalShellProfile() else emptyMap()
         val created = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            terminalRuntime.create(backendId = backendId)
+            terminalRuntime.create(backendId = backendId, env = localEnv)
         }
         val result = created.getOrElse { e ->
             _notice.value = lang.getString(R.string.term_notice_create_failed, e.message?.take(120) ?: "")
@@ -356,6 +381,8 @@ class TerminalViewModel @Inject constructor(
                 _notice.value = lang.getString(R.string.term_notice_blocked, candidate.take(40))
                 return // 不写入（含回车）—— readline 行保持未提交；缓冲保留继续同步追加
             }
+            // T87：提交时刻记入历史（通过门禁的命令才有资格入史）
+            if (candidate.isNotBlank()) commandHistory.record(candidate)
             // 放行：行缓冲重置，回车后的剩余字符属于下一行缓冲
             pendingLine.setLength(0)
             val rest = text.substring(newlineIdx + 1)
@@ -366,7 +393,44 @@ class TerminalViewModel @Inject constructor(
 
         viewModelScope.launch {
             terminalRuntime.write(sid, InputOwner.USER, TerminalRuntime.WriteKind.RAW, text = text)
-                .onFailure { _notice.value = lang.getString(R.string.term_notice_input_failed, it.message?.take(80) ?: "") }
+                .onFailure { e ->
+                    // T87（Ubuntu「输入失败」诚实化）：WriteFailed 的最常见根因是
+                    // 会话进程已退出（master EIO）—— 旧文案「输入失败:WriteFailed」
+                    // 让用户以为是键盘/输入链路坏了。按错误语义分流：会话死 →
+                    // 「会话已退出」+ 重启指引；其余（策略拦截等）→ 原文。
+                    val msg = e.message ?: ""
+                    val dead = msg.contains("WriteFailed") || msg.contains("SessionNotFound") ||
+                        msg.contains("SessionClosed") || msg.contains("session closed")
+                    _notice.value = if (dead) {
+                        lang.getString(R.string.term_notice_session_dead)
+                    } else {
+                        lang.getString(R.string.term_notice_input_failed, msg.take(80))
+                    }
+                }
+        }
+    }
+
+    /**
+     * T87：重启当前会话（保留 backend）—— 死会话覆盖层的「重启会话」按钮。
+     *
+     * 语义：close（force）→ 同 backend 重建。Agent 创建的会话（backend 记录为
+     * "agent"）按 runtimeType 映射回真实 backendId（LINUX → Ubuntu，否则 LOCAL）。
+     */
+    fun restartActiveSession() {
+        val active = _activeSessionId.value ?: return
+        val tab = _sessions.value.firstOrNull { it.id == active } ?: return
+        val backend = when {
+            tab.backendId == BACKEND_UBUNTU || tab.backendId == BACKEND_LOCAL -> tab.backendId
+            tab.runtimeType == "LINUX" -> BACKEND_UBUNTU
+            else -> BACKEND_LOCAL
+        }
+        viewModelScope.launch {
+            terminalRuntime.close(active, force = true)
+            sessionBackends.remove(active)
+            sessionTitles.remove(active)
+            if (_activeSessionId.value == active) pendingLine.setLength(0)
+            refreshSessionsInternal()
+            createMutex.withLock { createSessionInternal(backend) }
         }
     }
 
@@ -387,6 +451,8 @@ class TerminalViewModel @Inject constructor(
                         _notice.value = lang.getString(R.string.term_notice_blocked, candidate.take(40))
                         return@launch
                     }
+                    // T87：提交时刻记入历史
+                    if (candidate.isNotBlank()) commandHistory.record(candidate)
                     pendingLine.setLength(0)
                 }
                 TerminalKey.BACKSPACE -> if (pendingLine.isNotEmpty()) pendingLine.setLength(pendingLine.length - 1)
@@ -653,6 +719,44 @@ class TerminalViewModel @Inject constructor(
     }
 
     // ═══ 终端设置 ═══
+    // T87：配色方案状态（TerminalColorSchemeSettings 持久化 + 热切换）。
+    // 零方案代码进 VM（SRP）：id/boldAsBright 透传给渲染树。
+    private val schemeSettings = com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeSettings(
+        com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeSettings.PrefsStore(
+            context, "apex_terminal"
+        )
+    )
+
+    /** 当前配色方案 id（渲染树解析为完整方案）。 */
+    val colorSchemeId: StateFlow<String> = schemeSettings.schemeId
+
+    /** bold → 亮色提升（xterm 传统；ls/ls 彩色输出依赖）。 */
+    val boldAsBright: StateFlow<Boolean> = schemeSettings.boldAsBright
+
+    /** 切换配色方案（未知 id 拒绝；渲染树经 StateFlow 自动换色）。 */
+    fun setColorScheme(id: String) {
+        schemeSettings.setSchemeId(id)
+    }
+
+    /** bold-as-bright 开关。 */
+    fun setBoldAsBright(enabled: Boolean) {
+        schemeSettings.setBoldAsBright(enabled)
+    }
+
+    /** 当前配色方案本地化显示名（zh → nameZh；供设置抽屉展示）。 */
+    fun currentSchemeDisplayName(): String =
+        schemeSettings.scheme.displayName(isZhLanguage())
+
+    /** 语言判定（zh 显式 → 中文；system → 设备 Locale；en → 英文）。 */
+    private fun isZhLanguage(): Boolean = when (lang.language.value) {
+        "zh" -> true
+        "en" -> false
+        else -> runCatching {
+            val locales = context.resources.configuration.locales
+            locales.size() > 0 && locales[0].language == "zh"
+        }.getOrDefault(false)
+    }
+
     data class TerminalSettings(
         val fontSize: Int = 13,
         val monochrome: Boolean = false,
@@ -678,6 +782,60 @@ class TerminalViewModel @Inject constructor(
 
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<TerminalSettings> = _settings.asStateFlow()
+
+    // ═══ T87：命令历史（提交时刻记录；设置抽屉可查看/清空）═══
+    private val commandHistory =
+        com.apex.agent.ui.screen.terminal.history.TerminalCommandHistory(context)
+
+    /** 历史（最新在前；Termux history 的可视化等价物）。 */
+    val commandHistoryEntries: StateFlow<List<String>> = commandHistory.entries
+
+    /** 清空历史（设置抽屉「清空」确认后调用）。 */
+    fun clearCommandHistory() = commandHistory.clear()
+
+    // ═══ T87：扩展键（用户自定义宏行 —— Termux extra-keys 等价物）═══
+    private val _extraKeys = MutableStateFlow(loadExtraKeys())
+
+    /** 扩展键（用户宏；空 = 不渲染扩展行）。 */
+    val extraKeys: StateFlow<List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>> =
+        _extraKeys.asStateFlow()
+
+    /** 追加一个扩展键（spec 形如 `标签=cmd:apt-get update`；非法 spec 静默拒绝）。 */
+    fun addExtraKey(spec: String) {
+        val key = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.parseKey(spec.trim())
+            ?: return
+        val next = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.appendKey(
+            listOf(_extraKeys.value), key
+        ).flatten()
+        _extraKeys.value = next
+        persistExtraKeys(next)
+    }
+
+    /** 移除指定标签的扩展键。 */
+    fun removeExtraKey(label: String) {
+        val next = _extraKeys.value.filterNot { it.label == label }
+        _extraKeys.value = next
+        persistExtraKeys(next)
+    }
+
+    /** 重置为默认布局（设置抽屉「恢复默认」）。 */
+    fun resetExtraKeys() {
+        val next = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.DEFAULT_LAYOUT.flatten()
+        _extraKeys.value = next
+        persistExtraKeys(next)
+    }
+
+    private fun loadExtraKeys(): List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey> {
+        val stored = prefs.getString("term_extra_keys", null)
+        return com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.parse(stored)
+            ?.flatten()
+            ?: com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.DEFAULT_LAYOUT.flatten()
+    }
+
+    private fun persistExtraKeys(keys: List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>) {
+        val ser = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.serialize(listOf(keys))
+        prefs.edit().putString("term_extra_keys", ser).apply()
+    }
 
     fun updateSettings(block: TerminalSettings.() -> TerminalSettings) {
         val next = _settings.value.block()

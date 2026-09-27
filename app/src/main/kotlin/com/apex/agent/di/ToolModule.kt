@@ -27,6 +27,7 @@ import com.apex.agent.platform.terminal.tools.legacy.LegacyReadTool
 import com.apex.agent.platform.terminal.tools.legacy.LegacySendTool
 import com.apex.agent.platform.terminal.tools.legacy.LegacyListTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalBackendsTool
+import com.apex.agent.platform.terminal.tools.v2.TerminalDiagnosticsTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalCloseTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalCreateTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalExecTool
@@ -214,6 +215,9 @@ val TERMINAL_TOOL_RUN_POLICIES: Map<String, ToolRunPolicy> = mapOf(
     // terminal.linux.status 全量 6 维检查：每维一次 proot exec（10~30s 级），
     //   全量可达数分钟（quick=true 轻量）。
     "terminal.linux.status" to ToolRunPolicy(timeoutMs = 300_000L, maxRetries = 0),
+    // terminal.diagnostics（T87）：会话/后端面秒回；smokeTest=true 含一次
+    //   真实 exec 探针（最坏 600s —— 与 terminal.exec 同预算）。
+    "terminal.diagnostics" to ToolRunPolicy(timeoutMs = 660_000L, maxRetries = 0),
     // terminal.wait：schema 无 timeoutMs 上限，模型可请求 > 60s 等待
     //   （默认 60s 恰好撞 mutating 预算线）。给足等待自身上限 + 余量。
     "terminal.wait" to ToolRunPolicy(timeoutMs = 660_000L, maxRetries = 0)
@@ -740,6 +744,34 @@ object ToolModule {
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
         // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
+        // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
+        // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
+        //（rootfs 就绪 → Ubuntu；否则回退 su>Shizuku>local-sh）—— 探到的就是
+        // Agent 实际会走的那条链路。
+        registry.register(SafeAgentTool(TerminalToolAdapter(
+            TerminalDiagnosticsTool(
+                runtime = terminalRuntime,
+                execProbe = { cmd ->
+                    runCatching {
+                        val probeEngine = ExecEngine(ProotCommandSpawner(
+                            hostEnvironment = hostEnvironment,
+                            rootfsDir = rootfsBaseDir,
+                            isRootfsReady = { File(rootfsBaseDir, "current").exists() },
+                            defaultWorkspaceDir = File(context.filesDir, "linux/workspaces/default"),
+                            persistentHomeDir = File(context.filesDir, "linux/home"),
+                            fallback = PrivilegedCommandSpawner()
+                        ))
+                        val result = probeEngine.execute(
+                            com.apex.agent.platform.terminal.exec.ExecRequest(
+                                command = cmd,
+                                timeoutMs = 120_000L
+                            )
+                        )
+                        result.stdout.ifBlank { result.stderr }
+                    }.getOrNull()
+                }
+            )
+        )))
         registry.register(SafeAgentTool(TerminalToolAdapter(
             TerminalUbuntuInstallTool(rootfsProvisioner, rootfsTarget)
         )))

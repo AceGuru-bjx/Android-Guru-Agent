@@ -1011,6 +1011,9 @@ Android-Guru-Agent/
 | [docs/liquid-glass-system.md](docs/liquid-glass-system.md) | **Liquid Glass 玻璃组件系统**：架构/七档材质/组件 API/真实性验收矩阵 |
 | [docs/memory-and-workflow-research.md](docs/memory-and-workflow-research.md) | **记忆与工作流调研报告**：对标 MemGPT/Mem0/A-MEM/Zep/Voyager/Claude Code/OpenHands/SWE-agent |
 | [docs/terminal-api.md](docs/terminal-api.md) | 终端 API 契约 |
+| [docs/terminal/TERMINAL_EXPERIENCE_OVERHAUL_T87.md](docs/terminal/TERMINAL_EXPERIENCE_OVERHAUL_T87.md) | **T87 终端体验大修**：7 项用户实测反馈的根因对照与修复（输入失败/exec 失败捕获、滚动空白、黑字、21 套配色、apt 引导） |
+| [docs/terminal/AGENT_TERMINAL_CALLCHAIN.md](docs/terminal/AGENT_TERMINAL_CALLCHAIN.md) | **Agent↔终端调用链**：全部 terminal.* 工具表 + exec 链路图 + terminal.diagnostics 自证 |
+| [docs/terminal/TERMINAL_CONFIGURATION.md](docs/terminal/TERMINAL_CONFIGURATION.md) | **终端配置系统**：配色/扩展键宏语法/持久化键/新增方案指南 |
 | [docs/ubuntu-rootfs-t72.md](docs/ubuntu-rootfs-t72.md) | T72 Ubuntu rootfs 供给设计 |
 | [docs/cs-mem-gaps-spec.md](docs/cs-mem-gaps-spec.md) | cs-mem 缺口补全规格（含缺口 #9 拓扑迁移） |
 | [docs/agent-modes.md](docs/agent-modes.md) | 六种模式详解 |

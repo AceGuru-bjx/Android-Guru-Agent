@@ -132,4 +132,34 @@
     <string name="term_notice_session_gone">❌ 会话已关闭\n</string>
     <string name="term_notice_truncated">…(已截断)\n</string>
     <string name="term_notice_fallback_android">⚠️ Ubuntu 会话不可用 — 降级 Android shell（apt 命令可能失败）\n</string>
+    <!-- ═══ T87: 终端体验大修 ═══ -->
+    <!-- 会话退出（诚实反馈，替代裸「输入失败」）-->
+    <string name="term_notice_session_dead">会话已退出（进程结束）。点「重启会话」或新建会话。</string>
+    <string name="term_session_dead_title">会话已退出</string>
+    <string name="term_session_dead_ubuntu">Ubuntu（proot）进程已结束 —— 退出或被系统终止。\n重启会以同一环境重新拉起 bash。</string>
+    <string name="term_session_dead_local">Android shell 进程已结束。\n重启将打开新的本地 shell。</string>
+    <string name="term_session_restart">重启会话</string>
+
+    <!-- 配色方案选择器（Termux 风格主题）-->
+    <string name="term_scheme_section">配色方案</string>
+    <string name="term_scheme_current">当前主题</string>
+    <string name="term_scheme_change">更换</string>
+    <string name="term_scheme_picker_title">终端配色方案</string>
+    <string name="term_scheme_picker_desc">31 套内置 Termux 风格主题 —— 点击即时生效，无需重启会话</string>
+    <string name="term_bold_as_bright">粗体渲染为亮色</string>
+    <string name="term_bold_as_bright_desc">xterm 传统：粗体 + 基础色显示为亮色变体（ls 等彩色输出依赖此约定）</string>
+
+    <!-- 命令历史 -->
+    <string name="term_history_section">命令历史</string>
+    <string name="term_history_desc">本终端提交过的命令（持久化，重启不丢）</string>
+    <string name="term_history_open">打开历史</string>
+    <string name="term_history_title">命令历史</string>
+    <string name="term_history_hint">点击发送到当前会话 · 复制图标进剪贴板</string>
+    <string name="term_history_empty">还没有命令 —— 敲点什么吧</string>
+    <string name="term_history_clear">清空</string>
+    <!-- 扩展键（Termux extra-keys 等价物）-->
+    <string name="term_extra_keys_section">扩展键行</string>
+    <string name="term_extra_keys_desc">键盘上方的自定义宏按钮（如 apt修复=cmd:apt-fix）。格式：标签=cmd:…（执行）/ 标签=text:…（输入）/ 标签=key:F1 / 标签=ctrl:c / 标签=paste</string>
+    <string name="term_extra_keys_hint">标签=cmd:apt-get update</string>
+    <string name="term_extra_keys_reset">恢复默认</string>
 </resources>

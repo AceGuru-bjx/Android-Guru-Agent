@@ -86,6 +86,16 @@ interface NativePty {
     fun nativeGetExitCode(sessionId: Int): Int
 
     /**
+     * T87：execv 失败的确切原因（null/空 = exec 成功或会话不存在）。
+     *
+     * [nativeCreateSessionArgv] 返回后立即可查（native 构造期已通过 CLOEXEC
+     * 报告管道定论）。「创建成功但进程即死」的会话（真机 proot ENOENT/
+     * ELIBBAD/EACCES 等）由此获得确切根因，而不是让后续每次 write 的
+     * WriteFailed（EIO）当「输入失败」误导用户。
+     */
+    fun nativeGetSpawnError(sessionId: Int): String?
+
+    /**
      * Block until the child exits or [timeoutMs] elapses. Returns the exit code, or -1 on timeout.
      * Spec §44.1 EXTEND: reliable exit detection (replaces settle-time inference).
      */

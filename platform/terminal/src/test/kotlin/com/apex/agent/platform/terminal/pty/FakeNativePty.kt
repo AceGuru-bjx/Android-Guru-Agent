@@ -42,6 +42,8 @@ class FakeNativePty : NativePty {
         var exited: AtomicBoolean = AtomicBoolean(false),
         var exitCode: AtomicInteger = AtomicInteger(-1),
         var currentCommand: String? = null,
+        // T87：可注入的 exec 失败原因（默认 null = exec 成功）。
+        var spawnError: String? = null,
         var commandThread: Thread? = null,
         var interrupted: AtomicBoolean = AtomicBoolean(false),
         var runningJob: AtomicBoolean = AtomicBoolean(false),
@@ -55,6 +57,10 @@ class FakeNativePty : NativePty {
     private val sessions = ConcurrentHashMap<Int, Session>()
     private val idCounter = AtomicInteger(0)
     private val pidCounter = AtomicInteger(20000)
+
+    /** T87：下次 nativeCreateSessionArgv 注入的 exec 失败原因（单发）。 */
+    @Volatile
+    var pendingSpawnFailure: String? = null
 
     override fun nativeCreateSession(shell: String, cwd: String, rows: Int, cols: Int, env: Array<String>): Int {
         val id = idCounter.incrementAndGet()
@@ -83,6 +89,10 @@ class FakeNativePty : NativePty {
             id = id, shell = argv[0], cwd = cwd, rows = rows, cols = cols, pid = pid,
             argv = argv, spawnEnv = env.toMap()
         )
+        // T87：可注入的 exec 失败模拟（对应真实 native 层 CLOEXEC 报告管道 ——
+        // SessionManagerImpl.createFromSpec 据此当场揭穿死会话）。
+        pendingSpawnFailure?.let { s.spawnError = it; s.alive.set(false); s.exited.set(true) }
+        pendingSpawnFailure = null
         sessions[id] = s
         s.outputBuffer.append("FakeNativePty shell ready\n\$ ")
         return id
@@ -194,6 +204,13 @@ class FakeNativePty : NativePty {
     override fun nativeGetExitCode(sessionId: Int): Int {
         val s = sessions[sessionId] ?: return -1
         return if (s.exited.get()) s.exitCode.get() else -1
+    }
+
+    // T87：假实现恒无 spawn 错误（exec 失败路径由真实 JNI 层覆盖；
+    // 需要模拟时可设置 session.spawnError）。
+    override fun nativeGetSpawnError(sessionId: Int): String? {
+        val s = sessions[sessionId] ?: return null
+        return s.spawnError
     }
 
     override fun nativeWaitExit(sessionId: Int, timeoutMs: Long): Int {

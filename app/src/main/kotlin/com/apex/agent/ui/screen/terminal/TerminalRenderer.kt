@@ -89,6 +89,8 @@ import com.apex.agent.platform.terminal.io.KeyEventMapping
 import com.apex.agent.platform.terminal.io.TerminalKey
 import com.apex.agent.terminalemulator.RenderCell
 import com.apex.agent.terminalemulator.TerminalRenderSnapshot
+import com.apex.agent.ui.screen.terminal.scheme.LocalTerminalBoldAsBright
+import com.apex.agent.ui.screen.terminal.scheme.LocalTerminalColorScheme
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -117,7 +119,18 @@ fun TerminalRenderer(
 ) {
     val render by viewModel.renderState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val schemeId by viewModel.colorSchemeId.collectAsStateWithLifecycle()
+    val boldAsBright by viewModel.boldAsBright.collectAsStateWithLifecycle()
+    val extraKeys by viewModel.extraKeys.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    // T87：方案注入 —— 渲染树内的所有内容色（背景/前景/光标/选区/ANSI 16 色）
+    // 全部从 CompositionLocal 解析，切换方案即时生效（零引擎改动）。
+    androidx.compose.runtime.CompositionLocalProvider(
+        com.apex.agent.ui.screen.terminal.scheme.LocalTerminalColorScheme provides
+            com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeRegistry.byId(schemeId),
+        com.apex.agent.ui.screen.terminal.scheme.LocalTerminalBoldAsBright provides boldAsBright
+    ) {
 
     // T86：窗口焦点变化 → ESC[I / ESC[O（DECSET 1004；vim FocusGained/Lost、
     // tmux focus-events）。用生命周期近似（ON_RESUME=聚焦，ON_PAUSE=失焦）。
@@ -139,6 +152,7 @@ fun TerminalRenderer(
         fontSize = settings.fontSize,
         monochrome = settings.monochrome,
         showKeybar = settings.showKeybar,
+        extraKeys = extraKeys,
         onText = viewModel::sendInput,
         onKey = viewModel::sendKey,
         onControl = viewModel::sendControlChar,
@@ -177,6 +191,7 @@ fun TerminalRenderer(
         },
         modifier = modifier
     )
+    }  // CompositionLocalProvider end
 }
 
 /** 单次轻振动（30ms）。失败静默 —— 没有振动硬件/权限不该崩 UI。 */
@@ -190,22 +205,6 @@ private fun vibrateOnce(context: android.content.Context) {
     )
 }
 
-/** 终端主题（深色底自含调色 —— 终端内容不受 app 主题影响；T85 对齐 ConsoleTheme
- * 的 mint 强调色，整页视觉连续：页 chrome 0xFF0C1210 / 内容区 0xFF0E1411）。
- * ★ 字色改纯白（用户反馈「终端应该用白色字体」）：原 0xFFD6E5DC 偏绿发暗，
- * 在深色底上对比度不足（长输出阅读疲劳）。默认前景色改为纯白，错误/高亮
- * 仍由 cell 级 ANSI 着色覆盖；选区/光标保持 mint 强调色不变。 */
-private object TerminalTheme {
-    val background = Color(0xFF0E1411)
-    val foreground = Color(0xFFFFFFFF)
-    val selection = Color(0x664EE9B0)
-    val cursor = Color(0xFF7CF0C6)
-    val toolbarBg = Color(0xFF111815)
-    val toolbarKey = Color(0xFF1A2420)
-    val toolbarKeyHi = Color(0xFF4EE9B0)
-    val toolbarKeyText = Color(0xFFE8F2ED)
-}
-
 /** cell 级选择区间（行/列；列区间左闭右开，含 from 至 to 前一列）。 */
 private data class SelRange(val startRow: Int, val startCol: Int, val endRow: Int, val endCol: Int)
 
@@ -215,6 +214,7 @@ fun TerminalGrid(
     fontSize: Int,
     monochrome: Boolean,
     showKeybar: Boolean = true,
+    extraKeys: List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey> = emptyList(),
     onText: (String) -> Unit,
     onKey: (TerminalKey) -> Unit,
     onControl: (Char) -> Unit,
@@ -240,7 +240,17 @@ fun TerminalGrid(
     val keyboardController = LocalSoftwareKeyboardController.current
 
     // ── 字体度量（monospace）：探测字符宽 + 1.25×行高 ──
-    val baseStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = fontSize.sp)
+    // P0（黑字根因）：baseStyle 此前不携带 color —— 无 ANSI 着色的普通 cell
+    //（plain shell 输出 / 提示符正文）落不到任何 SpanStyle，BasicText 兜底色是
+    // 纯黑，在深色终端底（0xFF0E1411）上「黑字黑底啥也看不清」（用户实测反馈）。
+    // 修复：基础样式显式继承终端主题前景色（scheme 解析后的白），cell 级 ANSI
+    // 着色仍在其上覆盖。
+    val activeScheme = LocalTerminalColorScheme.current
+    val baseStyle = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontSize = fontSize.sp,
+        color = activeScheme.foregroundC
+    )
     val textMeasurer = rememberTextMeasurer()
     val charWidthPx = remember(fontSize) {
         val probe = textMeasurer.measure("0".repeat(10), baseStyle)
@@ -258,9 +268,17 @@ fun TerminalGrid(
     // rememberUpdatedState 让手势闭包读到最新行内容（避免 pointerInput 陈旧捕获）
     val rowsState = rememberUpdatedState(allRows)
 
-    // ── 滚动：跟随输出吸底；用户上滚即脱离 ──
+    // ── 滚动：跟随输出；用户上滚即脱离 ──
+    // P0（大段空白根因）：旧实现 follow 时 scrollToItem(totalRows - 1) —— 列表
+    // 末项是屏幕最后一行，而提示符之后整屏都是空行 → 每次输出/输入后视口滚到
+    // 「最后一行置顶」，用户看到的是提示符上方一大段空白 + 键盘（打开终端即
+    // 空屏；跑完命令想敲第二条，中间又是整屏空白 —— 用户实测反馈原话）。
+    // 修复（Termux 语义）：跟随目标 = 光标行（提示符所在行）贴视口底部，
+    // 提示符永远紧贴键盘上沿，其下的空屏行自然沉到视口外。
     val listState = rememberLazyListState()
     var follow by remember { mutableStateOf(true) }
+    // 视口尺寸（resize 转发也复用；提前声明供 follow 目标计算）
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
             .collect { (scrolling, canForward) ->
@@ -268,8 +286,16 @@ fun TerminalGrid(
                 else if (scrolling) follow = false
             }
     }
-    LaunchedEffect(totalRows) {
-        if (follow && totalRows > 0) listState.scrollToItem(totalRows - 1)
+    /** 光标行（含 scrollback 偏移）的列表索引。 */
+    val cursorItemIndex = render?.let { it.scrollback.size + it.cursorRow } ?: 0
+    /** follow 目标索引：光标行贴底（视口能容纳 viewportRows 行时首行索引）。 */
+    suspend fun followTarget(): Int {
+        if (totalRows <= 0) return 0
+        val viewportRows = (viewSize.height / lineHeightPx).toInt().coerceAtLeast(1)
+        return (cursorItemIndex - viewportRows + 1).coerceIn(0, (totalRows - 1).coerceAtLeast(0))
+    }
+    LaunchedEffect(follow, totalRows, cursorItemIndex, lineHeightPx, viewSize.height) {
+        if (follow && totalRows > 0) listState.scrollToItem(followTarget())
     }
 
     // ── 选择状态（cell 级；anchor=起点，head=终点）──
@@ -470,7 +496,7 @@ fun TerminalGrid(
     }
 
     // ── Resize：视图尺寸 → rows/cols（与当前 PTY 尺寸不同才发）──
-    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    //（viewSize 已提前声明于滚动段 —— 此处仅消费）
     val currentRows = render?.rows ?: 0
     val currentCols = render?.cols ?: 0
     LaunchedEffect(viewSize, charWidthPx, lineHeightPx, currentRows, currentCols) {
@@ -486,7 +512,7 @@ fun TerminalGrid(
         if (bellSeq > 0L) onBell()
     }
 
-    Column(modifier = modifier.fillMaxSize().background(TerminalTheme.background)) {
+    Column(modifier = modifier.fillMaxSize().background(activeScheme.backgroundC)) {
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -640,14 +666,14 @@ fun TerminalGrid(
                             .background(Color(0xE6263041), RoundedCornerShape(14.dp))
                             .clickable {
                                 follow = true
-                                scope.launch { listState.scrollToItem(totalRows - 1) }
+                                scope.launch { listState.scrollToItem(followTarget()) }
                             },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             stringResource(R.string.term_jump_latest),
                             fontSize = 12.sp,
-                            color = TerminalTheme.cursor,
+                            color = activeScheme.cursorC,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                         )
                     }
@@ -713,6 +739,19 @@ fun TerminalGrid(
             )
         }
 
+        // ── T87：扩展键行（用户自定义宏；空布局零占位）──
+        if (extraKeys.isNotEmpty()) {
+            com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysBar(
+                layout = listOf(extraKeys),
+                onText = onText,
+                onKey = ::sendKeyWithLatches,
+                onControl = onControl,
+                onPaste = {
+                    clipboard.getText()?.text?.let { onPaste(it) }
+                }
+            )
+        }
+
         // ── 特殊键工具栏（触屏必备；横向滚动；可在终端设置中隐藏换显示区）──
         if (showKeybar) {
             KeyToolbar(
@@ -743,7 +782,11 @@ private fun TerminalRow(
     lineHeightDp: Dp,
     monochrome: Boolean
 ) {
-    val annotated = remember(cells, monochrome, baseStyle.fontSize) { buildRowAnnotated(cells, monochrome) }
+    val scheme = LocalTerminalColorScheme.current
+    val boldAsBright = LocalTerminalBoldAsBright.current
+    val annotated = remember(cells, monochrome, baseStyle.fontSize, scheme, boldAsBright) {
+        buildRowAnnotated(cells, monochrome, scheme, boldAsBright)
+    }
     BasicText(
         text = annotated,
         style = baseStyle,
@@ -756,8 +799,15 @@ private fun TerminalRow(
     )
 }
 
-/** 逐 cell 构建 AnnotatedString：同 style 连续段合并；hidden → 等宽空格。 */
-private fun buildRowAnnotated(cells: List<RenderCell>, monochrome: Boolean): AnnotatedString {
+/** 逐 cell 构建 AnnotatedString：同 style 连续段合并；hidden → 等宽空格。
+ *  T87：颜色经 [TerminalAnsiRemapper] 从引擎标准板重映射到当前 scheme（含
+ *  bold-as-bright 与 inverse 解析）—— 换肤零引擎改动。 */
+private fun buildRowAnnotated(
+    cells: List<RenderCell>,
+    monochrome: Boolean,
+    scheme: com.apex.agent.ui.screen.terminal.scheme.TerminalColorScheme,
+    boldAsBright: Boolean
+): AnnotatedString {
     if (cells.isEmpty()) return AnnotatedString("")
     return buildAnnotatedString {
         var i = 0
@@ -771,7 +821,7 @@ private fun buildRowAnnotated(cells: List<RenderCell>, monochrome: Boolean): Ann
                 else builder.append(cell.text)
             }
             append(builder.toString())
-            spanStyleFor(cells[i], monochrome)?.let { addStyle(it, i, i + (j - i)) }
+            spanStyleFor(cells[i], monochrome, scheme, boldAsBright)?.let { addStyle(it, i, i + (j - i)) }
             i = j
         }
     }
@@ -781,8 +831,15 @@ private fun buildRowAnnotated(cells: List<RenderCell>, monochrome: Boolean): Ann
 private fun sameStyle(a: RenderCell, b: RenderCell): Boolean =
     a.fg == b.fg && a.bg == b.bg && a.flags == b.flags
 
-/** RenderCell → SpanStyle；monochrome 忽略颜色（保留字形/下划线语义）。 */
-private fun spanStyleFor(cell: RenderCell, monochrome: Boolean): SpanStyle? {
+/** RenderCell → SpanStyle；monochrome 忽略颜色（保留字形/下划线语义）。
+ *  T87：fg/bg 经 [TerminalAnsiRemapper] 映射到当前 scheme（bold-as-bright /
+ *  inverse / dim 全部遵守 scheme 语义色）。 */
+private fun spanStyleFor(
+    cell: RenderCell,
+    monochrome: Boolean,
+    scheme: com.apex.agent.ui.screen.terminal.scheme.TerminalColorScheme,
+    boldAsBright: Boolean
+): SpanStyle? {
     val inverse = cell.flags and RenderCell.FLAG_INVERSE != 0
     val bold = cell.flags and RenderCell.FLAG_BOLD != 0
     val dim = cell.flags and RenderCell.FLAG_DIM != 0
@@ -793,21 +850,31 @@ private fun spanStyleFor(cell: RenderCell, monochrome: Boolean): SpanStyle? {
     var fg: Color? = null
     var bg: Color? = null
     if (!monochrome) {
-        val rawFg = if (cell.fg != 0L) Color(cell.fg.toInt()) else null
-        val rawBg = if (cell.bg != 0L) Color(cell.bg.toInt()) else null
         if (inverse) {
-            // 反显：fg↔bg 交换；双默认反显 = 亮底深字
-            fg = rawBg ?: TerminalTheme.background
-            bg = rawFg ?: TerminalTheme.foreground
+            // 反显：fg↔bg 交换（含双默认 = 亮底深字 / 浅色 scheme 深底亮字）
+            val (ifg, ibg) = com.apex.agent.ui.screen.terminal.scheme.TerminalAnsiRemapper
+                .mapInverse(cell.fg, cell.bg, scheme)
+            fg = Color(ifg.toInt())
+            bg = Color(ibg.toInt())
         } else {
-            fg = rawFg
-            bg = rawBg
+            if (cell.fg != 0L) {
+                val mapped = com.apex.agent.ui.screen.terminal.scheme.TerminalAnsiRemapper
+                    .mapForeground(cell.fg, bold, boldAsBright, scheme)
+                fg = if (dim) Color(
+                    com.apex.agent.ui.screen.terminal.scheme.TerminalAnsiRemapper
+                        .dimColor(mapped).toInt()
+                ) else Color(mapped.toInt())
+            }
+            if (cell.bg != 0L) {
+                val mapped = com.apex.agent.ui.screen.terminal.scheme.TerminalAnsiRemapper
+                    .mapBackground(cell.bg, scheme)
+                bg = Color(mapped.toInt())
+            }
         }
-        if (dim && fg != null) fg = fg.copy(alpha = 0.55f)
     }
     if (fg == null && bg == null && !bold && !italic && !underline && !strike) return null
     return SpanStyle(
-        color = fg ?: TerminalTheme.foreground,
+        color = fg ?: Color.Unspecified,
         background = bg ?: Color.Unspecified,
         fontWeight = if (bold) FontWeight.Bold else null,
         fontStyle = if (italic) FontStyle.Italic else null,
@@ -832,15 +899,21 @@ private fun CursorOverlay(
     val itemIndex = render.scrollback.size + render.cursorRow
     val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == itemIndex }
         ?: return
-    // x：行内按 cell 宽度步进（宽字符 2 列），越界尾部按 1 列步进
+    // x：行内按 cell 宽度步进（宽字符 2 列），越界尾部按 1 列步进。
+    // P1（CJK 光标漂移）：渲染行已剔除宽字符 trail cell（列表比 VT 列号短），
+    // 旧循环用「VT 列号」直接索引渲染列表 → 每个宽字符后索引错位 1，光标
+    // 向右漂移。改为以「已消费的 VT 列数」终止循环，索引与列数解耦。
     val rowCells = render.lines.getOrNull(render.cursorRow) ?: emptyList()
     var x = 0f
-    var col = 0
-    while (col < render.cursorCol && col < rowCells.size) {
-        x += if (rowCells[col].flags and RenderCell.FLAG_WIDE != 0) charWidthPx * 2 else charWidthPx
-        col++
+    var i = 0
+    var vtCol = 0
+    while (vtCol < render.cursorCol && i < rowCells.size) {
+        val wide = rowCells[i].flags and RenderCell.FLAG_WIDE != 0
+        x += if (wide) charWidthPx * 2 else charWidthPx
+        vtCol += if (wide) 2 else 1
+        i++
     }
-    if (render.cursorCol > rowCells.size) x += (render.cursorCol - rowCells.size) * charWidthPx
+    if (render.cursorCol > vtCol) x += (render.cursorCol - vtCol) * charWidthPx
 
     val transition = rememberInfiniteTransition(label = "cursor-blink")
     val alpha by transition.animateFloat(
@@ -853,7 +926,7 @@ private fun CursorOverlay(
             .offset { IntOffset(x.roundToInt(), visible.offset) }
             .width(2.dp)
             .height(with(LocalDensity.current) { (lineHeightPx * 0.86f).toDp() })
-            .background(TerminalTheme.cursor.copy(alpha = 0.9f * alpha))
+            .background(LocalTerminalColorScheme.current.cursorC.copy(alpha = 0.9f * alpha))
     )
 }
 
@@ -866,6 +939,9 @@ private fun SelectionOverlay(
     lineHeightPx: Float
 ) {
     val range = selRange ?: return
+    // T87：CompositionLocal 只能在 @Composable 上下文读 —— Canvas 绘制 lambda
+    // 非 Composable，先取值再进绘制闭包。
+    val selectionColor = LocalTerminalColorScheme.current.selectionBackgroundC
     Canvas(modifier = Modifier.fillMaxSize()) {
         for (info in listState.layoutInfo.visibleItemsInfo) {
             val r = info.index
@@ -877,7 +953,7 @@ private fun SelectionOverlay(
             val x0 = columnX(cells, from, charWidthPx)
             val x1 = columnX(cells, to, charWidthPx)
             drawRect(
-                color = TerminalTheme.selection,
+                color = selectionColor,
                 topLeft = Offset(x0, info.offset.toFloat()),
                 size = Size(x1 - x0, lineHeightPx * 0.96f)
             )
@@ -897,139 +973,3 @@ private fun columnX(cells: List<RenderCell>, col: Int, charWidthPx: Float): Floa
     return x
 }
 
-// ═══════════════════════ 特殊键工具栏（T85 重做：Termux 风格）═══════════════════════
-
-/**
- * 触屏辅助键行（T85 重做 / T86 增强）。
- *
- * 设计对齐 Termux extra-keys：
- *  - **主簇**（滚动区前端，一眼可达）：拉起键盘 / 退格 / ESC / TAB / CTRL·SHIFT·ALT
- *    锁存 / 方向键 —— 高频键排在最前；
- *  - **扩展簇**（继续横向滚动）：常用 shell 符号（| ~ - / \ $ & 等）+ 控制码
- *    （^C ^D ^Z ^L ^U）+ HOME/END/PgUp/PgDn + F1-F12 + 粘贴；
- *  - 触控目标 36dp 高（Material 无障碍阈值）；锁存键高亮为 mint 实底深字，
- *    SHIFT/ALT 一次性（随下一个特殊键发出即释放）。
- */
-@Composable
-private fun KeyToolbar(
-    ctrlActive: Boolean,
-    onCtrlToggle: () -> Unit,
-    shiftActive: Boolean,
-    onShiftToggle: () -> Unit,
-    altActive: Boolean,
-    onAltToggle: () -> Unit,
-    onText: (String) -> Unit,
-    onKey: (TerminalKey) -> Unit,
-    onControl: (Char) -> Unit,
-    onShowKeyboard: () -> Unit,
-    onPaste: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TerminalTheme.toolbarBg)
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 5.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // ── 主簇 ──
-        // 显式拉起输入法：触屏上"点一下没反应"的兜底入口
-        ToolbarKey("⌨", emphasized = true) { onShowKeyboard() }
-        // 退格：隐藏 IME 桥的缓冲恒为空，输入法拿不到"可删除的 surrounding text"，
-        // 触屏上必须给一个确定可用的删除键（否则打错字只能靠 Ctrl+U 整行重来）。
-        ToolbarKey("⌫", emphasized = true) { onKey(TerminalKey.BACKSPACE) }
-        ToolbarKey("ESC") { onKey(TerminalKey.ESC) }
-        ToolbarKey("TAB") { onKey(TerminalKey.TAB) }
-        ToolbarKey(
-            label = "CTRL",
-            highlighted = ctrlActive,
-            onClick = onCtrlToggle
-        )
-        // T86：SHIFT/ALT 锁存（一次性 —— 与下一个方向/导航/F 键组合后自动释放）。
-        // SHIFT+方向 = vim 可视选择 / readline 选区；ALT+B/F = 词跳（发送时 meta 化）。
-        ToolbarKey(
-            label = "SHIFT",
-            highlighted = shiftActive,
-            onClick = onShiftToggle
-        )
-        ToolbarKey(
-            label = "ALT",
-            highlighted = altActive,
-            onClick = onAltToggle
-        )
-        ToolbarKey("↑") { onKey(TerminalKey.ARROW_UP) }
-        ToolbarKey("↓") { onKey(TerminalKey.ARROW_DOWN) }
-        ToolbarKey("←") { onKey(TerminalKey.ARROW_LEFT) }
-        ToolbarKey("→") { onKey(TerminalKey.ARROW_RIGHT) }
-
-        // ── 扩展簇：shell 符号（免切输入法的符号面板）──
-        ToolbarKey("|") { onText("|") }
-        ToolbarKey("~") { onText("~") }
-        ToolbarKey("-") { onText("-") }
-        ToolbarKey("/") { onText("/") }
-        ToolbarKey("\\") { onText("\\") }
-        ToolbarKey("$") { onText("$") }
-        ToolbarKey("&") { onText("&") }
-        ToolbarKey(";") { onText(";") }
-        ToolbarKey("<") { onText("<") }
-        ToolbarKey(">") { onText(">") }
-        ToolbarKey("*") { onText("*") }
-        ToolbarKey("=") { onText("=") }
-
-        // ── 扩展簇：控制码 / 导航 / F 键（htop 帮助、vim 命令模式、mc 菜单）──
-        ToolbarKey("^C") { onControl('c') }
-        ToolbarKey("^D") { onControl('d') }
-        ToolbarKey("^Z") { onControl('z') }
-        ToolbarKey("^L") { onControl('l') }
-        ToolbarKey("^U") { onControl('u') }   // 清空当前行（readline 惯例）
-        ToolbarKey("HOME") { onKey(TerminalKey.HOME) }
-        ToolbarKey("END") { onKey(TerminalKey.END) }
-        ToolbarKey("PGUP") { onKey(TerminalKey.PAGE_UP) }
-        ToolbarKey("PGDN") { onKey(TerminalKey.PAGE_DOWN) }
-        ToolbarKey("F1") { onKey(TerminalKey.F1) }
-        ToolbarKey("F2") { onKey(TerminalKey.F2) }
-        ToolbarKey("F3") { onKey(TerminalKey.F3) }
-        ToolbarKey("F4") { onKey(TerminalKey.F4) }
-        ToolbarKey("F5") { onKey(TerminalKey.F5) }
-        ToolbarKey("F6") { onKey(TerminalKey.F6) }
-        ToolbarKey("F7") { onKey(TerminalKey.F7) }
-        ToolbarKey("F8") { onKey(TerminalKey.F8) }
-        ToolbarKey("F9") { onKey(TerminalKey.F9) }
-        ToolbarKey("F10") { onKey(TerminalKey.F10) }
-        ToolbarKey("F11") { onKey(TerminalKey.F11) }
-        ToolbarKey("F12") { onKey(TerminalKey.F12) }
-        ToolbarKey(stringResource(R.string.term_paste)) { onPaste() }
-    }
-}
-
-@Composable
-private fun ToolbarKey(
-    label: String,
-    highlighted: Boolean = false,
-    emphasized: Boolean = false,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(
-                when {
-                    highlighted -> TerminalTheme.toolbarKeyHi
-                    emphasized -> Color(0xFF223729)
-                    else -> TerminalTheme.toolbarKey
-                }
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            label,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
-            color = if (highlighted) Color(0xFF06120D) else TerminalTheme.toolbarKeyText
-        )
-    }
-}
