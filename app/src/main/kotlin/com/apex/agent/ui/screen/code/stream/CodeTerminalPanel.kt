@@ -6,9 +6,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,12 +27,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
 
@@ -44,7 +44,7 @@ import com.apex.agent.R
  *   CodeStreamSnapshot.terminalContent 传入——整块脉冲，无打字机抖动）；
  * - **独立锚定**：横向滚动（长命令不断行）+ 纵向自动跟随输出尾行，
  *   用户上翻进入阅读模式后暂停跟随（与时间轴锚定互不干扰）；
- * - ANSI 转义清洗（渲染层兜底，面板不渲染控制序列）；
+ * - ANSI 转义清洗（CSI + OSC 标题序列 + 回车进度条，渲染层兜底）；
  * - 可折叠：头行 = 活跃命令 + 展开箭头；折叠态只留头行（时间轴优先）。
  */
 @Composable
@@ -55,6 +55,10 @@ internal fun CodeTerminalPanel(
     onToggleCollapse: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // 滚动状态提升到折叠开关之外：折叠（正文离开组合）不丢滚动位置
+    val vertical = rememberScrollState()
+    val horizontal = rememberScrollState()
+
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = Color(0xFF101418), // 终端恒定深底（浅色主题下也是终端语义）
@@ -86,7 +90,9 @@ internal fun CodeTerminalPanel(
                     maxLines = 1,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onToggleCollapse, modifier = Modifier.size(28.dp)) {
+                // 48dp 触区（Material 无障碍红线）+ 16dp 视觉图标：
+                // minimumInteractiveComponentSize 保触区，Icon 缩到视觉尺寸
+                IconButton(onClick = onToggleCollapse, modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) {
                     Icon(
                         imageVector = if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
                         contentDescription = stringResource(R.string.code_stream_terminal_toggle),
@@ -97,23 +103,31 @@ internal fun CodeTerminalPanel(
             }
 
             if (!collapsed) {
-                TerminalBody(content = content)
+                TerminalBody(
+                    content = content,
+                    vertical = vertical,
+                    horizontal = horizontal
+                )
             }
         }
     }
 }
 
-/** 终端正文：横向滚动 + 纵向尾行跟随 + ANSI 清洗。 */
+/** 终端正文：横向滚动 + 纵向尾行跟随 + ANSI 清洗（滚动状态由父级持有）。 */
 @Composable
-private fun TerminalBody(content: String) {
-    val vertical = rememberScrollState()
-    val horizontal = rememberScrollState()
+private fun TerminalBody(
+    content: String,
+    vertical: androidx.compose.foundation.ScrollState,
+    horizontal: androidx.compose.foundation.ScrollState
+) {
     val cleaned = remember(content) { stripTerminalAnsi(content) }
 
     // 独立锚定：输出追加时贴尾行（用户上翻后 maxValue 不追——滚动值保留即阅读态）
-    LaunchedEffect(cleaned.length) {
-        if (!vertical.isScrollInProgress && vertical.value >= vertical.maxValue - SCROLL_EPSILON) {
-            vertical.scrollTo(vertical.maxValue)
+    LaunchedEffect(cleaned) {
+        snapshotFlow { vertical.maxValue }.collect { max ->
+            if (!vertical.isScrollInProgress && vertical.value >= max - SCROLL_EPSILON_PX) {
+                vertical.scrollTo(max)
+            }
         }
     }
 
@@ -129,17 +143,24 @@ private fun TerminalBody(content: String) {
             fontFamily = FontFamily.Monospace,
             color = Color(0xFFD1D5DB),
             modifier = Modifier
-                .fillMaxSize()
+                // 不用 fillMaxSize：heightIn(max) 封顶会被 fillMaxHeight 无条件
+                // 取满 260dp——哪怕只有一行输出也撑满黑块（P1）
                 .verticalScroll(vertical)
                 .padding(horizontal = 10.dp, vertical = 8.dp)
         )
     }
 }
 
-/** ANSI 转义序列清洗（与 AgentChatOutputCards.stripAnsi 同规则）。 */
+/**
+ * ANSI 转义序列清洗（与 AgentChatOutputCards.stripAnsi 同规则 + OSC 扩展）：
+ * CSI（`\u001B[...` 字母结尾）与 OSC（`\u001B]0;title\u0007` / ST 结尾），
+ * 以及进度条残留的 `\r`（保留 `\n` 语义）。
+ */
 internal fun stripTerminalAnsi(text: String): String =
-    ANSI_ESCAPE_REGEX.replace(text, "")
+    ANSI_ESCAPE_REGEX.replace(text, "").replace("\r\n", "\n").replace("\r", "\n")
 
-private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-?]*[ -/]*[@-~]")
+private val ANSI_ESCAPE_REGEX =
+    Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\))")
 
-private const val SCROLL_EPSILON = 32
+/** 与时间轴侧一致的贴尾阈值（px）。 */
+private const val SCROLL_EPSILON_PX = 150

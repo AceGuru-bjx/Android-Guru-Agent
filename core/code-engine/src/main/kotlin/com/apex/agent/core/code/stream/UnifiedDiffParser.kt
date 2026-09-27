@@ -75,7 +75,9 @@ object UnifiedDiffParser {
 
         var i = 0
         // ── 文件头（可缺省：mini 与 git 都有，但流式半截可能没有）──
+        var sawFileHeader = false
         while (i < lines.size && (lines[i].startsWith("--- ") || lines[i].startsWith("+++ "))) {
+            sawFileHeader = true
             val path = stripPrefix(lines[i].substring(4).trim())
             if (lines[i].startsWith("--- ")) oldPath = path else newPath = path
             i++
@@ -91,20 +93,27 @@ object UnifiedDiffParser {
                     current?.let { hunks += it.build() }
                     current = HunkBuilder(line)
                 }
-                line.startsWith("--- ") && current == null -> oldPath = stripPrefix(line.substring(4).trim())
-                line.startsWith("+++ ") && current == null -> newPath = stripPrefix(line.substring(4).trim())
+                // 多文件 git diff：正文里出现文件头 → 上一 hunk 收口、
+                // 头行信息更新（原实现把它误吸收进上一 hunk 的内容行）
+                line.startsWith("--- ") || line.startsWith("+++ ") -> {
+                    current?.let { hunks += it.build() }
+                    current = null
+                    val path = stripPrefix(line.substring(4).trim())
+                    if (line.startsWith("--- ")) oldPath = path else newPath = path
+                }
                 else -> {
                     val summary = parseSummary(line)
                     if (summary != null) {
                         summaryAdded = summary.first
                         summaryRemoved = summary.second
                     } else {
+                        // mini 格式：首个变更落在文件头几行时没有先导 @@ 标记
+                        //（UnifiedDiff.mini 只在折叠过未变行后才发 @@）——
+                        // 见过文件头即隐式开 hunk，内容行不再静默丢失
                         val h = current
-                        if (h != null) {
-                            // mini 折叠说明行不产出行内容
-                            if (!line.contains("unchanged lines) ...")) h.append(line)
-                        }
-                        // hunk 外的杂行静默吸收（容错）
+                            ?: if (sawFileHeader) HunkBuilder(IMPLICIT_HUNK_HEADER).also { current = it } else null
+                        if (h != null && !line.contains("unchanged lines) ...")) h.append(line)
+                        // 无文件头的纯文本（非 diff）仍静默吸收（容错）
                     }
                 }
             }
@@ -170,4 +179,7 @@ object UnifiedDiffParser {
         val m = Regex("""^\((\d+) added, (\d+) removed\)$""").find(line.trim()) ?: return null
         return m.groupValues[1].toInt() to m.groupValues[2].toInt()
     }
+
+    /** 隐式 hunk 的占位头（mini 格式无 @@ 标记时的上下文起点）。 */
+    private const val IMPLICIT_HUNK_HEADER = "@@"
 }

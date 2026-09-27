@@ -771,7 +771,17 @@ class CodeViewModel @Inject constructor(
         } else {
             // 全新会话：清 UI 态（引擎侧 setActiveWorkspace 已重置上下文）+ 欢迎提示
             codeTodoTool.clear()
-            _uiState.update { it.copy(messages = emptyList(), todos = emptyList()) }
+            // P1 回归：时间轴与 streamSession 必须一并清空——否则工作区 A 的
+            // 胶囊时间轴泄漏进新工作区 B，并经 buildSessionSnapshot 污染 B 的
+            // 落盘检查点（跨工作区数据污染被持久化）
+            streamSession.clear()
+            _uiState.update {
+                it.copy(
+                    messages = emptyList(),
+                    todos = emptyList(),
+                    stream = CodeStreamSnapshot()
+                )
+            }
             val env = ws.detectedEnvironment ?: "空工作区"
             _uiState.update { state ->
                 state.copy(

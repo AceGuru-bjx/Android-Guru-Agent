@@ -63,7 +63,8 @@ class AgentChatViewModel @Inject constructor(
     private val chatToolkit: ChatToolkitStore,
     // God-file 预算拆分：AgentChatEventApplier 扩展需读工具元数据（classifyTool 路由徽章）
     internal val toolRegistry: ToolRegistry,
-    // v1.4.4 #4/#6/#7：internal —— ChatSessionOps/EventApplier 扩展共用
+    // v1.4.4 #4/#6/#7：internal —— ChatSessionOps/EventApplier 扩展共用；
+    // 亦供 AgentChatHtmlPreview.kt 扩展（God-file 预算拆分）。
     @ApplicationContext internal val context: Context,
     // T76：任务运行时控制器（execute/abort 经此获得 checkpoint/恢复能力）
     private val taskController: AgentTaskStatusController,
@@ -71,7 +72,8 @@ class AgentChatViewModel @Inject constructor(
     internal val chatHistory: ChatHistoryManager,
     // 工作区根解析（HTML 预览路径用）：code_* 工具写的 HTML 按此根解析相对路径；
     // default 工作区即 Agent 沙箱根（终端会话 guest /workspace 同源）。
-    private val workspaceRoots: CodeWorkspaceRoots,
+    // internal —— AgentChatHtmlPreview.kt 扩展共用（God-file 预算拆分）。
+    internal val workspaceRoots: CodeWorkspaceRoots,
     // i18n：用户可见 toast / 系统行 / 工具步骤文案按当前语言取词（组合外场景）
     private val languageManager: LanguageManager,
     // v2：斜杠路由需要 MCP 连接快照（/mcp:<id> 引导提示词据此生成）
@@ -115,6 +117,28 @@ class AgentChatViewModel @Inject constructor(
     internal var currentHistorySessionCreatedAt: Long? = null
     internal var historyPersistJob: Job? = null
     val uiState: StateFlow<AgentChatUiState> = _uiState.asStateFlow()
+
+    /**
+     * 抽屉徽标窄化流（P1 重组风暴修复）：抽屉只消费 mode/thinkingLevel/
+     * historyDepth 三个字段——直接 collectAsState uiState 会让流式输出期间
+     * 每个 token 的 copy() 新实例都把整个抽屉（含 13 个玻璃导航项）重组
+     * 一遍；结构去重后流式期间抽屉零重组。
+     */
+    val drawerBadges: StateFlow<DrawerBadges> = _uiState
+        .map { DrawerBadges(it.mode, it.thinkingLevel, it.historyDepth) }
+        .distinctUntilChanged()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            DrawerBadges(AgentMode.BUILD, ThinkingLevel.STANDARD, 0)
+        )
+
+    /** 抽屉徽标快照（窄字段 + distinctUntilChanged，天然结构去重）。 */
+    data class DrawerBadges(
+        val mode: AgentMode,
+        val thinkingLevel: ThinkingLevel,
+        val historyDepth: Int
+    )
 
     /** #168 AUTO 档：最近一次自适应选档理由（引擎 IterationStart 后由 EventApplier 拉取刷新）。 */
     internal val _lastAdaptiveDecision = MutableStateFlow<String?>(null)
@@ -842,29 +866,8 @@ class AgentChatViewModel @Inject constructor(
     }
 
     // ═══ HTML 产物预览（应用内 WebView）═══
-
-    /**
-     * 把工具调用中提取的 HTML 路径（相对 / 绝对 / guest /workspace 前缀）
-     * 解析为宿主侧可读文件路径；解析失败（不存在/不可读）返回 null。
-     *
-     * 三段式判定：
-     * 1. guest `/workspace/...` → 工作区根替换（终端会话与 code_* 同源目录）；
-     * 2. 宿主绝对路径直接验证存在性；
-     * 3. 相对路径 → activeRoot（null 时兜底 default 工作区）下解析。
-     */
-    fun resolveHtmlPreviewPath(rawPath: String): String? {
-        val root = workspaceRoots.activeRoot()
-            ?: File(context.filesDir, "linux/workspaces/default")
-        val candidate: File = when {
-            rawPath.startsWith("/workspace/", ignoreCase = true) ->
-                File(root, rawPath.removePrefix("/workspace/"))
-            rawPath.startsWith("/") -> File(rawPath)
-            else -> File(root, rawPath)
-        }
-        return if (HtmlArtifactDetector.isPreviewableHostFile(candidate.absolutePath)) {
-            candidate.absolutePath
-        } else null
-    }
+    // resolveHtmlPreviewPath() 已抽出到 AgentChatHtmlPreview.kt（internal 扩展，
+    // 调用点 vm.resolveHtmlPreviewPath 解析不变）。
 
     /**
      * #169 计划确认（人控升级）：confirmed=false 取消；true 时可携带步骤勾选

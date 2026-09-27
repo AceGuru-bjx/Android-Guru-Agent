@@ -54,6 +54,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +74,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.apex.agent.BuildConfig
 import com.apex.agent.R
@@ -115,14 +119,24 @@ fun AboutScreen() {
     val noBrowserHint = stringResource(R.string.settings_about_no_browser)
     val open: (String) -> Unit = { url -> openUrl(context, url, noBrowserHint) }
 
+    // Hero 可见性门控：页面非 lazy 滚动，滚出视口后无限动画仍在逐帧
+    // invalidate + 重录（含 haze 模糊重采样）——CPU 空转。Hero 滚出
+    // 视口 1.5 倍高度后切静态降级帧，滚回自动恢复
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+    val heroGatePx = with(density) { 252.dp.toPx() * 1.5f }
+    val heroVisible by remember(heroGatePx) {
+        derivedStateOf { scrollState.value < heroGatePx }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        AboutHero()
+        AboutHero(animated = heroVisible)
 
         // ── 软件更新（增量补丁 + 高速节点镜像）──
         AboutSectionContainer(index = 1) { UpdatePanel() }
@@ -267,43 +281,55 @@ fun AboutScreen() {
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun AboutHero(modifier: Modifier = Modifier) {
+private fun AboutHero(modifier: Modifier = Modifier, animated: Boolean = true) {
     val scheme = MaterialTheme.colorScheme
     val hazeState = remember { HazeState() }
     val heroShape = RoundedCornerShape(22.dp)
 
-    val transition = rememberInfiniteTransition(label = "about_hero")
-    val drift = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(durationMillis = 26000, easing = LinearEasing)),
-        label = "aurora_drift"
-    )
-    val borderAngle = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(durationMillis = 9000, easing = LinearEasing)),
-        label = "border_sweep"
-    )
-    val breath = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2800, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "breath"
-    )
-    val sheen = transition.animateFloat(
-        initialValue = -0.4f,
-        targetValue = 1.4f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-            initialStartOffset = StartOffset(1600)
-        ),
-        label = "specular_sweep"
-    )
+    val drift: State<Float>
+    val borderAngle: State<Float>
+    val breath: State<Float>
+    val sheen: State<Float>
+    if (animated) {
+        val transition = rememberInfiniteTransition(label = "about_hero")
+        drift = transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 26000, easing = LinearEasing)),
+            label = "aurora_drift"
+        )
+        borderAngle = transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 9000, easing = LinearEasing)),
+            label = "border_sweep"
+        )
+        breath = transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2800, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "breath"
+        )
+        sheen = transition.animateFloat(
+            initialValue = -0.4f,
+            targetValue = 1.4f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 4200, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Restart,
+                initialStartOffset = StartOffset(1600)
+            ),
+            label = "specular_sweep"
+        )
+    } else {
+        // 静态降级帧：极光取中位相位、光带停在卡外（不可见）
+        drift = remember { mutableStateOf(0.5f) }
+        borderAngle = remember { mutableStateOf(0f) }
+        breath = remember { mutableStateOf(0.5f) }
+        sheen = remember { mutableStateOf(-0.4f) }
+    }
 
     Box(modifier = modifier.fillMaxWidth().height(252.dp)) {
         // ① 极光氛围层 —— 同时是 Hero 卡的 backdrop 采样源（API 32+ 真实折射）

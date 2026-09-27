@@ -65,6 +65,51 @@ class UnifiedDiffParserTest {
     }
 
     @Test
+    fun `mini format without leading fold marker opens implicit hunk`() {
+        // P1 回归：首个变更落在文件头几行（skipped==0）时 UnifiedDiff.mini
+        // 不发任何 @@ 标记——内容行紧跟文件头，原实现静默丢弃整个 diff
+        val diff = listOf(
+            "--- a/build.gradle.kts",
+            "+++ b/build.gradle.kts",
+            "-val old = 1",
+            "+val new = 2",
+            " context",
+            "(1 added, 1 removed)"
+        ).joinToString("\n")
+        val parsed = UnifiedDiffParser.parse(diff)
+        assertEquals("隐式 hunk 必须建立（内容行不再丢失）", 1, parsed.hunks.size)
+        val hunk = parsed.hunks[0]
+        assertEquals(1, hunk.addedCount)
+        assertEquals(1, hunk.removedCount)
+        assertEquals("val new = 2", hunk.lines.first { it.kind == UnifiedDiffParser.LineKind.ADD }.text)
+    }
+
+    @Test
+    fun `multi file git diff closes previous hunk at next file header`() {
+        // 多文件 git diff：第二个文件头不应被吸收进第一个文件最后一个 hunk
+        val diff = listOf(
+            "--- a/A.kt",
+            "+++ b/A.kt",
+            "@@ -1,2 +1,2 @@",
+            " ctx",
+            "-old",
+            "+new",
+            "--- a/B.kt",
+            "+++ b/B.kt",
+            "@@ -5,3 +5,4 @@",
+            " ctx",
+            "+added"
+        ).joinToString("\n")
+        val parsed = UnifiedDiffParser.parse(diff)
+        assertEquals(2, parsed.hunks.size)
+        assertEquals("B.kt", parsed.newPath)
+        // 第二个 hunk 的内容不含文件头行
+        assertTrue(
+            parsed.hunks[0].lines.none { it.text.contains("B.kt") }
+        )
+    }
+
+    @Test
     fun `truncation marker is detected`() {
         val diff = """
             --- a/Big.kt

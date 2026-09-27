@@ -66,12 +66,19 @@ class CodeStreamSession {
     private var openCycleVerifies = mutableListOf<String>()
 
     private var dirty = false
-    private var cachedSnapshot: CodeStreamSnapshot = CodeStreamSnapshot()
 
     // ═══ 公开 API ═══
 
     /** 新 run 开始：用户气泡入轴 + 运行态归零（时间轴跨 run 累积）。 */
     fun beginRun(userText: String) {
+        // 收口上一轮残留的流式条目：中止路径没有 Complete 事件，引用
+        // 悬挂会导致下一轮首个 Chunk 把新文本拼进旧气泡（跨轮串台）
+        streamingThinking?.let { replaceEntry(it.id, it.copy(isStreaming = false)) }
+        streamingThinking = null
+        streamingAssistant?.let { replaceEntry(it.id, it.copy(isStreaming = false)) }
+        streamingAssistant = null
+        // 文档语义：「本轮运行」触碰的文件 —— 每 run 归零重新累计
+        affectedFiles.clear()
         append(StreamEntry.UserEntry(nextId(), userText))
         activeTerminalCallId = null
     }
@@ -103,8 +110,14 @@ class CodeStreamSession {
             }
 
             is AgentEvent.ThinkingComplete -> {
-                streamingThinking?.let {
-                    replaceEntry(it.id, it.copy(text = event.fullThought.ifBlank { it.text }, isStreaming = false))
+                val cur = streamingThinking
+                if (cur == null) {
+                    // 无先导 Chunk 的完整思考（非流式/降级 provider）不得静默丢弃
+                    if (event.fullThought.isNotBlank()) {
+                        append(StreamEntry.ThinkingEntry(nextId(), event.fullThought, false))
+                    }
+                } else {
+                    replaceEntry(cur.id, cur.copy(text = event.fullThought.ifBlank { cur.text }, isStreaming = false))
                 }
                 streamingThinking = null
             }
@@ -140,8 +153,14 @@ class CodeStreamSession {
             }
 
             is AgentEvent.ResponseComplete -> {
-                streamingAssistant?.let {
-                    replaceEntry(it.id, it.copy(text = event.fullText.ifBlank { it.text }, isStreaming = false))
+                val cur = streamingAssistant
+                if (cur == null) {
+                    // 同上：非流式路径的整段结论直接建条目
+                    if (event.fullText.isNotBlank()) {
+                        append(StreamEntry.AssistantEntry(nextId(), event.fullText, false))
+                    }
+                } else {
+                    replaceEntry(cur.id, cur.copy(text = event.fullText.ifBlank { cur.text }, isStreaming = false))
                 }
                 streamingAssistant = null
             }
@@ -179,6 +198,12 @@ class CodeStreamSession {
 
             is AgentEvent.Aborted -> {
                 closeOpenCycle()
+                // 中止同样收口流式条目（与 beginRun 双保险：Aborted 后可能
+                // 没有下一轮 beginRun，气泡不能永远挂「生成中」）
+                streamingThinking?.let { replaceEntry(it.id, it.copy(isStreaming = false)) }
+                streamingThinking = null
+                streamingAssistant?.let { replaceEntry(it.id, it.copy(isStreaming = false)) }
+                streamingAssistant = null
                 append(StreamEntry.StopEntry(nextId(), "已中止"))
             }
 
@@ -222,15 +247,13 @@ class CodeStreamSession {
         }
         if (!dirty && !pulsed) return null
         dirty = false
-        cachedSnapshot = buildSnapshot()
-        return cachedSnapshot
+        return buildSnapshot()
     }
 
     /** 强制重建（恢复/测试用）。 */
     fun snapshot(): CodeStreamSnapshot {
         dirty = false
-        cachedSnapshot = buildSnapshot()
-        return cachedSnapshot
+        return buildSnapshot()
     }
 
     /** 时间轴条目数（测试与落盘裁剪依据）。 */
@@ -246,9 +269,16 @@ class CodeStreamSession {
     fun replaceAll(restored: List<StreamEntry>) {
         entries.clear()
         entries.addAll(restored)
+        // 序号回拨到恢复轴的最大 e-N：不回拨则 nextId() 从 1 重发，与恢复
+        // 条目撞号 → LazyColumn 重复 key 直接崩溃（P0）
+        entrySeq = restored.maxOfOrNull { entrySeqOf(it.id) } ?: 0L
         toolCalls.clear()
         terminalBuffers.clear()
         affectedFiles.clear()
+        // committedFiles 语义恢复：从最后一个 FileChipsEntry 回填（重启后
+        // 会话快照的 committedFiles 不再清零）
+        (restored.lastOrNull { it is StreamEntry.FileChipsEntry } as? StreamEntry.FileChipsEntry)
+            ?.let { affectedFiles.addAll(it.files) }
         streamingThinking = null
         streamingAssistant = null
         activeTerminalCallId = null
@@ -312,10 +342,15 @@ class CodeStreamSession {
             )
             toolCalls[event.callId] ?: return
         }
+        // 幂等闸：已终态的调用重放 Complete 直接跳过——否则
+        // failedToolCallCount 重复自增、diff/summary 被旧事件覆盖
+        if (existing.status != ToolCallStatus.RUNNING && existing.status != ToolCallStatus.WAITING) {
+            return
+        }
         val buffer = terminalBuffers[event.callId]
         buffer?.flush()
         val logTail = buffer?.content()?.takeIf { it.isNotEmpty() }
-            ?: (existing.logTail + event.output).takeLast(NON_BASH_LOG_TAIL_CHARS)
+            ?: safeTakeLast(existing.logTail + event.output, NON_BASH_LOG_TAIL_CHARS)
 
         val diff = if (existing.isEditFamily) UnifiedDiffParser.parse(event.fullOutput.ifBlank { event.output }) else null
         val hunksTotal = diff?.hunks?.size ?: 0
@@ -391,9 +426,13 @@ class CodeStreamSession {
                 cycle = VerifyCycle(cycleRound, openCycleEdits.toList(), openCycleVerifies.toList(), pendingVerifyPassed),
                 calls = calls
             )
-            val removed = entries.subList(firstIdx, lastIdx + 1).toList()
-            entries.subList(firstIdx, lastIdx + 1).clear()
+            // 只折叠轮内工具胶囊；思考/迭代状态等非工具条目原位保留
+            // （整段 subList 清空会把它们一并吞掉——时间轴数据丢失）
+            val range = entries.subList(firstIdx, lastIdx + 1)
+            val nonTool = range.filterNot { it is StreamEntry.ToolCapsuleEntry }
+            range.clear()
             entries.add(firstIdx, cycleEntry)
+            nonTool.forEachIndexed { i, entry -> entries.add(firstIdx + 1 + i, entry) }
             dirty = true
         }
         openCycleEdits = mutableListOf()
@@ -424,6 +463,18 @@ class CodeStreamSession {
     private fun toolEntryId(callId: String) = "tool-$callId"
 
     private fun nextId(): String = "e-${++entrySeq}"
+
+    /** 从条目 id 提取序号（“e-42” / “cycle-1-e-43” → 42/43；其余 → 0）。 */
+    private fun entrySeqOf(id: String): Long =
+        ENTRY_SEQ_REGEX.find(id)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+
+    /** 代理对安全截断：首字符若是低代理项则让位，防 emoji 被劈成豆腐块。 */
+    private fun safeTakeLast(s: String, n: Int): String = when {
+        s.length <= n -> s
+        n <= 0 -> ""
+        Character.isLowSurrogate(s[s.length - n]) -> s.substring(s.length - n + 1)
+        else -> s.substring(s.length - n)
+    }
 
     private fun buildSnapshot(): CodeStreamSnapshot {
         val activeBuf = activeTerminalCallId?.let { terminalBuffers[it] }
@@ -475,11 +526,16 @@ class CodeStreamSession {
         ToolKind.MCP_CUSTOM -> toolName.take(16)
     }
 
-    /** 命令退出码：terminal.exec 输出或通用 `exit code N` 尾缀。 */
+    /** 命令退出码：尾部若干行内逐行匹配（terminal.exec 的 `exit N` 尾缀；
+     *  尾部优先避免正文日志里 “exit code 0 desired” 之类文本被误命中）。 */
     private fun exitCodeOf(output: String, kind: ToolKind): Int? {
         if (kind != ToolKind.BASH && kind != ToolKind.GIT) return null
-        val m = EXIT_CODE_REGEX.find(output) ?: return null
-        return m.groupValues[1].toIntOrNull()
+        val tail = output.lineSequence().toList().takeLast(EXIT_CODE_TAIL_LINES)
+        for (line in tail.asReversed()) {
+            val m = EXIT_CODE_REGEX.find(line) ?: continue
+            return m.groupValues[1].toIntOrNull()
+        }
+        return null
     }
 
     private fun summaryOf(
@@ -509,6 +565,8 @@ class CodeStreamSession {
         const val ARGS_SUMMARY_MAX = 80
         const val SUMMARY_MAX = 24
         const val NON_BASH_LOG_TAIL_CHARS = 2000
-        val EXIT_CODE_REGEX = Regex("""(?:exit(?:\s+code)?[:\s]+|^Exit:\s*)(\d+)\b""", RegexOption.IGNORE_CASE)
+        const val EXIT_CODE_TAIL_LINES = 8
+        val EXIT_CODE_REGEX = Regex("""(?:exit(?:\s+code)?|Exit:)[:\s]+(\d+)\b""", RegexOption.IGNORE_CASE)
+        val ENTRY_SEQ_REGEX = Regex("""(?:^|-)e-(\d+)$""")
     }
 }
