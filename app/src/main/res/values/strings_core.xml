@@ -15,6 +15,7 @@
     <string name="drawer_log">Logs</string>
     <string name="drawer_settings">Settings</string>
     <string name="drawer_glasslab">Glass Lab</string>
+    <string name="drawer_about">About</string>
     <string name="drawer_open_nav">Open navigation</string>
     <string name="drawer_tagline">All-in-one AI assistant</string>
     <string name="drawer_mem_count">%1$d items</string>
@@ -510,4 +511,33 @@
     <string name="github_menu_connect">Connect GitHub</string>
     <string name="github_menu_token">GitHub Token (ghp_*) key access</string>
     <string name="common_done">Done</string>
+
+    <!-- ═══ About screen (drawer bottom entry, v1.4.3+) ═══ -->
+    <string name="about_section_build">Version &amp; build</string>
+    <string name="about_section_update">Software updates</string>
+    <string name="about_section_features">Feature tour</string>
+    <string name="about_section_stack">Tech stack</string>
+    <string name="about_section_links">Links</string>
+    <string name="about_update_current">Currently on v%1$s (%2$d)</string>
+    <string name="about_update_auto_hint">Checks automatically each time this page opens</string>
+    <string name="about_update_retry">Retry</string>
+    <string name="about_update_new_badge">NEW</string>
+    <string name="about_update_progress_mb">Downloading… %1$d%% · %2$s downloaded</string>
+    <string name="about_update_patch_recommended">Delta update · recommended</string>
+    <string name="about_feature_agent_title">Agent chat</string>
+    <string name="about_feature_agent_desc">All-in-one AI assistant with multi-level thinking, tool calling and skills</string>
+    <string name="about_feature_coding_title">Coding mode</string>
+    <string name="about_feature_coding_desc">Dedicated coding workflow with its own engine instance and workspace</string>
+    <string name="about_feature_terminal_title">Ubuntu terminal</string>
+    <string name="about_feature_terminal_desc">Full Ubuntu 24.04 CLI environment bundled with the APK — works offline</string>
+    <string name="about_feature_market_title">Skill market</string>
+    <string name="about_feature_market_desc">Install skills, MCP servers and plugins on demand</string>
+    <string name="about_feature_vault_title">Encrypted vault</string>
+    <string name="about_feature_vault_desc">Encrypted clipboard vault for tokens and API keys</string>
+    <string name="about_feature_glass_title">Liquid Glass</string>
+    <string name="about_feature_glass_desc">Haze-based glass material system with a live Glass Lab showcase</string>
+    <string name="about_link_source">Source code</string>
+    <string name="about_link_release">Release channel</string>
+    <string name="about_link_issues">Report an issue</string>
+    <string name="about_footer">Apex Agent · open source</string>
 </resources>

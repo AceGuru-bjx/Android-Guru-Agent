@@ -1,4 +1,4 @@
-package com.apex.agent.ui.screen.settings
+package com.apex.agent.ui.screen.about
 
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,14 +17,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,6 +56,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.apex.agent.BuildConfig
 import com.apex.agent.R
@@ -66,15 +75,17 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * 设置页「关于」区内的更新面板 —— 双仓库发布架构的完整客户端侧闭环：
+ * 关于页「软件更新」面板 —— 双仓库发布架构的完整客户端侧闭环。
  *
- * 1. **更新检查**：拉取发布仓库 version.json（versionCode 比对）；
- * 2. **补丁更新**：上一版 → 新版的 xdelta3 增量补丁（~14MB vs 全量 300MB+），
- *    `fromTag` 与本地版本一致时主推补丁，跨多版自动回退全量；
- * 3. **高速节点/镜像**：GitHub 直连 + 公共加速镜像，支持一键测速选优 ——
- *    下载经系统 DownloadManager 托管（断点续传 + 通知栏进度）。
- *
- * 拆自 SettingsAboutSection（文件行数预算 1200）。
+ * v1.4.3 从设置页迁移至关于页并重构 UI：
+ *  1. **自动检查**：进入页面即静默检查一次（手动可重试）；
+ *  2. **补丁更新主推**：from → to、体积、节省百分比一目了然（~15MB vs 全量 300MB+），
+ *     `fromTag` 与本地版本一致时主推补丁，跨多版自动回退全量；
+ *  3. **高速节点/镜像**：GitHub 直连 + 公共加速镜像，一键测速选优；
+ *  4. **下载进度**：百分比 + 已下载字节数（系统 DownloadManager 托管，
+ *     断点续传 + 通知栏进度）；
+ *  5. **校验闭环**：下载完成 SHA-256 校验 → APK 直接拉起安装器 / 补丁给出
+ *     针对本机的 xdelta3 命令。
  */
 
 /** 更新检查 UI 状态机：Idle → Checking → Done(result)。 */
@@ -111,11 +122,23 @@ internal fun UpdatePanel() {
     var showMirrorDialog by remember { mutableStateOf(false) }
     var activeDownload by remember { mutableStateOf<UpdateDownloader.Enqueued?>(null) }
     var downloadPercent by remember { mutableStateOf(0) }
+    var downloadedBytes by remember { mutableStateOf(0L) }
     var finished by remember { mutableStateOf<DownloadFinished?>(null) }
 
     // Toast 文案上提到组合层（非 Compose lambda 中使用）
     val enqueueFailedHint = stringResource(R.string.settings_about_update_enqueue_failed)
     val startedHintFmt = stringResource(R.string.settings_about_update_download_started)
+
+    fun triggerCheck() {
+        if (updateState == UpdateUiState.Checking) return
+        updateState = UpdateUiState.Checking
+        scope.launch {
+            updateState = UpdateUiState.Done(checker.check(BuildConfig.VERSION_CODE))
+        }
+    }
+
+    // ── 进入页面自动静默检查一次（v1.4.3：不必再手动点第一次）────────────────
+    LaunchedEffect(Unit) { triggerCheck() }
 
     // ── 下载完成广播：校验 SHA-256 → 补丁出说明 / APK 拉起安装器 ─────────────
     DisposableEffect(Unit) {
@@ -168,8 +191,9 @@ internal fun UpdatePanel() {
     LaunchedEffect(activeDownload?.id) {
         val active = activeDownload ?: return@LaunchedEffect
         while (true) {
-            val (percent, _) = downloader.progress(active.id)
+            val (percent, bytes) = downloader.progress(active.id)
             downloadPercent = percent
+            downloadedBytes = bytes
             if (activeDownload?.id != active.id) break
             delay(800)
         }
@@ -204,6 +228,7 @@ internal fun UpdatePanel() {
             }
             if (enqueued != null) {
                 downloadPercent = 0
+                downloadedBytes = 0
                 activeDownload = enqueued
                 Toast.makeText(
                     context, startedHintFmt.format(fileName), Toast.LENGTH_SHORT
@@ -214,153 +239,303 @@ internal fun UpdatePanel() {
         }
     }
 
-    Column {
-        // ── 检查更新按钮 ────────────────────────────────────────────────────
-        OutlinedButton(
-            onClick = {
-                if (updateState == UpdateUiState.Checking) return@OutlinedButton
-                updateState = UpdateUiState.Checking
-                scope.launch {
-                    updateState = UpdateUiState.Done(checker.check(BuildConfig.VERSION_CODE))
-                }
-            },
-            enabled = updateState != UpdateUiState.Checking,
-            modifier = Modifier.fillMaxWidth()
+    // ═══ 面板主体 ═══
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null)
-            Spacer(Modifier.width(6.dp))
-            Text(
-                if (updateState == UpdateUiState.Checking) {
-                    stringResource(R.string.settings_about_update_checking)
-                } else {
-                    stringResource(R.string.settings_about_update_check)
+            // ── 状态头：图标井 + 标题/当前版本 + 状态徽章 ──────────────────────
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                ) {
+                    Box(
+                        Modifier.size(38.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Outlined.SystemUpdateAlt,
+                            contentDescription = null,
+                            modifier = Modifier.size(19.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
-            )
-        }
-
-        when (val state = updateState) {
-            is UpdateUiState.Done -> when (val result = state.result) {
-                is UpdateCheckResult.UpToDate -> Text(
-                    stringResource(
-                        R.string.settings_about_update_latest, result.latest.versionName
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                is UpdateCheckResult.Available -> {
-                    val manifest = result.latest
-                    val patch = checker.preferredPatch(manifest, BuildConfig.VERSION_NAME)
-                    val full = checker.preferredAsset(manifest)
-
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.about_section_update),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
                     Text(
                         stringResource(
-                            R.string.settings_about_update_available, manifest.versionName
+                            R.string.about_update_current,
+                            BuildConfig.VERSION_NAME,
+                            BuildConfig.VERSION_CODE
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+                when (val state = updateState) {
+                    is UpdateUiState.Checking -> CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+
+                    is UpdateUiState.Done -> when (state.result) {
+                        is UpdateCheckResult.UpToDate -> Icon(
+                            Icons.Filled.CheckCircle,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(20.dp)
+                        )
+
+                        is UpdateCheckResult.Available -> StatusBadge(
+                            stringResource(R.string.about_update_new_badge)
+                        )
+
+                        is UpdateCheckResult.Failed -> Icon(
+                            Icons.Outlined.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    UpdateUiState.Idle -> Unit
+                }
+            }
+
+            // ── 状态主体 ──────────────────────────────────────────────────────
+            when (val state = updateState) {
+                UpdateUiState.Idle -> {
+                    Text(
+                        stringResource(R.string.about_update_auto_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    OutlinedButton(
+                        onClick = ::triggerCheck,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.settings_about_update_check))
+                    }
+                }
+
+                UpdateUiState.Checking -> {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        stringResource(R.string.settings_about_update_checking),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+
+                is UpdateUiState.Done -> when (val result = state.result) {
+                    is UpdateCheckResult.UpToDate -> Text(
+                        stringResource(
+                            R.string.settings_about_update_latest, result.latest.versionName
                         ),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
 
-                    // ── 下载源（高速节点/镜像）选择行 ────────────────────────
-                    MirrorSelectionRow(
-                        selected = selectedMirror,
-                        speeds = speeds,
-                        onClick = { showMirrorDialog = true }
-                    )
-
-                    // ── 下载动作区（下载中显示进度，隐藏按钮防重复）──────────
-                    val active = activeDownload
-                    if (active != null) {
-                        LinearProgressIndicator(
-                            progress = { downloadPercent / 100f },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                    is UpdateCheckResult.Failed -> {
                         Text(
                             stringResource(
-                                R.string.settings_about_update_downloading, downloadPercent
+                                R.string.settings_about_update_failed, result.reason
                             ),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline
+                            color = MaterialTheme.colorScheme.error
                         )
-                    } else {
-                        // 补丁可用 → 主推；不可用 → 提示原因
-                        if (patch != null && full != null) {
-                            Button(
-                                onClick = { startDownload(usePatch = true) },
-                                modifier = Modifier.fillMaxWidth()
+                        OutlinedButton(onClick = ::triggerCheck) {
+                            Text(stringResource(R.string.about_update_retry))
+                        }
+                    }
+
+                    is UpdateCheckResult.Available -> {
+                        val manifest = result.latest
+                        val patch = checker.preferredPatch(manifest, BuildConfig.VERSION_NAME)
+                        val full = checker.preferredAsset(manifest)
+
+                        // 新版本横幅：大号版本号 + NEW 徽章
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.60f)
+                        ) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Outlined.Download, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    stringResource(
-                                        R.string.settings_about_update_patch,
-                                        formatMb(patch.sizeBytes)
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "v${manifest.versionName}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
                                     )
-                                )
+                                    Text(
+                                        stringResource(
+                                            R.string.settings_about_update_available,
+                                            manifest.versionName
+                                        ),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                                StatusBadge(stringResource(R.string.about_update_new_badge))
                             }
-                            val saved = 100 - (patch.sizeBytes * 100 / full.sizeBytes).toInt()
-                            Text(
-                                stringResource(
-                                    R.string.settings_about_update_patch_hint,
-                                    patch.fromTag.removePrefix("v"),
-                                    manifest.versionName,
-                                    saved
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                        } else if (manifest.patch?.arm64 != null || manifest.patch?.universal != null) {
-                            // 有补丁但 fromTag 不匹配本地版本（跨多版）
-                            Text(
-                                stringResource(
-                                    R.string.settings_about_update_patch_inapplicable,
-                                    manifest.patch?.arm64?.fromTag
-                                        ?: manifest.patch?.universal?.fromTag.orEmpty(),
-                                    BuildConfig.VERSION_NAME
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
                         }
 
-                        // 全量安装包（永久兜底路径）
-                        if (full != null) {
-                            OutlinedButton(
-                                onClick = { startDownload(usePatch = false) },
-                                modifier = Modifier.fillMaxWidth()
+                        // 下载源（高速节点/镜像）选择行
+                        MirrorSelectionRow(
+                            selected = selectedMirror,
+                            speeds = speeds,
+                            onClick = { showMirrorDialog = true }
+                        )
+
+                        // 下载动作区（下载中显示进度，隐藏按钮防重复）
+                        val active = activeDownload
+                        if (active != null) {
+                            Column(
+                                Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(Icons.Outlined.Download, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
+                                LinearProgressIndicator(
+                                    progress = { downloadPercent / 100f },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                                 Text(
                                     stringResource(
-                                        R.string.settings_about_update_full,
-                                        formatMb(full.sizeBytes)
-                                    )
+                                        R.string.about_update_progress_mb,
+                                        downloadPercent,
+                                        formatMb(downloadedBytes)
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                                Text(
+                                    active.fileName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.outline
                                 )
                             }
                         } else {
-                            // 清单缺资产（schema 异常）：回退发布页外链
-                            val noBrowserHint = stringResource(R.string.settings_about_no_browser)
-                            manifest.releasePage?.let { page ->
-                                Button(
-                                    onClick = { openUrl(context, page, noBrowserHint) },
+                            // 补丁可用 → 主推推荐卡；不可用 → 提示原因
+                            if (patch != null && full != null) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh
+                                        .copy(alpha = 0.55f)
+                                ) {
+                                    Column(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            stringResource(R.string.about_update_patch_recommended),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        val saved =
+                                            100 - (patch.sizeBytes * 100 / full.sizeBytes).toInt()
+                                        Text(
+                                            stringResource(
+                                                R.string.settings_about_update_patch_hint,
+                                                patch.fromTag.removePrefix("v"),
+                                                manifest.versionName,
+                                                saved
+                                            ),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.outline
+                                        )
+                                        Button(
+                                            onClick = { startDownload(usePatch = true) },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.Download,
+                                                contentDescription = null
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                stringResource(
+                                                    R.string.settings_about_update_patch,
+                                                    formatMb(patch.sizeBytes)
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            } else if (manifest.patch?.arm64 != null ||
+                                manifest.patch?.universal != null
+                            ) {
+                                // 有补丁但 fromTag 不匹配本地版本（跨多版）
+                                Text(
+                                    stringResource(
+                                        R.string.settings_about_update_patch_inapplicable,
+                                        manifest.patch?.arm64?.fromTag
+                                            ?: manifest.patch?.universal?.fromTag.orEmpty(),
+                                        BuildConfig.VERSION_NAME
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                            }
+
+                            // 全量安装包（永久兜底路径）
+                            if (full != null) {
+                                OutlinedButton(
+                                    onClick = { startDownload(usePatch = false) },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text(stringResource(R.string.settings_about_update_download))
+                                    Icon(
+                                        Icons.Outlined.Download,
+                                        contentDescription = null
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        stringResource(
+                                            R.string.settings_about_update_full,
+                                            formatMb(full.sizeBytes)
+                                        )
+                                    )
+                                }
+                            } else {
+                                // 清单缺资产（schema 异常）：回退发布页外链
+                                val noBrowserHint =
+                                    stringResource(R.string.settings_about_no_browser)
+                                manifest.releasePage?.let { page ->
+                                    Button(
+                                        onClick = { openUrl(context, page, noBrowserHint) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            stringResource(
+                                                R.string.settings_about_update_download
+                                            )
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-
-                is UpdateCheckResult.Failed -> Text(
-                    stringResource(R.string.settings_about_update_failed, result.reason),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
             }
-
-            else -> Unit
         }
     }
 
@@ -485,7 +660,23 @@ internal fun UpdatePanel() {
     }
 }
 
-// ── 镜像选择行 + 对话框 ──────────────────────────────────────────────────────
+// ── 小控件 ──────────────────────────────────────────────────────────────────
+
+/** 主色实底小徽章（NEW）。 */
+@Composable
+private fun StatusBadge(text: String) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.primary
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
 
 /** 当前下载源展示行：镜像名 + 延迟徽章（AUTO 显示已解析的最快节点）。 */
 @Composable
@@ -496,15 +687,16 @@ private fun MirrorSelectionRow(
 ) {
     val fastest = speeds.minByOrNull { it.value }?.key
     Surface(
-        tonalElevation = 1.dp,
-        shape = MaterialTheme.shapes.small,
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Icon(
                 Icons.Outlined.Speed,
@@ -512,7 +704,6 @@ private fun MirrorSelectionRow(
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(18.dp)
             )
-            Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     stringResource(R.string.settings_about_update_source),
@@ -529,7 +720,7 @@ private fun MirrorSelectionRow(
                 }
                 Text(label, style = MaterialTheme.typography.bodyMedium)
             }
-            // AUTO 档且有测速数据 → 右侧标注（label 里已展示解析出的最快节点名）
+            // 右侧：AUTO 且有测速 → 「最快」；手选 → 延迟毫秒
             if (selected == DownloadMirror.AUTO && fastest != null) {
                 Text(
                     stringResource(R.string.settings_about_update_fastest),
@@ -537,7 +728,6 @@ private fun MirrorSelectionRow(
                     color = MaterialTheme.colorScheme.primary
                 )
             } else if (selected != DownloadMirror.AUTO) {
-                // 手选节点：有测速数据则直接展示该节点延迟
                 speeds[selected]?.let { latency ->
                     Text(
                         stringResource(R.string.settings_about_update_ms, latency),
@@ -546,11 +736,16 @@ private fun MirrorSelectionRow(
                     )
                 }
             }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline
+            )
         }
     }
 }
 
-/** 镜像选择对话框：单选 + 各节点延迟 + 重新测速。 */
+/** 镜像选择对话框：单选 + 各节点延迟 + 打开即测速。 */
 @Composable
 private fun MirrorSelectionDialog(
     selected: DownloadMirror,

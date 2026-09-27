@@ -102,8 +102,9 @@ import kotlin.math.sin
  * 两个实验室各自包裹独立 [ApexTheme]，与系统深浅色设置互不影响 ——
  * 同一设备上并排验证玻璃材质的 Light / Dark 双态表现。
  *
- * 本页是全应用唯一允许无限循环动画的屏幕 —— 漂移光斑是验证实时采样
- * 的必要条件，其余业务界面一律禁止循环动画。
+ * 本页是全应用少数允许无限循环动画的屏幕之一（漂移光斑是验证实时采样
+ * 的必要条件；另一处是 v1.4.3 关于页的玻璃 Hero）—— 其余业务界面一律
+ * 禁止循环动画。
  */
 
 // ═══ 采样验证区尺寸常量 ═══
@@ -213,6 +214,8 @@ private fun GlassLabContent(mode: GlassLabMode) {
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         LabHeader(mode)
+        // v1.4.3：顶阶动态（流光边框/镜面扫掠/呼吸光晕）—— 页头之后首个区块
+        DynamicsSection()
         BackdropZone(state = backdropState, mode = mode)
         SamplesSection(state = backdropState, mode = mode)
         if (mode == GlassLabMode.DAY) {

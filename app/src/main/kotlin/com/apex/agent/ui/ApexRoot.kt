@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -60,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
 import com.apex.agent.ui.component.ContextMeterBar
 import com.apex.agent.ui.glass.GlassIconButton
+import com.apex.agent.ui.screen.about.AboutScreen
 import com.apex.agent.ui.screen.agent.AgentChatScreen
 import com.apex.agent.ui.screen.agent.AgentChatViewModel
 import com.apex.agent.ui.screen.code.CodeScreen
@@ -106,6 +108,9 @@ sealed class DrawerDestination(
     data object Settings : DrawerDestination("settings", R.string.drawer_settings, Icons.Default.Settings)
     // 玻璃实验室 —— 内部 Liquid Glass 验收页（Spec §20：背景变化/网格/高对比文字/移动元素）
     data object GlassLab : DrawerDestination("glasslab", R.string.drawer_glasslab, Icons.Default.BlurOn)
+    // 关于页 —— 固定在抽屉最下方的独立入口（v1.4.3：从设置页「关于」区升级为一级页面；
+    // 图标用 Outlined 与 Log 页的 Filled.Info 区分）
+    data object About : DrawerDestination("about", R.string.drawer_about, Icons.Outlined.Info)
 }
 
 /**
@@ -129,6 +134,8 @@ private val DestinationSaver = Saver<DrawerDestination, String>(
             DrawerDestination.Vault.route -> DrawerDestination.Vault
             DrawerDestination.Log.route -> DrawerDestination.Log
             DrawerDestination.Settings.route -> DrawerDestination.Settings
+            DrawerDestination.GlassLab.route -> DrawerDestination.GlassLab
+            DrawerDestination.About.route -> DrawerDestination.About
             else -> DrawerDestination.Agent
         }
     }
@@ -265,6 +272,7 @@ fun ApexRoot() {
                             onBack = { currentDestination = DrawerDestination.Agent }
                         )
                         DrawerDestination.GlassLab -> GlassLabScreen()
+                        DrawerDestination.About -> AboutScreen()
                     }
                 }
             }
