@@ -579,15 +579,12 @@ class BrowserEngine @Inject constructor(
     ): WaitOutcome = withContext(Dispatchers.Main) {
         val tab = activeTab()
             ?: return@withContext WaitOutcome(false, "no active tab", 0)
+        if (mode != "selector" && mode != "text" && mode != "url") {
+            return@withContext WaitOutcome(false, "unknown mode '$mode' (use selector|text|url)", 0)
+        }
         val effectiveTimeout = timeoutMs.coerceIn(500, 60_000)
         val start = SystemClock.uptimeMillis()
-        while (true) {
-            val elapsed = SystemClock.uptimeMillis() - start
-            if (elapsed >= effectiveTimeout) {
-                return@withContext WaitOutcome(
-                    false, "timeout (${effectiveTimeout}ms) waiting for $mode '$value'", elapsed
-                )
-            }
+        while (SystemClock.uptimeMillis() - start < effectiveTimeout) {
             val hit = when (mode) {
                 "selector" -> runCatching {
                     evaluateBoolean(tab.webView, selectorCheckJs(value))
@@ -595,14 +592,16 @@ class BrowserEngine @Inject constructor(
                 "text" -> runCatching {
                     evaluateBoolean(tab.webView, textContainsJs(value))
                 }.getOrDefault(false)
-                "url" -> tab.webView.url?.contains(value, ignoreCase = true) == true
-                else -> return@withContext WaitOutcome(
-                    false, "unknown mode '$mode' (use selector|text|url)", elapsed
-                )
+                else -> tab.webView.url?.contains(value, ignoreCase = true) == true
             }
-            if (hit) return@withContext WaitOutcome(true, "matched $mode", elapsed)
+            if (hit) return@withContext WaitOutcome(true, "matched $mode", SystemClock.uptimeMillis() - start)
             delay(pollMs.coerceIn(100, 2000))
         }
+        WaitOutcome(
+            false,
+            "timeout (${effectiveTimeout}ms) waiting for $mode '$value'",
+            SystemClock.uptimeMillis() - start
+        )
     }
 
     /** 同步选择器存在性检查（无 Promise——evaluateJavascript 回调不等 Promise）。 */

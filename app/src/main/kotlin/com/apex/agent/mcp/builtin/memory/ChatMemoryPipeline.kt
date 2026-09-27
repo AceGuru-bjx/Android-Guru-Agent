@@ -129,7 +129,7 @@ class ChatMemoryPipeline @Inject constructor(
      * 防止长篇独白一次灌满画像。
      */
     private fun captureHeuristic(userText: String) {
-        val sentences = userText.split('[，。！？；\n,.!?;]'.toCharArray())
+        val sentences = userText.split(Regex("[，。！？；\\n,.!?;]+"))
             .map { it.trim() }
             .filter { it.length in 2..60 && '我' in it }
         val captured = mutableListOf<String>()
