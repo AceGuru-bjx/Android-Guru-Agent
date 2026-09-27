@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.minimumInteractiveComponentSize
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -92,7 +92,7 @@ internal fun CodeTerminalPanel(
                 )
                 // 48dp 触区（Material 无障碍红线）+ 16dp 视觉图标：
                 // minimumInteractiveComponentSize 保触区，Icon 缩到视觉尺寸
-                IconButton(onClick = onToggleCollapse, modifier = Modifier.minimumInteractiveComponentSize()) {
+                IconButton(onClick = onToggleCollapse, modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) {
                     Icon(
                         imageVector = if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
                         contentDescription = stringResource(R.string.code_stream_terminal_toggle),

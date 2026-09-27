@@ -130,29 +130,32 @@ object UpdateHttp {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
-
-    /** 可取消的同步化请求：协程取消 → call.cancel()，响应体自动关闭。 */
-    suspend fun OkHttpClient.awaitBody(request: Request): String =
-        suspendCancellableCoroutine { cont ->
-            val call = newCall(request)
-            cont.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onResponse(call: Call, response: Response) {
-                    response.use {
-                        val text = runCatching {
-                            if (!it.isSuccessful) error("HTTP ${it.code}")
-                            it.body?.string() ?: error("empty manifest body")
-                        }
-                        cont.resumeWith(text)
-                    }
-                }
-
-                override fun onFailure(call: Call, e: IOException) {
-                    if (cont.isActive) cont.resumeWithException(e)
-                }
-            })
-        }
 }
+
+/**
+ * 可取消的同步化请求：协程取消 → call.cancel()，响应体自动关闭。
+ * （顶级扩展——object 内声明的扩展函数同包也不自动解析，需 import 成员路径）
+ */
+private suspend fun OkHttpClient.awaitBody(request: Request): String =
+    suspendCancellableCoroutine { cont ->
+        val call = newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    val text = runCatching {
+                        if (!it.isSuccessful) error("HTTP ${it.code}")
+                        it.body?.string() ?: error("empty manifest body")
+                    }
+                    cont.resumeWith(text)
+                }
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+        })
+    }
 
 /** 更新检查结果三态 —— UI 按类型渲染，无需解析错误码。 */
 sealed interface UpdateCheckResult {
