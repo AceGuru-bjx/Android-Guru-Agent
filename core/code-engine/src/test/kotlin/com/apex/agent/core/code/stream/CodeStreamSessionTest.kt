@@ -248,4 +248,130 @@ class CodeStreamSessionTest {
         assertEquals(ToolCallStatus.FAILED, capsule.call.status)
         assertEquals(1, capsule.call.exitCode)
     }
+
+    // ═══ 第三轮质量审计回归（P0/P1）═══
+
+    @Test
+    fun `restore then new run produces unique entry ids`() {
+        // P0：replaceAll 不回拨序号 → nextId() 从 e-1 重发 → LazyColumn 重复 key 崩溃
+        val first = CodeStreamSession()
+        first.beginRun("老任务")
+        first.onEvent(AgentEvent.ResponseChunk("老结论"))
+        first.onEvent(AgentEvent.ResponseComplete("老结论"))
+        first.onEvent(AgentEvent.Complete("done", 1, 0, 100))
+        val restored = first.entriesSnapshot()
+
+        val second = CodeStreamSession()
+        second.replaceAll(restored)
+        second.beginRun("新任务")
+        second.onEvent(AgentEvent.ResponseChunk("新结论"))
+        val ids = second.entriesSnapshot().map { it.id }
+        assertEquals("恢复后新事件 id 不得与恢复轴撞号", ids.size, ids.toSet().size)
+    }
+
+    @Test
+    fun `abort mid stream then new run does not merge bubbles`() {
+        // P1：中止后 streamingAssistant 悬挂 → 下一轮文本拼进旧气泡
+        val s = CodeStreamSession()
+        s.beginRun("第一轮")
+        s.onEvent(AgentEvent.ResponseChunk("第一轮的流式文本"))
+        // 中止（无 ResponseComplete）
+        s.onEvent(AgentEvent.Aborted)
+        val afterAbort = s.snapshot()
+        val bubble1 = afterAbort.entries.filterIsInstance<StreamEntry.AssistantEntry>().single()
+        assertTrue("中止后旧气泡应收口（不再生成中）", !bubble1.isStreaming)
+        // 新一轮
+        s.beginRun("第二轮")
+        s.onEvent(AgentEvent.ResponseChunk("第二轮的新文本"))
+        val snap = s.snapshot()
+        val bubbles = snap.entries.filterIsInstance<StreamEntry.AssistantEntry>()
+        assertEquals("两轮各一条气泡", 2, bubbles.size)
+        assertEquals("第一轮的流式文本", bubbles[0].text)
+        assertEquals("第二轮的新文本", bubbles[1].text)
+    }
+
+    @Test
+    fun `verify cycle folding preserves in round thinking and status entries`() {
+        // P1：闭环折叠整段 subList 清空 → 轮内思考/迭代状态条目被吞
+        val s = CodeStreamSession()
+        s.beginRun("改完自检")
+        s.onEvent(editStart("e1", "A.kt"))
+        s.onEvent(AgentEvent.ToolCallComplete("e1", "code_edit", "{}", "ok", "", true, 30))
+        // 真实事件序：edit 完成 → 下一轮迭代声明 → 思考 → verify
+        s.onEvent(AgentEvent.IterationStart(2))
+        s.onEvent(AgentEvent.ThinkingChunk("思考怎么修"))
+        s.onEvent(AgentEvent.ToolCallStart("v1", "lint", """{"path":"A.kt"}"""))
+        s.onEvent(AgentEvent.ToolCallComplete("v1", "lint", "{}", "no issues", "", true, 40))
+        s.onEvent(AgentEvent.Complete("done", 2, 2, 500))
+        val snap = s.snapshot()
+        assertEquals("轮次卡存在", 1, snap.entries.count { it is StreamEntry.VerifyCycleEntry })
+        assertTrue(
+            "轮内思考条目必须原位保留",
+            snap.entries.any { it is StreamEntry.ThinkingEntry && (it as StreamEntry.ThinkingEntry).text == "思考怎么修" }
+        )
+        assertTrue(
+            "轮内迭代状态行必须原位保留",
+            snap.entries.any { it is StreamEntry.StatusEntry && (it as StreamEntry.StatusEntry).text.contains("第 2 轮") }
+        )
+    }
+
+    @Test
+    fun `failed complete replay does not double count failures`() {
+        // P2：重放已终态调用的 Complete → failedToolCallCount 重复自增
+        val s = CodeStreamSession()
+        s.beginRun("重放场景")
+        s.onEvent(bashStart("b1", "false"))
+        val failed = AgentEvent.ToolCallComplete("b1", "terminal.exec", "{}", "exit code 1", "", false, 5)
+        s.onEvent(failed)
+        s.onEvent(failed) // 重放
+        val snap = s.snapshot()
+        assertEquals(1, snap.failedToolCallCount)
+    }
+
+    @Test
+    fun `complete without prior chunk creates terminal entry`() {
+        // P2：非流式路径 ThinkingComplete/ResponseComplete 全文不再静默丢弃
+        val s = CodeStreamSession()
+        s.beginRun("非流式")
+        s.onEvent(AgentEvent.ThinkingComplete("一次性完整思考"))
+        s.onEvent(AgentEvent.ResponseComplete("一次性完整结论"))
+        val snap = s.snapshot()
+        assertEquals(
+            "一次性完整思考",
+            snap.entries.filterIsInstance<StreamEntry.ThinkingEntry>().single().text
+        )
+        assertEquals(
+            "一次性完整结论",
+            snap.entries.filterIsInstance<StreamEntry.AssistantEntry>().single().text
+        )
+    }
+
+    @Test
+    fun `replaceAll restores affected files from last file chips entry`() {
+        // P2：重启后 committedFiles 不再清零
+        val first = CodeStreamSession()
+        first.beginRun("改文件")
+        first.onEvent(editStart("e1", "A.kt"))
+        first.onEvent(AgentEvent.ToolCallComplete("e1", "code_edit", "{}", "ok", "", true, 10))
+        first.onEvent(AgentEvent.Complete("done", 1, 1, 100))
+        val restored = first.entriesSnapshot()
+
+        val second = CodeStreamSession()
+        second.replaceAll(restored)
+        assertEquals(listOf("A.kt"), second.snapshot().affectedFiles)
+    }
+
+    @Test
+    fun `affected files reset per run`() {
+        // 文档语义：「本轮运行」触碰的文件
+        val s = CodeStreamSession()
+        s.beginRun("第一轮")
+        s.onEvent(editStart("e1", "A.kt"))
+        s.onEvent(AgentEvent.ToolCallComplete("e1", "code_edit", "{}", "ok", "", true, 10))
+        s.onEvent(AgentEvent.Complete("done", 1, 1, 100))
+        assertEquals(listOf("A.kt"), s.snapshot().affectedFiles)
+        s.beginRun("第二轮（未改文件）")
+        s.onEvent(AgentEvent.Complete("done", 1, 0, 50))
+        assertTrue("新一轮开始后归零", s.snapshot().affectedFiles.isEmpty())
+    }
 }

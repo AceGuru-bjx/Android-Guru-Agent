@@ -97,7 +97,8 @@ object CodeStreamCheckpoint {
             .map { it.id }
         return StorableCheckpoint(
             workspaceId = workspaceId,
-            lastEventId = "e-${entries.lastOrNull()?.id ?: ""}",
+            // 条目 id 本身即 "e-42" 形态——不再二次加前缀（曾产出 "e-e-42"）
+            lastEventId = entries.lastOrNull()?.id ?: "",
             committedFiles = emptyList(), // 由 VM 侧从 affectedFiles 注入（见 toCheckpoint 重载）
             pendingToolCallIds = pending,
             entries = storable,
