@@ -42,6 +42,8 @@ class FakeNativePty : NativePty {
         var exited: AtomicBoolean = AtomicBoolean(false),
         var exitCode: AtomicInteger = AtomicInteger(-1),
         var currentCommand: String? = null,
+        // T87：可注入的 exec 失败原因（默认 null = exec 成功）。
+        var spawnError: String? = null,
         var commandThread: Thread? = null,
         var interrupted: AtomicBoolean = AtomicBoolean(false),
         var runningJob: AtomicBoolean = AtomicBoolean(false),
@@ -194,6 +196,13 @@ class FakeNativePty : NativePty {
     override fun nativeGetExitCode(sessionId: Int): Int {
         val s = sessions[sessionId] ?: return -1
         return if (s.exited.get()) s.exitCode.get() else -1
+    }
+
+    // T87：假实现恒无 spawn 错误（exec 失败路径由真实 JNI 层覆盖；
+    // 需要模拟时可设置 session.spawnError）。
+    override fun nativeGetSpawnError(sessionId: Int): String? {
+        val s = sessions[sessionId] ?: return null
+        return s.spawnError
     }
 
     override fun nativeWaitExit(sessionId: Int, timeoutMs: Long): Int {

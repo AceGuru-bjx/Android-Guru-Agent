@@ -252,6 +252,18 @@ Java_com_apex_agent_platform_terminal_NativePty_nativeGetExitCode(
     return PtyEngine::instance().getExitCode(sessionId);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// T87：exec 失败原因查询 —— createSessionArgv 后立即调用；空串 = exec 成功。
+// 「创建成功但进程即死」的会话（如 proot ENOENT/ELIBBAD）由此获得确切根因，
+// 不再让用户对着后续每次写入的「输入失败」猜谜。
+// ─────────────────────────────────────────────────────────────────────────
+JNIEXPORT jstring JNICALL
+Java_com_apex_agent_platform_terminal_NativePty_nativeGetSpawnError(
+    JNIEnv* env, jobject, jint sessionId) {
+    std::string err = PtyEngine::instance().spawnError(sessionId);
+    return env->NewStringUTF(err.c_str());
+}
+
 JNIEXPORT void JNICALL
 Java_com_apex_agent_platform_terminal_NativePty_nativeCloseSession(
     JNIEnv*, jobject, jint sessionId) {

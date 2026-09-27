@@ -34,6 +34,8 @@ class JniBridgeMappingTest {
         var alive = true
         var exited = false
         var exitCode = -1
+        // T87：可注入的 exec 失败原因（默认 null = exec 成功）。
+        var spawnError: String? = null
     }
 
     private class FakeJniBridge : NativePtyJniBridge {
@@ -154,6 +156,10 @@ class JniBridgeMappingTest {
         override fun nativeGetPid(sessionId: Int): Int = sessions[sessionId]?.id ?: -1
         override fun nativeGetExitCode(sessionId: Int): Int =
             sessions[sessionId]?.let { if (it.exited) it.exitCode else -1 } ?: -1
+
+        // T87：exec 失败原因（假桥恒 null —— 真实路径由 native 层/契约测试覆盖）。
+        override fun nativeGetSpawnError(sessionId: Int): String? =
+            sessions[sessionId]?.spawnError
 
         override fun nativeCloseSession(sessionId: Int) {
             sessions.remove(sessionId)?.let { it.alive = false; it.exited = true }

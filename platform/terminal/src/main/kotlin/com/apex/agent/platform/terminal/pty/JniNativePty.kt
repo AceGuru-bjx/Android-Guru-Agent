@@ -139,6 +139,9 @@ class JniNativePty(
 
     override fun nativeGetExitCode(sessionId: Int): Int = jni.nativeGetExitCode(sessionId)
 
+    override fun nativeGetSpawnError(sessionId: Int): String? =
+        try { jni.nativeGetSpawnError(sessionId) } catch (e: Exception) { null }
+
     override fun nativeWaitExit(sessionId: Int, timeoutMs: Long): Int {
         // Poll nativeIsAlive + nativeGetExitCode (Spec §44.1 EXTEND — reliable exit).
         val deadline = System.currentTimeMillis() + timeoutMs

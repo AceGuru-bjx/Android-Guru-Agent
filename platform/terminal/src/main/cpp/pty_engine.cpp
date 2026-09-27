@@ -45,11 +45,20 @@ int PtyEngine::createSessionArgv(const std::vector<std::string>& argv,
     int id = nextId_++;
     auto session = std::make_shared<PtySession>(id, argv, workDir, envVars, rows, cols);
     if (session->pid() <= 0) {
-        return -1; // 创建失败
+        return -1; // 创建失败（forkpty 失败）
     }
+    // T87：exec 失败的会话仍登记（spawnError 可查、可显式 close），
+    // 由 Kotlin 层 createFromSpec 紧接着 nativeGetSpawnError 探测并失败。
     sessions_[id] = std::move(session);
-    LOGI("Created session %d (total active: %zu)", id, sessions_.size());
+    LOGI("Created session %d (total active: %zu)%s", id, sessions_.size(),
+         sessions_[id]->spawnFailed() ? " [SPAWN-ERROR]" : "");
     return id;
+}
+
+// T87：exec 失败原因（空串 = 成功/未知）。
+std::string PtyEngine::spawnError(int sessionId) {
+    auto s = acquire(sessionId);
+    return s ? s->spawnError() : "";
 }
 
 bool PtyEngine::write(int sessionId, const char* data, size_t len) {
