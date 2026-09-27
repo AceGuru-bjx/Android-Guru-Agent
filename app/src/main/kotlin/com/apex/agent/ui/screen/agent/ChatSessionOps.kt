@@ -91,10 +91,14 @@ internal fun AgentChatViewModel.exportChatSessionMarkdown(context: Context, sess
     viewModelScope.launch(Dispatchers.IO) {
         runCatching {
             val summary = chatHistory.loadSessions().firstOrNull { it.id == sessionId }
-                ?: return@launch _uiFeedback.tryEmit(strFmt(R.string.chat_session_export_not_found))
+                ?: run {
+                    _uiFeedback.tryEmit(strFmt(R.string.chat_session_export_not_found))
+                    return@launch
+                }
             val messages = chatHistory.loadMessages(sessionId)
             if (messages.isEmpty()) {
-                return@launch _uiFeedback.tryEmit(strFmt(R.string.chat_session_export_not_found))
+                _uiFeedback.tryEmit(strFmt(R.string.chat_session_export_not_found))
+                return@launch
             }
             val markdown = buildSessionMarkdown(summary, messages)
             val dir = File(appContext.cacheDir, "exports").apply { mkdirs() }
@@ -136,10 +140,16 @@ internal fun AgentChatViewModel.importChatSessionFromUri(uri: Uri) {
         runCatching {
             val text = context.contentResolver.openInputStream(uri)?.use { stream ->
                 stream.bufferedReader().readText()
-            } ?: return@launch _uiFeedback.tryEmit(strFmt(R.string.chat_session_import_failed))
+            } ?: run {
+                _uiFeedback.tryEmit(strFmt(R.string.chat_session_import_failed))
+                return@launch
+            }
             val parsed = sessionOpsJson.decodeFromString(SessionExportFile.serializer(), text)
             val importedId = chatHistory.importSession(parsed.summary, parsed.messages)
-                ?: return@launch _uiFeedback.tryEmit(strFmt(R.string.chat_session_import_failed))
+                ?: run {
+                    _uiFeedback.tryEmit(strFmt(R.string.chat_session_import_failed))
+                    return@launch
+                }
             _chatSessions.value = chatHistory.loadSessions()
             _uiFeedback.tryEmit(strFmt(R.string.chat_session_imported))
             AppLogger.instance.info(

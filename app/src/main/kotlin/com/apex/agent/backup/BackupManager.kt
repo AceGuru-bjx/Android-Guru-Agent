@@ -293,7 +293,9 @@ class BackupManager @Inject constructor(
      *   此异常是防御性第二道闸。
      */
     fun export(options: ExportOptions): BackupBundle {
-        if (options.includeVault && options.vaultPassphrase.isNullOrEmpty()) {
+        if (options.includeVault &&
+            (options.vaultPassphrase == null || options.vaultPassphrase.isEmpty())
+        ) {
             throw IllegalArgumentException("vault passphrase required when includeVault=true")
         }
         val settings = mutableMapOf<String, String>()
@@ -307,7 +309,7 @@ class BackupManager @Inject constructor(
             val redacted = redactProviderApiKeys(raw)
             if (redacted == null) {
                 // 解析失败：该键整体跳过（宁缺勿泄），记 error 供用户在日志页追溯
-                AppLogger.warn(
+                AppLogger.instance.warn(
                     category = LogCategory.SYSTEM,
                     source = "BackupManager",
                     message = "providers key skipped in export: unparseable JSON",
@@ -481,7 +483,7 @@ class BackupManager @Inject constructor(
         }
 
         if (restoreVault && bundle.vaultEnvelope != null) {
-            if (vaultPassphrase.isNullOrEmpty()) {
+            if (vaultPassphrase == null || vaultPassphrase.isEmpty()) {
                 errors += ERR_VAULT_PASSPHRASE_MISSING
             } else {
                 val entries = runCatching {
@@ -512,7 +514,7 @@ class BackupManager @Inject constructor(
      * 按整体跳过处理）。其余字段逐字保留 —— 往返保真。
      */
     private fun redactProviderApiKeys(raw: String): Pair<String, Int>? = runCatching {
-        val arr = json.parseToJsonElement(raw) as? JsonArray
+        val arr = json.parseToJsonElement(raw) as? JsonArray ?: return null
         var removed = 0
         val redacted = arr.map { element ->
             val obj = element as? JsonObject ?: return@map element

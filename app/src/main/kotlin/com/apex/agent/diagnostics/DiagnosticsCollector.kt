@@ -54,7 +54,7 @@ class DiagnosticsCollector @Inject constructor(
 
     // ───────────────────────── 应用信息 ─────────────────────────
 
-    /** 应用信息行：版本/构建/安装来源/安装与更新时间/targetSdk/编译 SDK。 */
+    /** 应用信息行：版本/构建/安装来源/安装与更新时间/targetSdk/minSdk。 */
     fun appInfoRows(): List<DiagRow> {
         val pkg = packageInfo()
         return listOf(
@@ -79,7 +79,7 @@ class DiagnosticsCollector @Inject constructor(
                 str(R.string.diag_field_target_sdk),
                 pkg?.applicationInfo?.targetSdkVersion?.toString() ?: str(R.string.diag_unknown)
             ),
-            DiagRow(str(R.string.diag_field_compile_sdk), compileSdkLabel(pkg))
+            DiagRow(str(R.string.diag_field_min_sdk), minSdkLabel())
         )
     }
 
@@ -99,12 +99,17 @@ class DiagnosticsCollector @Inject constructor(
         }.getOrDefault(fallback)
     }
 
-    /** 编译 SDK：PackageInfo.compileSdkVersion 为 API 28+ 字段，低版本或读取失败返回未知。 */
-    private fun compileSdkLabel(pkg: PackageInfo?): String {
+    /**
+     * 最低支持 Android 版本：ApplicationInfo.minSdkVersion（API 24+ 公开字段，
+     * 本应用 minSdk 26 无需守卫）。原实现引用 PackageInfo.compileSdkVersion
+     * —— 该字段不存在（CI 实证）；编译 SDK 在运行期无跨版本安全的公开查询
+     * 通道，改展示 minSdk（对用户侧诊断同样有价值）。
+     */
+    private fun minSdkLabel(): String {
         val fallback = str(R.string.diag_unknown)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return fallback
         return runCatching {
-            pkg?.compileSdkVersion?.takeIf { it > 0 }?.toString() ?: fallback
+            context.applicationInfo.minSdkVersion.takeIf { it > 0 }?.toString()
+                ?: "API ${Build.VERSION_CODES.O}"
         }.getOrDefault(fallback)
     }
 

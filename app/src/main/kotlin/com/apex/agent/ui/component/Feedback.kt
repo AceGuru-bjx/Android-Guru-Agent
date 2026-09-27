@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocal
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -182,7 +183,7 @@ object NoopFeedbackController : FeedbackController()
  * 反馈控制器注入点。staticCompositionLocalOf：controller 实例在 Host 生命周期
  * 内不变，静态局部避免 provides 变化引发整树重组（读取点零开销）。
  */
-val LocalFeedbackController: CompositionLocal<FeedbackController> =
+val LocalFeedbackController: ProvidableCompositionLocal<FeedbackController> =
     staticCompositionLocalOf { NoopFeedbackController }
 
 /**

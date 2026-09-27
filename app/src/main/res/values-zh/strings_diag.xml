@@ -26,7 +26,7 @@
     <string name="diag_field_first_install">首次安装</string>
     <string name="diag_field_last_update">最近更新</string>
     <string name="diag_field_target_sdk">目标 SDK</string>
-    <string name="diag_field_compile_sdk">编译 SDK</string>
+    <string name="diag_field_min_sdk">最低支持系统</string>
 
     <!-- ═══ 设备信息字段名 ═══ -->
     <string name="diag_field_model">厂商型号</string>
