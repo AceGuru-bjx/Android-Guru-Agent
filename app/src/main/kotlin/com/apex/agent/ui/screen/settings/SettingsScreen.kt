@@ -274,6 +274,8 @@ private fun InterfaceTab(agent: AgentSettings, onAgent: (AgentSettings) -> Unit)
     ) {
         AppearanceSection(agent, onAgent)
         ChatDisplaySection(agent, onAgent)
+        // v1.4.4 #5：备份与恢复（设置 + 聊天会话整体导出导入 + Vault 加密信封）
+        BackupSection()
         NotesSection()
         // 「关于」区已迁至抽屉最下方的一级页面（v1.4.3，见 ui/screen/about/）
     }
@@ -822,6 +824,11 @@ private fun AgentSection(agent: AgentSettings, onUpdate: (AgentSettings) -> Unit
             onUpdate(agent.copy(maxIterations = it))
         }
         SwitchRow("Keep Alive", agent.keepAlive) { onUpdate(agent.copy(keepAlive = it)) }
+        // v1.4.4 #4：任务完成通知（✅已接线——EventApplier Complete 钩子；前台静音）
+        SwitchRow(stringResource(R.string.settings_task_notify_title), agent.taskCompletionNotify,
+            description = stringResource(R.string.settings_task_notify_desc)) {
+            onUpdate(agent.copy(taskCompletionNotify = it))
+        }
         SliderRow("Reflection Rounds", agent.reflectionRounds.toFloat(), 1f..3f, 2,
             description = stringResource(R.string.settings_reflection_rounds_desc),
             onValueChange = { onUpdate(agent.copy(reflectionRounds = it.toInt())) },

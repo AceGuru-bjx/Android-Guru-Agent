@@ -25,7 +25,17 @@ data class ChatSessionSummary(
     val updatedAt: Long,
     val messageCount: Int,
     /** 会话使用的模型名（展示用，可能为空）。 */
-    val modelId: String = ""
+    val modelId: String = "",
+    /**
+     * 置顶（v1.4.4 #5）：列表页置顶分组展示，排序不受 updatedAt 影响。
+     * 默认 false —— 旧数据缺省反序列化自动获得，零迁移。
+     */
+    val pinned: Boolean = false,
+    /**
+     * 标题为用户自定义（v1.4.4 #5 重命名）：true 时自动归档不再用
+     * historyTitle() 覆盖标题（保留用户命名权）。
+     */
+    val customTitle: Boolean = false
 )
 
 /** 历史消息（扁平展示语义）。 */

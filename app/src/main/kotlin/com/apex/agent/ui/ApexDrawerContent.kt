@@ -175,11 +175,15 @@ fun ApexDrawerContent(
                         DrawerDestination.Market,
                         DrawerDestination.Memory,
                         DrawerDestination.Tasks,
+                        // v1.4.4 #6：用量仪表盘（数据洞察，与任务历史相邻）
+                        DrawerDestination.Usage,
                         DrawerDestination.Storage,
                         DrawerDestination.Permissions,
                         // #167 加密剪切板金库：与权限页相邻（同为安全入口）
                         DrawerDestination.Vault,
                         DrawerDestination.Log,
+                        // v1.4.4 #7：诊断中心（日志/崩溃/设备信息，与日志页相邻）
+                        DrawerDestination.Diagnostics,
                         DrawerDestination.Settings,
                         DrawerDestination.GlassLab
                     )

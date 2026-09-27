@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -310,7 +313,12 @@ internal fun AgentBubble(
         )
     }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            // v1.4.4 #8 无障碍：完成回复的 liveRegion —— TalkBack 在新气泡出现时
+            // 主动播报（流式增量不设 liveRegion，避免每 token 一次的爆音轰炸；
+            // 完成态整条播报一次即足够的上下文）。
+            .semantics { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.Start
     ) {
         val outlineVariant = MaterialTheme.colorScheme.outlineVariant

@@ -540,4 +540,11 @@
     <string name="about_link_release">Release channel</string>
     <string name="about_link_issues">Report an issue</string>
     <string name="about_footer">Apex Agent · open source</string>
+    <!-- ═══ v1.4.4：用量仪表盘 / 诊断中心（抽屉目的地）═══ -->
+    <string name="drawer_usage">Usage</string>
+    <string name="drawer_diagnostics">Diagnostics</string>
+
+    <!-- ═══ v1.4.4 #4：任务完成通知设置 ═══ -->
+    <string name="settings_task_notify_title">Task completion notification</string>
+    <string name="settings_task_notify_desc">Notify when a task finishes while the app is in background (silenced in foreground)</string>
 </resources>

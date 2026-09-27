@@ -320,4 +320,27 @@
     <string name="html_preview_refresh">Reload preview</string>
     <string name="html_preview_close">Close preview</string>
     <string name="html_preview_load_failed">Failed to load file</string>
+
+    <!-- ═══ v1.4.4 #5：会话操作补全 —— 搜索/置顶/重命名/导出导入/分享接收 ═══ -->
+    <string name="chat_session_search_hint">Search title &amp; message content</string>
+    <string name="chat_session_search_empty">No sessions match your search</string>
+    <string name="chat_session_pinned_group">Pinned</string>
+    <string name="chat_session_recent_group">Recent</string>
+    <string name="chat_session_pin">Pin session</string>
+    <string name="chat_session_unpin">Unpin session</string>
+    <string name="chat_session_more">More actions</string>
+    <string name="chat_session_rename">Rename</string>
+    <string name="chat_session_rename_title">Rename session</string>
+    <string name="chat_session_rename_hint">Session title</string>
+    <string name="chat_session_rename_confirm">Save</string>
+    <string name="chat_session_renamed">Renamed to %1$s</string>
+    <string name="chat_session_rename_failed">Rename failed (empty title or session missing)</string>
+    <string name="chat_session_export">Export as Markdown</string>
+    <string name="chat_session_export_chooser">Share session</string>
+    <string name="chat_session_export_not_found">Session not found or empty</string>
+    <string name="chat_session_export_failed">Export failed</string>
+    <string name="chat_session_import">Import session</string>
+    <string name="chat_session_import_failed">Import failed (invalid file or no messages)</string>
+    <string name="chat_session_imported">Session imported</string>
+    <string name="chat_share_received">Shared content received — review before sending</string>
 </resources>

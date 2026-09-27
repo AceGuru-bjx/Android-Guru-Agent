@@ -540,4 +540,11 @@
     <string name="about_link_release">发布通道</string>
     <string name="about_link_issues">问题反馈</string>
     <string name="about_footer">Apex Agent · 开源共建</string>
+    <!-- ═══ v1.4.4：用量仪表盘 / 诊断中心（抽屉目的地）═══ -->
+    <string name="drawer_usage">用量</string>
+    <string name="drawer_diagnostics">诊断</string>
+
+    <!-- ═══ v1.4.4 #4：任务完成通知设置 ═══ -->
+    <string name="settings_task_notify_title">任务完成通知</string>
+    <string name="settings_task_notify_desc">App 在后台时任务跑完发送系统通知（前台使用时不打扰）</string>
 </resources>
