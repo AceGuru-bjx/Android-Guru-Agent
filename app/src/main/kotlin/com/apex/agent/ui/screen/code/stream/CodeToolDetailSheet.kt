@@ -89,8 +89,10 @@ internal fun CodeToolDetailSheet(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    // statusLabel 是 @Composable——先在组合上下文求值，再进 buildString
+                    val statusText = statusLabel(call.status)
                     val meta = buildString {
-                        append(statusLabel(call.status))
+                        append(statusText)
                         append(" · ").append(formatCapsuleDuration(call.displayDuration(System.currentTimeMillis())))
                         call.exitCode?.let { append(" · exit $it") }
                     }
