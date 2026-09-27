@@ -1,7 +1,12 @@
 package com.apex.agent.ui.screen.code.stream
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -54,7 +59,7 @@ internal fun CodeStreamTimeline(
 ) {
     val listState = rememberLazyListState()
     val grouped = remember(snapshot.entries) { groupConsecutive(snapshot.entries) }
-    val contentLength = snapshot.entries.sumOf { entryContentLength(it) }
+    val contentLength = remember(snapshot.entries) { snapshot.entries.sumOf { entryContentLength(it) } }
     val anchor = rememberStreamAnchor(
         listState = listState,
         itemCountKey = snapshot.entries.size,
@@ -62,9 +67,10 @@ internal fun CodeStreamTimeline(
         isStreaming = isStreaming
     )
     val scope = rememberCoroutineScope()
-    val showFab by remember {
-        derivedStateOf { !anchor.isAtBottom && snapshot.entries.isNotEmpty() }
-    }
+    // FAB 可见性只依赖可追踪的 derived state（anchor.isAtBottom）；
+    // entries 判空放到组合处——原实现把首次组合时的空 snapshot 闭包进
+    // derivedStateOf，普通属性读取不被追踪 → FAB 永远不出现（P0）
+    val showFab by remember { derivedStateOf { !anchor.isAtBottom } }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -88,9 +94,19 @@ internal fun CodeStreamTimeline(
                     }
                 }
             }
+            // 尾哨兵：snapToLast 锚到末条顶部而非尾部——长气泡流式时新内容
+            // 在视口外不可见；1dp 哨兵恒为末条，贴它即贴底（P1）
+            item(key = "stream-tail-sentinel") {
+                Spacer(modifier = Modifier.height(1.dp))
+            }
         }
 
-        if (showFab) {
+        AnimatedVisibility(
+            visible = showFab && snapshot.entries.isNotEmpty(),
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
             ExtendedFloatingActionButton(
                 onClick = { scope.launch { anchor.animateToLast() } },
                 icon = {
@@ -101,9 +117,7 @@ internal fun CodeStreamTimeline(
                 },
                 text = { Text(stringResource(R.string.code_stream_fab_bottom)) },
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 8.dp)
+                modifier = Modifier.padding(bottom = 8.dp)
             )
         }
     }

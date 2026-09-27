@@ -1,6 +1,9 @@
 package com.apex.agent.ui.screen.code.stream
 
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -9,8 +12,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -30,65 +36,79 @@ import com.apex.agent.core.code.stream.UnifiedDiffParser
 /**
  * # Code Diff View — hunk 级文件 Diff 渲染（规格书：Diff 按 hunk 级拼装）
  *
- * - **hunk 级**：每个 hunk 一张卡片（头行 + 行列表），不把整个 diff 拍平
- *   成一堵墙——万行 diff 也能按块消化；
+ * - **hunk 级 + 懒渲染**：每个 hunk 一张卡片（头行 + 行列表），
+ *   LazyColumn 逐块组合——千行 diff 不再一次性构建上万 Text 节点
+ *   （急切组合在低端机上掉帧/ANR）；
  * - **骨架态**：流式期间 diff 原文不完整（半截 hunk），照样渲染已到的行；
- *   完全无 hunk 时显示占位骨架（等流式补齐）；
+ *   完全无 hunk 时显示占位骨架（呼吸脉冲）等流式补齐；
  * - **行号**：REMOVE 挂旧行号、ADD 挂新行号、CONTEXT 双侧（git 格式真实
  *   行号；mini 折叠格式无行号时列占位「·」）；
  * - 配色：ADD 绿底 / REMOVE 红底（深浅主题各自可读的柔和 alpha）。
+ *
+ * @param maxHeight 懒列高度封顶（嵌入详情弹层时与外层滚动解耦）
  */
 @Composable
 internal fun CodeDiffView(
     diffText: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    maxHeight: androidx.compose.ui.unit.Dp = 480.dp
 ) {
     val parsed = remember(diffText) { UnifiedDiffParser.parse(diffText) }
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    LazyColumn(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = maxHeight)
+    ) {
         // ── 文件头行：路径 + 总统计 ──
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp)
-        ) {
-            Text(
-                text = parsed.newPath ?: parsed.oldPath ?: stringResource(R.string.code_stream_diff_unnamed),
-                style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = stringResource(
-                    R.string.code_stream_diff_stat_fmt,
-                    parsed.totalAdded,
-                    parsed.totalRemoved
-                ),
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        item(key = "diff-file-header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = parsed.newPath ?: parsed.oldPath ?: stringResource(R.string.code_stream_diff_unnamed),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = stringResource(
+                        R.string.code_stream_diff_stat_fmt,
+                        parsed.totalAdded,
+                        parsed.totalRemoved
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         if (parsed.hunks.isEmpty()) {
-            DiffSkeleton()
-            return@Column
-        }
-
-        parsed.hunks.forEach { hunk ->
-            DiffHunkCard(hunk = hunk)
+            item(key = "diff-skeleton") { DiffSkeleton() }
+        } else {
+            items(
+                items = parsed.hunks,
+                key = { "${it.oldStart}-${it.newStart}-${it.lines.size}-${it.header}" }
+            ) { hunk ->
+                DiffHunkCard(hunk = hunk)
+            }
         }
 
         if (parsed.truncated) {
-            Text(
-                text = stringResource(R.string.code_stream_diff_truncated),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-            )
+            item(key = "diff-truncated") {
+                Text(
+                    text = stringResource(R.string.code_stream_diff_truncated),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
         }
     }
 }
@@ -167,13 +187,18 @@ private fun DiffLineRow(line: UnifiedDiffParser.DiffLine) {
     }
 }
 
-/** 骨架态：diff 流式中/不可解析时的占位（脉冲呼吸）。 */
+/** 骨架态：diff 流式中/不可解析时的占位（真·呼吸脉冲，0.3↔0.6 往返）。 */
 @Composable
 private fun DiffSkeleton() {
-    val alpha by animateFloatAsState(
-        targetValue = 0.5f,
-        animationSpec = tween(600),
-        label = "diff-skeleton"
+    val transition = rememberInfiniteTransition(label = "diff-skeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 0.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "diff-skeleton-alpha"
     )
     Column(
         modifier = Modifier

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,8 +53,9 @@ import com.apex.agent.R
  * - 点击 × 移除胶囊；再选一条直接替换（单条语义）；
  * - 发送时由 ViewModel 把胶囊拼回 `/type:id` + 输入框附加文本走斜杠管线。
  *
- * 视觉沿用 ToolkitChip 的紧凑规格（小图标 + labelSmall + 20dp 关闭钮），
- * 保持输入栏所有"状态标签"一族的一致性。
+ * 视觉沿用 ToolkitChip 的紧凑规格（小图标 + labelSmall + 小关闭钮），
+ * 保持输入栏所有"状态标签"一族的一致性；触区遵守 48dp 红线（视觉小、
+ * 触区大，minimumInteractiveComponentSize）。
  */
 @Composable
 fun PipelineCapsuleRow(
@@ -91,7 +93,9 @@ private fun PipelineCapsule(
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-        modifier = Modifier.semantics { contentDescription = cd }
+        // mergeDescendants：TalkBack 把胶囊读作一个整体（否则先读胶囊
+        // 描述、再逐个读子 Text/关闭钮，重复播报）
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = cd }
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -110,9 +114,11 @@ private fun PipelineCapsule(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            // 视觉 20dp、触区 48dp（Material 无障碍红线）：外层保证最小
+            // 交互尺寸，Icon 缩到视觉尺寸
             IconButton(
                 onClick = onRemove,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.minimumInteractiveComponentSize()
             ) {
                 Icon(
                     Icons.Default.Close,

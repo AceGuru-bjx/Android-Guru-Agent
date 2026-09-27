@@ -179,6 +179,14 @@
     <string name="code_stream_error_fatal">Fatal error</string>
     <string name="code_stream_files_touched">%1$d files touched</string>
     <string name="code_stream_fab_bottom">Latest</string>
+    <string name="code_stream_status_waiting">waiting</string>
+    <string name="code_stream_status_running">running</string>
+    <string name="code_stream_status_success">success</string>
+    <string name="code_stream_status_failed">failed</string>
+    <string name="code_stream_status_applied">applied</string>
+    <string name="code_stream_status_partial">interrupted</string>
+    <string name="code_stream_exit_code_fmt">exit %1$d</string>
+    <string name="code_stream_files_more_fmt">+%1$d more</string>
     <string name="code_stream_detail_diff_title">File diff</string>
     <string name="code_stream_detail_diff_missing">No diff payload captured for this call</string>
     <string name="code_stream_detail_grep_title">Search hits</string>

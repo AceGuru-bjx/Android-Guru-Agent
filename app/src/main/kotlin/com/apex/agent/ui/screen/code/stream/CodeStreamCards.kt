@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +21,6 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.StopCircle
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
 import com.apex.agent.core.code.stream.StreamEntry
@@ -108,7 +110,9 @@ private fun AssistantBubble(text: String, isStreaming: Boolean) {
 
 @Composable
 private fun ThinkingCard(text: String, isStreaming: Boolean) {
-    var expanded by remember(text.isEmpty()) { mutableStateOf(false) }
+    // 注意 key：不能用 text.isEmpty() 这类派生值——空思考卡点开后首个
+    // token 到达（isEmpty 翻转）会重置展开态，吞掉用户的点击
+    var expanded by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
@@ -156,6 +160,7 @@ private fun ThinkingCard(text: String, isStreaming: Boolean) {
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.outline,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
@@ -323,8 +328,9 @@ private fun StopCard(reason: String) {
     }
 }
 
-// ═══ 受影响文件 chips ═══
+// ═══ 受影响文件 chips（FlowRow 换行 + 超 6 个显式提示）═══
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FileChipsCard(files: List<String>) {
     Column(
@@ -346,21 +352,36 @@ private fun FileChipsCard(files: List<String>) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Row(
+        // FlowRow：文件名普遍 110-150dp，普通 Row 三个即溢出屏宽且不可达
+        FlowRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.padding(top = 4.dp)
         ) {
             files.take(FILE_CHIPS_MAX).forEach { file ->
-                AssistChip(
-                    onClick = { },
-                    label = {
-                        Text(
-                            text = file.substringAfterLast('/'),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1
-                        )
-                    }
+                // 非交互展示 chip（原 AssistChip + 空 onClick 是欺骗性可供性：
+                // TalkBack 播报可激活但无行为）
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh
+                ) {
+                    Text(
+                        text = file.substringAfterLast('/'),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+            if (files.size > FILE_CHIPS_MAX) {
+                Text(
+                    text = stringResource(R.string.code_stream_files_more_fmt, files.size - FILE_CHIPS_MAX),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp)
                 )
             }
         }

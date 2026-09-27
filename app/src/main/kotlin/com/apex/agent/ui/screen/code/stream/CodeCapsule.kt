@@ -36,6 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,13 +71,25 @@ internal fun CodeCapsule(
         targetValue = statusColor(call.status),
         label = "capsule-status"
     )
+    // 状态的无障碍描述：成败不能只靠色/形传达（TalkBack 不可感知）
+    val statusDesc = stringResource(
+        when (call.status) {
+            ToolCallStatus.WAITING -> R.string.code_stream_status_waiting
+            ToolCallStatus.RUNNING -> R.string.code_stream_status_running
+            ToolCallStatus.SUCCESS -> R.string.code_stream_status_success
+            ToolCallStatus.FAILED -> R.string.code_stream_status_failed
+            ToolCallStatus.APPLIED -> R.string.code_stream_status_applied
+            ToolCallStatus.PARTIAL -> R.string.code_stream_status_partial
+        }
+    )
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 2.dp)
-            .clickable { onClick(call) }
+            .clickable(role = Role.Button) { onClick(call) }
+            .semantics { contentDescription = "${call.displayName} ${call.target}, $statusDesc" }
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -145,10 +160,10 @@ internal fun CodeCapsule(
             }
             call.exitCode?.let { code ->
                 Text(
-                    text = "exit $code",
+                    text = stringResource(R.string.code_stream_exit_code_fmt, code),
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
-                    color = if (code == 0) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                    color = if (code == 0) Color(0xFF4ADE80) else MaterialTheme.colorScheme.error
                 )
                 Spacer(Modifier.width(6.dp))
             }
@@ -163,7 +178,7 @@ internal fun CodeCapsule(
             }
             Icon(
                 imageVector = statusIcon(call.status),
-                contentDescription = null,
+                contentDescription = statusDesc,
                 tint = statusColor,
                 modifier = Modifier.size(15.dp)
             )
@@ -284,6 +299,6 @@ internal fun formatCapsuleDuration(ms: Long): String = when {
     else -> {
         val m = ms / 60_000
         val s = (ms % 60_000) / 1000
-        "%dm%02ds".format(m, s)
+        String.format(java.util.Locale.US, "%dm%02ds", m, s)
     }
 }
