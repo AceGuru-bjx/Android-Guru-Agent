@@ -62,7 +62,7 @@ private const val TAG = "ProotExec"
  * ## env 三层分离（G4 纪律，与 PRootHostEnvironment 不变量一致）
  * - proot 宿主 env（PROOT_TMP_DIR / PROOT_LOADER / PROOT_NO_SECCOMP /
  *   LD_LIBRARY_PATH / PATH）经 ProcessBuilder 整体替换传入；
- * - guest env 只经 argv 的 -E 传入：PATH（LinuxEnvironmentManager.GUEST_PATH
+ * - guest env 只经 env trampoline 传入：PATH（LinuxEnvironmentManager.GUEST_PATH
  *   单源）、TERM=dumb（管道执行无终端转义）、HOME=/root、LANG=C.UTF-8、
  *   PWD/TMPDIR 对齐 -w；SpawnRequest.env 追加在其后（调用方显式 env 优先）；
  * - Android app 进程的任何变量不被继承。
@@ -179,7 +179,7 @@ class ProotCommandSpawner(
 
     private fun ubuntuSpawner(route: UbuntuRoute): CommandSpawner = object : CommandSpawner {
         override val channel = UBUSU_CHANNEL_ID
-        override val supportsEnv = true // guest env 经 -E 全量透传
+        override val supportsEnv = true // guest env 经 env trampoline 全量透传（T88）
 
         override fun spawn(request: SpawnRequest): SpawnedCommand {
             val hostEnv = prepareHostEnv()

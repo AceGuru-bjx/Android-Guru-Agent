@@ -219,13 +219,23 @@ class VtParser {
     }
 
     private fun handleDcsEntry(cp: Int, sink: (Event) -> Unit) {
-        if (cp == 0x1B) state = State.STRING_IGNORE
-        else { stringBuf.append(cp.toChar()); state = State.DCS_STRING }
+        when {
+            cp == 0x1B -> state = State.DCS_ESC
+            // v0.3：CAN/SUB 直接中止 DCS（VT 规范终止符）—— 整串丢弃回 GROUND，
+            // 不得把控制字节拼进 payload 后又把它当普通文本漏出。
+            cp == 0x18 || cp == 0x1A -> { stringBuf.clear(); state = State.GROUND }
+            else -> { stringBuf.append(cp.toChar()); state = State.DCS_STRING }
+        }
     }
 
     private fun handleDcsString(cp: Int, sink: (Event) -> Unit) {
         when {
             cp == 0x1B -> state = State.DCS_ESC                      // ESC begins ST (ESC \)
+            // v0.3（consume-discard）：CAN(0x18)/SUB(0x1A) 是 VT 规范的“作废当前
+            // 序列”终止符 —— 丢弃已累积 payload 直接回 GROUND。tmux/sixel 尝试流
+            // 里混入的这两个字节绝不回流到屏面（配合 appendString 的 100KB 上限，
+            // DCS 永远不可能污染屏或拖垮内存）。
+            cp == 0x18 || cp == 0x1A -> { stringBuf.clear(); state = State.GROUND }
             else -> appendString(cp.toChar())
         }
     }

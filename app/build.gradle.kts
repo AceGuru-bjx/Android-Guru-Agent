@@ -118,6 +118,10 @@ dependencies {
     // P83: Terminal UI 直接消费 TerminalRenderSnapshot/RenderCell（styled grid 渲染）。
     // platform:terminal 对 :terminal-emulator 是 implementation（不传递），app 需显式声明。
     implementation(project(":terminal-emulator"))
+    // T88 (2-a): Termux 级自定义 View 渲染层（Canvas 直绘 / 滚动 / 选区 / IME）。
+    // terminal-view 对 :terminal-emulator 同为 implementation（不传递），app 的
+    // 显式 terminal-emulator 依赖在上方已具备 —— 两边模型单一事实源。
+    implementation(project(":terminal-view"))
     implementation(project(":platform:cs-mem"))
     // Coding 模式（与 Agent 模式同级别）：编码工具集 / 编码引擎 / 工作区管理
     implementation(project(":core:code-tools"))

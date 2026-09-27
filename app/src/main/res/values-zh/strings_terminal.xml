@@ -110,6 +110,11 @@
     <string name="term_copy">复制</string>
     <string name="term_jump_latest">↓ 跳到最新</string>
     <string name="term_paste">粘贴</string>
+    <!-- T88 (3): TerminalViewHost 上下文菜单（长按选区 / URL 自动识别） -->
+    <string name="term_select_all">全选</string>
+    <string name="term_clear_selection">取消选择</string>
+    <string name="term_open_link">打开链接</string>
+    <string name="term_copy_link">复制链接</string>
 
     <!-- ═══ ViewModel notices (LanguageManager.getString) ═══ -->
     <string name="term_notice_ubuntu_unavailable">Ubuntu 环境不可用：%1$s</string>

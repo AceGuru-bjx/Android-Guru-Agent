@@ -219,7 +219,9 @@ fun TerminalScreen(
                     .weight(1f)
             ) {
                 if (hasSession) {
-                    TerminalRenderer(
+                    // T88（3）：:terminal-view Canvas 直绘（替换 LazyColumn+BasicText
+                    // 渲染链 —— 滚动/选区/IME/鼠标上报全部下放 View 层）。
+                    TerminalViewHost(
                         viewModel = viewModel,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -388,7 +390,7 @@ private fun DeadSessionOverlay(
 // ═══════════════════════ 控制台主题 ═══════════════════════
 
 /**
- * 终端页控制台配色（自含深色调色 —— 与 [TerminalRenderer] 的终端内容区一致，
+ * 终端页控制台配色（自含深色调色 —— 与 [TerminalViewHost] 的终端内容区一致，
  * 不随 App 浅/深主题漂移；强调色取 App dark 主题 primary「neon mint」0xFF4EE9B0）。
  */
 internal object ConsoleTheme {
@@ -402,7 +404,7 @@ internal object ConsoleTheme {
     val chipActive = Color(0xFF1F3429)
     /** 分隔线。 */
     val stroke = Color(0xFF233029)
-    /** 主文本（提亮至近白 —— 与 TerminalRenderer 前景纯白统一，终端「白色字体」反馈）。 */
+    /** 主文本（提亮至近白 —— 与 TerminalViewHost 前景纯白统一，终端「白色字体」反馈）。 */
     val text = Color(0xFFF2F7F4)
     /** 次级文本。 */
     val dim = Color(0xFF7E948A)
