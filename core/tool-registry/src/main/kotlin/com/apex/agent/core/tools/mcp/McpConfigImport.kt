@@ -135,6 +135,10 @@ object McpConfigImport {
             return ParseOutcome.Err("${type.ifBlank { transport.name }} 传输缺少 url")
         }
 
+        // #197 工位作用域（可选字段）："agent" | "coding" | "all"（默认）。
+        val scope = entry["scope"]?.jsonPrimitive?.contentOrNull?.trim()
+            ?.takeIf { it in setOf("agent", "coding", "all") } ?: "all"
+
         return ParseOutcome.Ok(
             McpServerConfig(
                 name = name.trim().ifBlank { "mcp-${System.currentTimeMillis()}" },
@@ -146,7 +150,8 @@ object McpConfigImport {
                 args = args,
                 env = env,
                 runInSandbox = runInSandbox,
-                headers = headers
+                headers = headers,
+                scope = scope
             )
         )
     }

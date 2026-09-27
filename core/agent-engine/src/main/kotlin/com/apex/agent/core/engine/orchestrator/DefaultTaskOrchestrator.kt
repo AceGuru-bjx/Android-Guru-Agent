@@ -320,6 +320,10 @@ class DefaultTaskOrchestrator(
         val inner: Flow<AgentEvent> = when (mode) {
             AgentMode.BUILD ->
                 runBuildLoop(input, cfg)
+            // #197 Agent 屏双模式：委托给被包装的引擎（ReAct 循环内处理
+            // CHAT 零工具 / AGENT 剔除编码工具的工具计划）。
+            AgentMode.CHAT,
+            AgentMode.AGENT,
             AgentMode.PLAN,
             AgentMode.SPEC,
             AgentMode.REFLECTION,

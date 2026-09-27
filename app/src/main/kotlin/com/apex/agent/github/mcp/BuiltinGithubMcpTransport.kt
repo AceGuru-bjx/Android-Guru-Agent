@@ -47,7 +47,9 @@ object BuiltinGithubMcpServer {
     fun config(): McpServerConfig = McpServerConfig(
         name = ID,
         transport = McpTransport.BUILTIN,
-        enabled = true
+        enabled = true,
+        // #197 市场分级：GitHub 能力归属 Coding 工位
+        scope = "coding"
     )
 }
 

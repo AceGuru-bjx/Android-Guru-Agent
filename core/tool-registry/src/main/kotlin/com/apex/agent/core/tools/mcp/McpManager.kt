@@ -153,10 +153,36 @@ class McpManager(
 
     /**
      * 连接MCP服务器（网络 IO 在锁外执行，只对配置做一致性检查）。
+     *
+     * #197 `startupListener`：可选的真实启动事件监听 —— ENV 检查、spawn
+     * （pid/argv）、initialize 握手、initialized 通知各阶段以真实事件回调，
+     * 供市场页的启动进度弹窗消费（null = 零开销，既有调用点不变）。
      */
-    suspend fun connect(name: String): Result<McpCapabilities> {
+    suspend fun connect(
+        name: String,
+        startupListener: McpStartupListener? = null
+    ): Result<McpCapabilities> {
         val config = synchronized(lock) { configs[name] }
             ?: return Result.failure(Exception("Server '$name' not configured"))
+
+        // #197 真实事件：环境检查（配置形态 + 沙箱就绪态；rootfs 检查同
+        // ProotMcpProcessLauncher 的门径 —— 存在性探测，不是模拟）。
+        startupListener?.onStartupEvent(
+            McpStartupEvent(
+                serverName = name,
+                stage = McpStartupStage.ENV_CHECK,
+                detail = when (config.transport) {
+                    McpTransport.BUILTIN -> "内置服务器（进程内）"
+                    McpTransport.STDIO -> buildString {
+                        append("stdio 本地进程")
+                        if (config.runInSandbox) {
+                            append(" · PRoot 沙箱")
+                        }
+                    }
+                    McpTransport.HTTP, McpTransport.SSE -> "远端 ${config.transport} · ${config.url}"
+                }
+            )
+        )
 
         // 先关闭旧连接，避免旧实现「直接覆盖导致连接泄漏」的问题
         synchronized(lock) { clients.remove(name) }?.let { runCatching { it.shutdown() } }
@@ -169,7 +195,8 @@ class McpManager(
             config,
             builtinTransportFactory = builtinTransports[name],
             processLauncher = if (config.runInSandbox) sandboxProcessLauncher else null,
-            stdioRequestTimeoutMs = requestTimeoutFor(config)
+            stdioRequestTimeoutMs = requestTimeoutFor(config),
+            startupListener = startupListener
         )
         val initResult = client.initialize()
 
@@ -414,7 +441,8 @@ class McpManager(
                 command = "npx",
                 args = listOf("-y", "@modelcontextprotocol/server-filesystem", "/workspace"),
                 runInSandbox = true,
-                enabled = false
+                enabled = false,
+                scope = "coding"
             ),
             McpServerConfig(
                 name = "memory-sandbox",
@@ -422,7 +450,8 @@ class McpManager(
                 command = "npx",
                 args = listOf("-y", "@modelcontextprotocol/server-memory"),
                 runInSandbox = true,
-                enabled = false
+                enabled = false,
+                scope = "agent"
             ),
             McpServerConfig(
                 name = "everything-sandbox",
@@ -430,7 +459,8 @@ class McpManager(
                 command = "npx",
                 args = listOf("-y", "@modelcontextprotocol/server-everything"),
                 runInSandbox = true,
-                enabled = false
+                enabled = false,
+                scope = "coding"
             )
         )
     }

@@ -61,15 +61,18 @@ object AgentModule {
         val agent = repo.agentSettings.value
         val profile = repo.defaultProfile()
         // Execution Mode → AgentMode（全档位映射；"auto"/"chat" 为旧值兼容）
+        // #197 双工位拆分：Agent 屏只保留 CHAT/AGENT 两个入口，持久化默认
+        // 值若指向编码/存量档位，一律回退 AGENT（全能智能体，向上兼容）。
         val mode = when (agent.defaultMode) {
+            "chat" -> AgentMode.CHAT
+            "agent" -> AgentMode.AGENT
             "build" -> AgentMode.BUILD
             "plan" -> AgentMode.PLAN
             "spec" -> AgentMode.SPEC
             "reflect" -> AgentMode.REFLECTION
             "assist" -> AgentMode.HUMAN_ASSIST
             "custom" -> AgentMode.CUSTOM
-            "chat" -> AgentMode.REFLECTION   // 旧值兼容：chat 偏重质量评审
-            else -> AgentMode.BUILD          // "auto" 及未知旧值走自主构建
+            else -> AgentMode.AGENT          // "auto" 及未知旧值 → 全能智能体
         }
         // 思考深度（六档纯净态；#168 新增 auto → AUTO 自适应选档。
         // coding 深水两档 ULTRACODE/APEXCODE 已迁回 Coding 模式——
@@ -113,6 +116,8 @@ object AgentModule {
             rolePrompt = activeRole.systemPrompt,
             roleStyle = activeRole.style,
             roleLanguage = activeRole.replyLanguage,
+            // #197 工位作用域：Agent 屏引擎只注入 agent/all 聊天技能
+            skillScope = "agent"
         )
     }
 

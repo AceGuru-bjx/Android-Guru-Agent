@@ -86,4 +86,15 @@
     <string name="mode_guide_thinking_follow">follows pick</string>
     <string name="mode_guide_thinking_self_check">post-tool + final</string>
     <string name="mode_guide_thinking_post_tool">post-tool</string>
+    <!-- ═══ #197 Agent 屏双模式指南（Chat/Agent）═══ -->
+    <string name="mode_guide_chat_cases">Casual conversation, emotional companionship, knowledge Q&amp;A, creative writing</string>
+    <string name="mode_guide_chat_flow">Single-turn streaming reply; persona + chat skills injected; no tools, no ceremony</string>
+    <string name="mode_guide_chat_tools">None — pure conversation; the toolkit ring lives in the Coding screen</string>
+    <string name="mode_guide_chat_human">You drive every turn; nothing runs autonomously</string>
+    <string name="mode_guide_chat_prompt">Mode: CHAT section — conversational, warm, matches your energy</string>
+    <string name="mode_guide_agent_cases">Everyday tasks, research, automation, device control — anything non-coding</string>
+    <string name="mode_guide_agent_flow">ReAct loop with general tools (web search, memory, system…); coding tools excluded</string>
+    <string name="mode_guide_agent_tools">General CORE set; code_*/git/github removed — programming is redirected to Coding mode</string>
+    <string name="mode_guide_agent_human">ask_user on ambiguity; no forced function calling UI (that lives in Coding)</string>
+    <string name="mode_guide_agent_prompt">Mode: AGENT section — all-round non-coding agent, advises Coding for code</string>
 </resources>

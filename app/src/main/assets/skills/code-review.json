@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "code-review",
   "name": "代码审查",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "四维代码审查：正确性（边界/并发/错误路径）、安全（注入/越权/敏感信息）、性能（复杂度/IO 合并）、可读性（命名/职责），输出分级 findings 表",
   "author": "Apex",
   "license": "MIT",
@@ -34,5 +34,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

@@ -283,4 +283,18 @@
     <string name="market_plugin_unloaded">已卸载插件：%1$s</string>
     <string name="market_modelscope_install_failed">魔搭安装失败：%1$s</string>
     <string name="market_clawhub_install_failed">ClawHub 安装失败：%1$s</string>
+    <!-- ═══ #197 市场分级（Agent 市场 / Coding 市场）+ MCP 真实启动 ═══ -->
+    <string name="market_tier_agent">Agent 市场</string>
+    <string name="market_tier_coding">Coding 市场</string>
+    <string name="market_mcp_startup_title">正在启动 %1$s（真实进程）</string>
+    <string name="market_mcp_startup_running">启动中…（真实握手进行中）</string>
+    <string name="market_mcp_startup_hide">隐藏</string>
+    <string name="market_mcp_startup_done">完成</string>
+    <string name="market_mcp_stage_env">环境检查</string>
+    <string name="market_mcp_stage_spawn">子进程启动</string>
+    <string name="market_mcp_stage_init_sent">initialize 请求已发出</string>
+    <string name="market_mcp_stage_init_result">握手响应</string>
+    <string name="market_mcp_stage_initialized">会话就绪</string>
+    <string name="market_mcp_stage_tools">工具发现</string>
+    <string name="market_mcp_stage_failed">启动失败</string>
 </resources>

@@ -27,6 +27,7 @@ object BuiltinFsMcpServer {
     fun config(): McpServerConfig = McpServerConfig(
         name = ID,
         transport = McpTransport.BUILTIN,
-        enabled = true
+        enabled = true,
+        scope = "coding"
     )
 }

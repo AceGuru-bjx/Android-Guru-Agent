@@ -22,14 +22,22 @@ import com.apex.agent.core.codetools.tools.CodeTodoTool
 import com.apex.agent.core.engine.AgentAnswer
 import com.apex.agent.core.engine.AgentEngine
 import com.apex.agent.core.engine.AgentEvent
+import com.apex.agent.core.engine.AgentMode
 import com.apex.agent.core.engine.AgentQuestion
 import com.apex.agent.core.engine.UserInput
 import com.apex.agent.core.engine.UserQuestionBridge
 import com.apex.agent.core.llm.ReasoningEffort
 import com.apex.agent.core.logging.AppLogger
 import com.apex.agent.core.logging.LogCategory
+import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.platform.code.ws.CodeWorkspace
 import com.apex.agent.platform.code.ws.CodeWorkspaceManager
+import com.apex.agent.slash.SlashCommandParser
+import com.apex.agent.slash.SlashCommandRouter
+import com.apex.agent.slash.SlashRouteContext
+import com.apex.agent.ui.screen.agent.CODING_SCREEN_MODES
+import com.apex.agent.ui.screen.agent.PendingPipelineCommand
+import com.apex.agent.ui.screen.agent.llmConfiguredFlow
 import com.apex.agent.ui.screen.code.editor.AtRefParser
 import com.apex.agent.ui.screen.code.editor.EditorFileLoader
 import com.apex.agent.ui.screen.code.session.CodeSessionSnapshot
@@ -38,6 +46,7 @@ import com.apex.agent.ui.screen.code.session.toStreamEntries
 import com.apex.agent.ui.screen.code.session.toCodeTodos
 import com.apex.agent.ui.screen.code.session.toStorable
 import com.apex.agent.ui.screen.code.session.withFreshIds
+import com.apex.agent.ui.screen.agent.toolkit.ChatToolkitStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import javax.inject.Named
@@ -47,9 +56,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -111,7 +123,18 @@ class CodeViewModel @Inject constructor(
     private val longTaskStore: LongTaskStore,
     private val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
     // AUTO 档自治选档器（发送前预检 + 运行中深水区升级观察）
-    private val adaptiveSelector: CodeAdaptiveThinkingSelector
+    private val adaptiveSelector: CodeAdaptiveThinkingSelector,
+    // #197 函数调用二级菜单候选工具（注册表快照；小圆环迁移至 Coding 屏）
+    private val toolRegistry: com.apex.agent.core.tools.ToolRegistry,
+    // ═══ #197 Coding 工位升级（从 Agent 屏迁入）═══
+    /** 「小圆环」函数调用/工具菜单（Coding 工位独占消费）。 */
+    internal val toolkitStore: ChatToolkitStore,
+    /** GitHub PAT 连接（Coding 屏的 gh 连接入口）。 */
+    internal val githubTokenManager: GithubTokenManager,
+    /** 斜杠路由需要 MCP 连接快照（/mcp:<id> 引导提示词据此生成）。 */
+    private val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
+    // i18n：用户可见系统消息按当前语言取词（组合外场景）
+    private val languageManager: com.apex.agent.ui.language.LanguageManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(CodeUiState())
@@ -179,13 +202,123 @@ class CodeViewModel @Inject constructor(
         // v1.2 七档思考系统：恢复持久化档位（codeThinkingLevel 与聊天页
         // thinkingLevelOverride 互不干扰，两模式各自记忆）
         restoreThinkingLevel()
+        // #197：Coding 屏模式同步（引擎侧恒为 BUILD/PLAN；未知值回退 BUILD）
+        val startupMode = settingsRepository.agentSettings.value.let { s ->
+            s.codeExecutionMode.takeIf { it.isNotBlank() }
+                ?.let { runCatching { AgentMode.valueOf(it.uppercase()) }.getOrNull() }
+        } ?: AgentMode.BUILD
+        setMode(if (startupMode in CODING_SCREEN_MODES) startupMode else AgentMode.BUILD)
     }
+
+    // ═══ #197 执行模式（Build/Plan）═══
+
+    /**
+     * 切换执行模式：持久化（AgentSettings.codeExecutionMode）+ 引擎
+     * patchConfig 即时生效。PLAN = 先出完整计划、确认后执行；BUILD = 边想边做。
+     */
+    fun setMode(mode: AgentMode) {
+        if (mode !in CODING_SCREEN_MODES) return
+        settingsRepository.updateAgentSettings { copy(codeExecutionMode = mode.name.lowercase()) }
+        _uiState.update { it.copy(mode = mode) }
+        codeEngineImpl?.updateMode(mode)
+    }
+
+    /** #197 PLAN 模式计划确认/驳回（人控门；勾选/重排同 Agent 屏口径）。 */
+    fun confirmPlan(confirmed: Boolean, enabledSteps: List<Int>? = null, order: List<Int>? = null) {
+        _uiState.update { it.copy(awaitingPlanConfirmation = false) }
+        codeEngineImpl?.submitPlanConfirmation(confirmed, enabledSteps, order)
+    }
+
+    // ═══ #197 斜杠指令管线（Coding 工位：coding 域技能/MCP）═══
+
+    /** 挂起中的流水线指令胶囊（[/> skill: 名字]；发送时拼回斜杠命令）。 */
+    private val _pendingCommand = MutableStateFlow<PendingPipelineCommand?>(null)
+    val pendingCommand: StateFlow<PendingPipelineCommand?> = _pendingCommand.asStateFlow()
+
+    fun setPendingCommand(command: PendingPipelineCommand) {
+        _pendingCommand.value = command
+    }
+
+    fun clearPendingCommand() {
+        _pendingCommand.value = null
+    }
+
+    /** /mcp:github 未连接信号（UI 收集后打开 GithubTokenDialog）。 */
+    private val _requestGithubConnect = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val requestGithubConnect: SharedFlow<Unit> = _requestGithubConnect.asSharedFlow()
+
+    /**
+     * 斜杠命令分派：路由出系统消息 + 引擎提示词后执行；/mcp:github 未连接
+     * 时只发信号不执行（与 Agent 屏旧实现同语义，但可见域是 coding 域）。
+     */
+    private fun handleSlashCommand(command: String) {
+        val parsed = SlashCommandParser.parse(command) ?: run {
+            // 解析失败：当普通消息走引擎（不吞用户输入）
+            runEngine(command)
+            return
+        }
+        val context = SlashRouteContext(
+            githubConnected = githubTokenManager.isConnected(),
+            githubUsername = githubTokenManager.getUsername(),
+            mcpConnected = mcpManager.getConnectedServers().toSet()
+        )
+        val route = SlashCommandRouter.route(parsed, context)
+        _uiState.update { state ->
+            state.copy(
+                messages = state.messages + CodeChatMessage(
+                    id = idGen.incrementAndGet(),
+                    CodeChatMessage.Role.SYSTEM,
+                    route.systemMessage
+                )
+            )
+        }
+        if (route.requestGithubConnect) {
+            _requestGithubConnect.tryEmit(Unit)
+            return
+        }
+        if (route.agentPrompt.isNotBlank()) {
+            runEngine(route.agentPrompt)
+        }
+    }
+
+    // ═══ #197 模型 API 配置状态（未配置时发送拦截由 UI 层处理）═══
+
+    val llmConfigured: StateFlow<Boolean> =
+        settingsRepository.llmConfiguredFlow(viewModelScope)
+
+    /** 函数调用二级菜单候选工具（注册表快照，含类别/风险元数据）。 */
+    fun availableTools(): List<com.apex.agent.ui.screen.agent.ToolRef> =
+        toolRegistry.getAllTools()
+            .map { tool ->
+                com.apex.agent.ui.screen.agent.ToolRef(
+                    id = tool.id,
+                    name = tool.name,
+                    category = tool.metadata.category,
+                    highRisk = tool.metadata.isHighRisk
+                )
+            }
+            .sortedWith(compareBy<com.apex.agent.ui.screen.agent.ToolRef> { it.category?.order ?: Int.MAX_VALUE }.thenBy { it.id })
 
     // ═══ 消息发送 ═══
 
     fun sendMessage(text: String) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty() || _uiState.value.isRunning) return
+        val hasPendingCapsule = _pendingCommand.value != null
+        if ((trimmed.isEmpty() && !hasPendingCapsule) || _uiState.value.isRunning) return
+
+        // ═══ #197 斜杠管线：胶囊拼回命令；/ 开头文本走路由 ═══
+        // 摘胶囊 + 清草稿（斜杠/普通发送共用收尾），再分派。
+        val pendingCmd = _pendingCommand.value
+        val effectiveText = if (pendingCmd != null) {
+            if (trimmed.isEmpty()) pendingCmd.toCommandToken()
+            else pendingCmd.toCommandToken() + " " + trimmed
+        } else trimmed
+        _pendingCommand.value = null
+        if (effectiveText.startsWith("/")) {
+            _uiState.update { it.copy(inputDraft = "") }
+            handleSlashCommand(effectiveText)
+            return
+        }
 
         // #154：@file:line 选区引用——引用块只进引擎输入，UI 消息保持原文；
         // 首个引用立即设为当前文件并打开编辑器面板（选区即上下文）。
@@ -200,27 +333,49 @@ class CodeViewModel @Inject constructor(
             )
         }
 
+        runEngine(engineInput, displayGoal = trimmed)
+    }
+
+    /**
+     * 引擎执行主路径（sendMessage 与斜杠路由共用）：同步全局规则/小圆环参数
+     * （#197）→ 预检档位 → 长任务入账 → 胶囊入轴 → 事件双通道收集。
+     *
+     * @param engineInput 进引擎的完整输入（含 @引用块/斜杠路由提示词）
+     * @param displayGoal 长任务追踪的目标文案（用户原始输入）
+     */
+    private fun runEngine(engineInput: String, displayGoal: String? = null) {
+        val goal = displayGoal ?: engineInput
+
         // Issue #164：发送前同步全局规则（设置页改动无需重启，下轮生效）。
         // 引擎侧注入详见 CodeAgentEngine.refreshContext + RulesProvider。
         codeEngineImpl?.updateGlobalRules(settingsRepository.agentSettings.value.globalRules)
+
+        // ═══ #197 「小圆环」函数调用（Coding 工位独占）：会话上下文附加段 +
+        // v4 强制工具计划。prepareForTask 的 refreshContext 会把 extras 拼进
+        // additionalSystemContext（顺序：先存 extras 再刷上下文）。 ═══
+        codeEngineImpl?.updateSessionExtras(toolkitStore.buildSessionContext())
+        codeEngineImpl?.updateForcedTools(
+            forcedToolIds = toolkitStore.forcedToolIds(),
+            exposeAll = toolkitStore.exposeAllToolsEnabled()
+        )
 
         codeEngineImpl?.prepareForTask()
 
         // ═══ AUTO 档自治：发送前预检选档（coding 专属，引擎零参与）═══
         // 解析结果直接下发给引擎（引擎从不接收 AUTO）；决策进系统消息 +
         // uiState.adaptiveDecision（选择器旁回显）。非 AUTO 档直接用用户显式档。
-        resolveRuntimeThinkingLevel(trimmed)
+        resolveRuntimeThinkingLevel(goal)
 
         // v1.2 长任务追踪：本次运行的开始（旧 run 若未收尾会被自动 ABORTED
         // 收尾判定——见 LongTaskTracker.beginRun 防御语义）。记录的档位
         // 用用户选择（AUTO 记 AUTO——诚实口径：统计的是"选 AUTO 这个
         // 决策"的表现，实际生效档在 adaptiveDecision 可追溯）。
         longTaskTracker.beginRun(
-            goal = trimmed,
+            goal = goal,
             workspaceId = boundWorkspaceId ?: "",
             workspaceName = _uiState.value.activeWorkspace?.name ?: "",
             thinkingLevel = _uiState.value.thinkingLevel.name,
-            agentMode = "BUILD"
+            agentMode = _uiState.value.mode.name
         )
 
         // 深水区升级观察器归零（新 run 重新计数）。
@@ -228,7 +383,7 @@ class CodeViewModel @Inject constructor(
         recentToolOutcomes.clear()
 
         // 胶囊时间轴：用户气泡入轴 + 渲染 ticker 启动（25ms ≤40Hz 攒批）。
-        streamSession.beginRun(trimmed)
+        streamSession.beginRun(goal)
         startRenderTicker()
 
         runJob = viewModelScope.launch {
@@ -906,6 +1061,26 @@ class CodeViewModel @Inject constructor(
 
             is AgentEvent.UserInputRequired -> _uiState.update {
                 it.copy(pendingQuestion = event.prompt)
+            }
+
+            // ═══ #197 PLAN 模式事件（Coding 屏 Build/Plan 双档）═══
+            is AgentEvent.PlanGenerated -> _uiState.update {
+                it.copy(plan = event.plan)
+            }
+
+            is AgentEvent.PlanAwaitingConfirmation -> _uiState.update {
+                it.copy(plan = event.plan, awaitingPlanConfirmation = true)
+            }
+
+            is AgentEvent.PlanConfirmed -> _uiState.update {
+                it.copy(
+                    awaitingPlanConfirmation = false,
+                    messages = it.messages + CodeChatMessage(
+                        id = idGen.incrementAndGet(),
+                        role = CodeChatMessage.Role.SYSTEM,
+                        text = "计划已确认，开始执行（${event.plan.steps.size} 步）"
+                    )
+                )
             }
 
             is AgentEvent.Error -> {

@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "prd-writer",
   "name": "产品需求文档",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "PRD 写作方法论：用户故事三要素、Given-When-Then 验收标准、做与不做范围边界、量化非功能需求、风险与开放问题跟踪",
   "author": "Apex",
   "license": "MIT",
@@ -34,5 +34,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "all"
 }

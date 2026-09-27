@@ -51,7 +51,16 @@ data class SkillManifest(
     /** Ed25519 签名 hex（对 manifest 规范化字节的签名）。null = 未签名。 */
     val signature: String? = null,
     /** 版本变更日志。 */
-    val changelog: List<ChangelogEntry> = emptyList()
+    val changelog: List<ChangelogEntry> = emptyList(),
+    /**
+     * #197 工位作用域（"agent" | "coding" | "all"）：
+     * - agent：聊天/全能工位专属（聊天技能、人设增强）；
+     * - coding：编码工位专属（提交信息、代码评审等开发技能）；
+     * - all（默认）：两个工位都注入/可见 —— 旧 manifest 无此字段时保持
+     *   既有行为，向后兼容。
+     * 市场分级（Agent 市场 / Coding 市场）与斜杠菜单、Prompt 注入过滤同源。
+     */
+    val scope: String = "all"
 )
 
 /** 版本变更日志条目。 */
@@ -432,6 +441,29 @@ class SkillRegistry(
                 .filter { it.enabled }
                 .mapNotNull { it.manifest.promptInjection }
         }
+    }
+
+    /**
+     * #197 按工位作用域获取 Prompt 注入。
+     *
+     * @param scope "agent" | "coding" —— 只返回 `scope` 相同或 "all" 的技能
+     *        文本。null = 不过滤（全量，等价 [getPromptInjections]，兼容旧调用）。
+     */
+    fun getPromptInjections(scope: String?): List<String> {
+        if (scope.isNullOrBlank()) return getPromptInjections()
+        return synchronized(lock) {
+            installedSkills.values
+                .filter { it.enabled }
+                .filter { it.manifest.scope == "all" || it.manifest.scope == scope }
+                .mapNotNull { it.manifest.promptInjection }
+        }
+    }
+
+    /** #197 按工位作用域获取已安装技能清单（市场分级列表/斜杠菜单共用口径）。 */
+    fun getInstalledForScope(scope: String?): List<InstalledSkill> {
+        val all = getInstalled()
+        if (scope.isNullOrBlank()) return all
+        return all.filter { it.manifest.scope == "all" || it.manifest.scope == scope }
     }
 
     /**

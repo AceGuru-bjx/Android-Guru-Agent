@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DropdownMenu
@@ -43,6 +45,14 @@ import com.apex.agent.core.engine.AgentMode
 import com.apex.agent.R
 
 /**
+ * #197 Agent 屏可选模式（双工位拆分后仅此两个）。
+ */
+val AGENT_SCREEN_MODES: List<AgentMode> = listOf(AgentMode.CHAT, AgentMode.AGENT)
+
+/** Coding 屏可选模式（#197：plan/build 从 Agent 屏迁入编码工位）。 */
+val CODING_SCREEN_MODES: List<AgentMode> = listOf(AgentMode.BUILD, AgentMode.PLAN)
+
+/**
  * ═══ 任务模式选择器（顶部模式栏 v3）═══
  *
  * 旧实现的问题：6 个 FilterChip 横向滚动排在 `weight(1f, fill=false)` 的
@@ -51,13 +61,13 @@ import com.apex.agent.R
  * 没法切换」。
  *
  * 新实现：常驻一个展示当前模式的胶囊按钮（图标 + 模式名 + 下拉箭头），
- * 点击弹出菜单列出全部 6 个模式（名称 + 一句话说明 + 选中勾）。
+ * 点击弹出菜单列出全部可选模式（名称 + 一句话说明 + 选中勾）。
  * 任何屏宽下切换入口都完整可见、单次点击直达 —— 模式切换从
  * 「隐藏横滑手势」变成「显式下拉菜单」。
  *
- * #168：胶囊右侧新增「?」图标 —— 打开模式指南底部弹层（[ModeGuideSheet]：
- * 六模式行为矩阵 + 思考档位简表），让「Plan/Spec 差在哪」「Assist 什么时候
- * 打断我」有处可意。
+ * #197：`modes` 参数化——Agent 屏传 [AGENT_SCREEN_MODES]（Chat/Agent），
+ * Coding 屏传 [CODING_SCREEN_MODES]（Build/Plan）——两个工位各自的
+ * 极简选择器，市场分级后的模式矩阵。
  *
  * 紧凑化（用户反馈「调节build和plan模式和思考程度上面那一部分太高」）：
  * 胶囊从 36dp 压到 28dp（padding 6→3、图标 16→13、字号 labelLarge→labelMedium），
@@ -68,7 +78,8 @@ import com.apex.agent.R
 internal fun AgentModeSelector(
     current: AgentMode,
     onSelect: (AgentMode) -> Unit,
-    onOpenGuide: (() -> Unit)? = null
+    onOpenGuide: (() -> Unit)? = null,
+    modes: List<AgentMode> = AGENT_SCREEN_MODES
 ) {
     var expanded by remember { mutableStateOf(false) }
     // i18n：semantics 块非组合上下文，无障碍描述在组合内预取
@@ -125,12 +136,12 @@ internal fun AgentModeSelector(
             }
         }
 
-        // ── 模式菜单：全部 6 个模式一次展开 ──
+        // ── 模式菜单：可选模式一次展开（#197 按工位传入）──
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            AgentMode.entries.forEach { mode ->
+            modes.forEach { mode ->
                 DropdownMenuItem(
                     text = {
                         Column {
@@ -186,6 +197,8 @@ internal fun AgentModeSelector(
 
 /** 模式图标映射 —— 图标属 UI 层关注点，不放核心枚举（core 无 Compose 依赖）。 */
 internal fun agentModeIcon(mode: AgentMode): ImageVector = when (mode) {
+    AgentMode.CHAT -> Icons.Default.Chat
+    AgentMode.AGENT -> Icons.Default.SmartToy
     AgentMode.BUILD -> Icons.Default.Build
     AgentMode.PLAN -> Icons.AutoMirrored.Filled.ListAlt
     AgentMode.SPEC -> Icons.Default.Description
@@ -199,6 +212,8 @@ internal fun agentModeIcon(mode: AgentMode): ImageVector = when (mode) {
  */
 @Composable
 internal fun agentModeDescription(mode: AgentMode): String = when (mode) {
+    AgentMode.CHAT -> stringResource(R.string.chat_mode_chat_desc)
+    AgentMode.AGENT -> stringResource(R.string.chat_mode_agent_desc)
     AgentMode.BUILD -> stringResource(R.string.chat_mode_build_desc)
     AgentMode.PLAN -> stringResource(R.string.chat_mode_plan_desc)
     AgentMode.SPEC -> stringResource(R.string.chat_mode_spec_desc)

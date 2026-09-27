@@ -397,6 +397,19 @@ class ApexAgentEngine(
                     }
                     totalIterations = maxOf(totalIterations, iter)
                 }
+                // #197 Agent 屏双模式：CHAT（零工具纯对话）与 AGENT（全能非编程）
+                // 都跑 ReAct 主循环——差异在工具计划（EngineToolPlanner：CHAT=空、
+                // AGENT=剔除编码工具）与提示词模式段（EnginePrompts），复用同一执行器。
+                AgentMode.CHAT, AgentMode.AGENT -> {
+                    val iter = executeBuildLoop { event ->
+                        if (event is AgentEvent.ToolCallComplete) totalToolCalls++
+                        if (event is AgentEvent.IterationStart) totalIterations =
+                            maxOf(totalIterations, event.iteration)
+                        AppLogger.instance.logEvent(event)
+                        emit(event)
+                    }
+                    totalIterations = maxOf(totalIterations, iter)
+                }
                 AgentMode.PLAN -> {
                     val planIterations = executePlanMode(userText) { event ->
                         if (event is AgentEvent.ToolCallComplete) totalToolCalls++
@@ -1054,7 +1067,7 @@ class ApexAgentEngine(
         toolNameMap = EngineToolPlanner.idToProviderName(currentToolPlan),
         toolsUnavailable = currentToolPlan?.tools?.isEmpty() == true &&
             toolDegradationLevel >= EngineToolPlanner.DEGRADATION_NO_TOOLS,
-        skillPrompts = skillRegistry?.getPromptInjections() ?: emptyList(),
+        skillPrompts = skillRegistry?.getPromptInjections(config.skillScope.takeIf { it.isNotBlank() }) ?: emptyList(),
         environmentSummary = environmentInfoProvider?.environmentSummary(),
         connectedServices = connectedServicesProvider?.connectedServicesSummary(),
         // Issue #164：全局规则（Agent 模式通道；coding 实例不设值，见 updateGlobalRules KDoc）

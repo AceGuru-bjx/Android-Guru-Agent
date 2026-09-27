@@ -454,6 +454,12 @@ data class AgentSettings(
      * 双通道运行时生效，无需重启）。
      */
     val codeThinkingLevel: String = "",
+    /**
+     * #197 Coding 屏执行模式（与 Agent 屏的 defaultMode 互不干扰，两工位各自
+     * 记忆）："" / "build" = BUILD（边想边做）；"plan" = PLAN（先出完整计划，
+     * 确认后执行）。CodeViewModel init 恢复 + setMode 双通道运行时生效。
+     */
+    val codeExecutionMode: String = "",
     val maxIterations: Int = 20,
     val keepAlive: Boolean = true,
 

@@ -17,6 +17,8 @@
     <!-- 消息流 / 输入 -->
     <string name="code_working">执行中…</string>
     <string name="code_input_hint">描述一个编码任务…</string>
+    <string name="code_input_hint_no_api">模型 API 未配置——请到抽屉「设置」页添加…</string>
+    <string name="code_api_missing_got_it">知道了</string>
     <string name="code_send">发送</string>
     <string name="code_stop">停止</string>
     <string name="code_dismiss">关闭</string>

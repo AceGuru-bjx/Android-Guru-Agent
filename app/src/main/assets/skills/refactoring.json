@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "refactoring",
   "name": "安全重构",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "安全重构三原则：先表征测试、小步提交、特征不变式核对；坏味道 → 手法映射表（长函数/重复/大类/霰弹式修改等十类）",
   "author": "Apex",
   "license": "MIT",
@@ -33,5 +33,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

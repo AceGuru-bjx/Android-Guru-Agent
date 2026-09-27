@@ -44,6 +44,20 @@ internal object EngineToolPlanner {
     )
 
     /**
+     * #197 AGENT 模式的编码类工具前缀黑名单——全能智能体是**非编程**工位：
+     * code_* / code_git_*（编码工作区）、github_*（GitHub 连接）与
+     * `mcp__github__*`（GitHub MCP）均属于 Coding 屏管辖，Agent 屏不可见，
+     * 从根上避免“问什么都会答编程相关的”（编程引导由提示词层完成）。
+     */
+    private val AGENT_EXCLUDED_TOOL_PREFIXES = listOf(
+        "code_", "github_", "mcp__github__"
+    )
+
+    /** #197 [AGENT_EXCLUDED_TOOL_PREFIXES] 判定（纯函数，便于单测）。 */
+    fun isCodingOrientedToolId(toolId: String): Boolean =
+        AGENT_EXCLUDED_TOOL_PREFIXES.any { toolId.startsWith(it) }
+
+    /**
      * 本轮请求工具计划：强制（仅选中集）/ 默认（CORE+激活+连接服务+可选全量）/
      * 降级（≥1=纯 CORE；≥2=空）。
      *
@@ -61,6 +75,8 @@ internal object EngineToolPlanner {
         val forced = config.forcedToolIds
         val allowed = config.allowedToolIds
         return when {
+            // #197 聊天模式：零工具纯对话（人设 + 聊天技能在提示词层驱动）。
+            config.mode == AgentMode.CHAT -> EMPTY_TOOL_PLAN
             degradationLevel >= DEGRADATION_NO_TOOLS -> EMPTY_TOOL_PLAN
             forced.isNotEmpty() && degradationLevel == 0 ->
                 ToolRequestBudget.planForced(registry, forced)
@@ -68,6 +84,15 @@ internal object EngineToolPlanner {
             // 最终轮需要能输出纯文本结论（forced 语义会迫使每轮调用工具）。
             allowed.isNotEmpty() && degradationLevel == 0 ->
                 ToolRequestBudget.planForced(registry, allowed)
+            // #197 智能体模式：默认计划剔除编码工位专属工具（非编程全能工位）。
+            config.mode == AgentMode.AGENT ->
+                ToolRequestBudget.planDefault(
+                    registry = registry,
+                    activation = activation,
+                    exposeAll = config.exposeAllTools && degradationLevel == 0,
+                    coreOnly = degradationLevel >= DEGRADATION_CORE_ONLY,
+                    serviceToolIds = if (degradationLevel == 0) serviceToolIds else emptySet()
+                ).filterOutCodingTools()
             else -> ToolRequestBudget.planDefault(
                 registry = registry,
                 activation = activation,
@@ -76,6 +101,33 @@ internal object EngineToolPlanner {
                 serviceToolIds = if (degradationLevel == 0) serviceToolIds else emptySet()
             )
         }
+    }
+
+    /**
+     * #197 从工具计划中剔除编码工位专属工具（AGENT 模式专用）。
+     *
+     * 纯函数：基于 [RequestToolPlan] 的不可变快照重建，不触碰注册表状态；
+     * 同步维护 providerName⇆id 映射，保证模型回显名仍可路由。
+     */
+    private fun ToolRequestBudget.RequestToolPlan.filterOutCodingTools(): ToolRequestBudget.RequestToolPlan {
+        fun codingOriented(def: com.apex.agent.core.llm.ToolDefinition): Boolean {
+            val registryId = providerNameToId[def.name] ?: def.name
+            return isCodingOrientedToolId(registryId)
+        }
+        if (tools.none { codingOriented(it) }) return this
+        val kept = tools.filterNot { codingOriented(it) }
+        val keptNames = kept.map { it.name }.toSet()
+        val keptNameToId = providerNameToId.filterKeys { it in keptNames }
+        // 字节数与 ToolRequestBudget 同口径重算（name+schema+description+48）。
+        val keptBytes = kept.sumOf { it.parameters.length + it.description.length + it.name.length + 48 }
+        val keptIds = keptNameToId.values.toSet()
+        return ToolRequestBudget.RequestToolPlan(
+            tools = kept,
+            providerNameToId = keptNameToId,
+            visibleRegistryIds = visibleRegistryIds intersect keptIds,
+            totalBytes = keptBytes,
+            droppedByBudget = droppedByBudget
+        )
     }
 
     /** 强制 tool_choice：单选=具体函数，多选=required；降级后不再强制。 */

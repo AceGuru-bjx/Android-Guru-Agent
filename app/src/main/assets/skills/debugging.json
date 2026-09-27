@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "debugging",
   "name": "系统化调试",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "六步调试法：复现 → 隔离（二分）→ 假设列表 → 逐条验证 → 根因确认 → 回归防线；附常见坑清单（缓存/环境/时序/隐式状态/数据）",
   "author": "Apex",
   "license": "MIT",
@@ -33,5 +33,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

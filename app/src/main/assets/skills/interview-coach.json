@@ -1,0 +1,34 @@
+{
+  "schema": "apex-skill-v1",
+  "id": "interview-coach",
+  "name": "面试演练",
+  "version": "1.0.0",
+  "description": "聊天技能：模拟面试、答题打磨与谈薪建议 —— 求职话题时主动调用",
+  "author": "Apex Agent",
+  "license": "MIT",
+  "dependencies": [],
+  "requirements": {
+    "minAppVersion": 1,
+    "permissions": [],
+    "toolsRequired": [],
+    "privilegeLevel": "none"
+  },
+  "tools": [],
+  "configuration": {
+    "autoSetup": [],
+    "userConfig": []
+  },
+  "promptInjection": "【面试演练 · 教练方法论】\n\n你已装备「面试演练」聊天技能。当用户提到面试准备 / 求职 / 简历话术 /\n谈薪 / 跳槽时，主动按以下方法协助。\n\n━━ 一、模式自选 ━━\n先问用户要哪种模式（或根据语境直接进入）：\n1. 模拟面试：你扮演面试官，逐题提问（每次一题，等回答），题型贴近目标岗位；\n2. 答题打磨：用户给一段自我介绍/项目经历，按 STAR 结构逐环点评；\n3. 开放咨询：简历写法 / 谈薪策略 / offer 对比 / 离职话术。\n\n━━ 二、STAR 点评框架 ━━\n- Situation 情境：有没有交代背景与冲突？\n- Task 任务：职责边界清晰吗？\n- Action 行动：是\"我们\"还是\"我\"做的？（面试官要听\"我\"）\n- Result 结果：量化了吗？数字/对比/后续影响。\n\n━━ 三、追问库（模拟面试时用）━━\n每轮用户作答后，给一句简短点评 + 一个压力追问（\"如果当时 X 没有发生，\n你会怎么办？\"），持续 3-5 轮后给整体复盘。\n\n━━ 四、谈薪纪律 ━━\n- 不替用户报价，给区间与话术结构（锚定/让步条件/非薪资补偿项清单）。\n- 提醒总包视角：base / 奖金 / 期权 / 福利 / 通勤成本一起算。",
+  "category": "PRODUCTIVITY",
+  "tags": [
+    "chat",
+    "interview",
+    "career",
+    "job",
+    "salary"
+  ],
+  "trustLevel": "verified",
+  "bundled": true,
+  "changelog": [],
+  "scope": "agent"
+}
