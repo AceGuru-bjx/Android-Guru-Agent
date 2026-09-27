@@ -2,7 +2,10 @@ package com.apex.agent
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -20,6 +23,7 @@ import androidx.compose.ui.unit.Density
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.apex.agent.service.ApexCoreService
+import com.apex.agent.share.SharedIntake
 import com.apex.agent.ui.ApexRoot
 import com.apex.agent.ui.language.LanguageManager
 import com.apex.agent.ui.screen.onboarding.OnboardingScreen
@@ -39,6 +43,10 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var languageManager: LanguageManager
+
+    /** v1.4.4 #7：分享接收中转（ACTION_SEND → Agent 输入区）。 */
+    @Inject
+    lateinit var sharedIntake: SharedIntake
 
     /** attachBaseContext 时静态读出的已应用语言（system/zh/en）；供语言变化 recreate 判定。 */
     private var appliedLanguage: String? = null
@@ -70,6 +78,25 @@ class MainActivity : ComponentActivity() {
             coreServiceStartedThisProcess = true
             ContextCompat.startForegroundService(this, Intent(this, ApexCoreService::class.java))
         }
+
+        // ═══ v1.4.4 #7：分享接收（冷启动路径）═══
+        // 图库/浏览器分享 → 系统拉起本 Activity → intent 在此入队；
+        // AgentChatViewModel init 订阅消费（文本预填草稿 + 图片即时拷沙箱）。
+        // 必须在 setContent 之前：VM 在首次组合时创建，晚于这里即不丢事件。
+        sharedIntake.offer(intent)
+
+        // ═══ v1.4.4 #7：温暖路径（App 已在运行时被分享唤起，singleTop 复用实例）═══
+        // 用 OnNewIntentProvider（ComponentActivity 官方通道）而非覆写
+        // onNewIntent —— 后者参数可空性注解在 androidx.activity 各版本间
+        // 不一致，直接覆写有签名不匹配风险；listener 形态零歧义且无需 setIntent。
+        addOnNewIntentListener { intent -> sharedIntake.offer(intent) }
+
+        // ═══ v1.4.4 #4：电池优化白名单引导（一次性）═══
+        // keepAlive 默认开（前台服务常驻语义）；厂商 ROM 的电池优化会在后台杀
+        // 服务导致长任务中断。Manifest 已声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，
+        // 首启且未在白名单时发起系统豁免请求；用户拒绝过就不再骚扰（SP 记问）。
+        maybeRequestBatteryOptimizationExemption()
+
         // 语言切换：设置中心 language 与当前已应用语言不同 → recreate 重新走
         // attachBaseContext（新实例以新语言包裹，stringResource 即时取新资源）。
         // 首帧发射值 == attachBaseContext 读到的持久化值，不会误重建。
@@ -126,9 +153,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * v1.4.4 #4：电池优化豁免引导 —— 仅首启一次（用户拒绝即不再问）。
+     * 全链路 runCatching：引导是增益路径，任何 ROM 差异都不阻断启动。
+     */
+    private fun maybeRequestBatteryOptimizationExemption() {
+        runCatching {
+            val prefs = getSharedPreferences(BATTERY_ASK_PREFS, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(KEY_ASKED, false)) return
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                prefs.edit().putBoolean(KEY_ASKED, true).apply()
+                return
+            }
+            prefs.edit().putBoolean(KEY_ASKED, true).apply()
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
+    }
+
     companion object {
         /** 二轮审计 A-6：进程存活期的 ApexCoreService 首启标记（见 onCreate 注释）。 */
         @Volatile
         private var coreServiceStartedThisProcess = false
+
+        /** v1.4.4 #4：电池优化引导一次性标记（拒绝过不再问）。 */
+        private const val BATTERY_ASK_PREFS = "apex_one_shot_flags"
+        private const val KEY_ASKED = "battery_optim_asked"
     }
 }

@@ -71,13 +71,22 @@ internal fun AgentChatViewModel.persistChatHistorySnapshot(
     val modelLabel = profiles.value.firstOrNull { it.id == currentProfileId.value }
         ?.let { p -> p.modelId.ifBlank { p.name } } ?: ""
 
+    // v1.4.4 #5：重命名（customTitle）与置顶（pinned）跨归档保留 ——
+    // 自动归档重建 summary 时从内存会话索引回读这两个用户标记，
+    // 否则每次 800ms 防抖落盘都会把自定义标题打回首条消息截断、置顶清零。
+    val existing = _chatSessions.value.firstOrNull { it.id == sessionId }
+    val customTitle = existing?.customTitle == true
+    val pinned = existing?.pinned ?: false
+
     val summary = ChatSessionSummary(
         id = sessionId,
-        title = historyMessages.historyTitle(),
+        title = if (customTitle && existing != null) existing.title else historyMessages.historyTitle(),
         createdAt = createdAt,
         updatedAt = System.currentTimeMillis(),
         messageCount = historyMessages.size,
-        modelId = modelLabel
+        modelId = modelLabel,
+        pinned = pinned,
+        customTitle = customTitle
     )
     viewModelScope.launch(Dispatchers.IO) {
         chatHistory.saveSession(summary, historyMessages)

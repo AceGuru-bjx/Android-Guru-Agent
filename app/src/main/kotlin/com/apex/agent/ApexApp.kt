@@ -6,6 +6,10 @@ import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import com.apex.agent.attachment.AttachmentCleanupManager
 import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.diagnostics.LogFileSink
+import com.apex.agent.net.NetworkMonitor
+import com.apex.agent.notify.ApexNotifications
+import com.apex.agent.notify.ForegroundTracker
 import com.apex.agent.platform.EnvironmentStateUpdater
 import com.apex.agent.platform.csmem.actor.MemoryWriterActor
 import com.apex.agent.platform.csmem.dream.DreamRenderer
@@ -63,6 +67,24 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
     @Inject
     lateinit var mcpHostManager: com.apex.agent.mcphost.McpHostManager
 
+    // ═══ v1.4.4：诊断 / 通知 / 网络 —— 启动即初始化的三个单例 ═══
+
+    /** #7 日志落盘管道：AppLogger INFO+ 事件 → filesDir/logs/（日切 + 保留 7 天）。 */
+    @Inject
+    lateinit var logFileSink: LogFileSink
+
+    /** #4 前台跟踪：ActivityLifecycleCallbacks 计数器（任务完成通知的静音判定）。 */
+    @Inject
+    lateinit var foregroundTracker: ForegroundTracker
+
+    /** #4 通知中心：建双渠道（任务完成 HIGH / 通用 DEFAULT）。 */
+    @Inject
+    lateinit var notifications: ApexNotifications
+
+    /** #6 网络监测：ConnectivityManager 仲裁式状态源（离线横幅/后续重试策略共用）。 */
+    @Inject
+    lateinit var networkMonitor: NetworkMonitor
+
     /** 后台启动任务专用 scope（SupervisorJob：单任务失败不殊及兄弟任务）。 */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -83,6 +105,15 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         installGlobalCrashHandler()
+        // ═══ v1.4.4：启动即初始化（顺序有意为之）═══
+        // 前台跟踪最先注册：后续任何路径的 isForeground 判定都可靠；
+        // 日志落盘紧随 crash handler —— 启动期日志也能留痕（重启后可查）；
+        // 通知渠道幂等创建（targetSdk 28 在 Android 13+ 由系统自动弹授权对话框）；
+        // 网络监测注入即回调注册（StateFlow 初值同步探测）。
+        runCatching { foregroundTracker.register(this) }
+        runCatching { logFileSink.start() }
+        runCatching { notifications.ensureChannels(this) }
+        runCatching { networkMonitor.isOnline.value } // 触发单例创建 + 回调注册
         initShizuku()
         // attachmentCleanupManager 字段已通过 Hilt @Inject 触发单例创建，
         // schedulePeriodicCleanup() 已在 AttachmentModule 的 @Provides apply block 中调用。
