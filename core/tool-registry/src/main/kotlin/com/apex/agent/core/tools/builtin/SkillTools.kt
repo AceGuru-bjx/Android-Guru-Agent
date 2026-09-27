@@ -136,7 +136,9 @@ class SkillSearchTool(
  */
 class SkillInstallTool(
     private val skillRegistry: SkillRegistry,
-    private val httpClient: OkHttpClient
+    private val httpClient: OkHttpClient,
+    /** 安装即装备（市场热加载闭环）：非空时安装成功后直接进激活集。 */
+    private val activationStore: SkillActivationStore? = null
 ) : AgentTool {
 
     override val id = "skill_install"
@@ -194,6 +196,9 @@ class SkillInstallTool(
 
         return result.fold(
             onSuccess = { manifest ->
+                // 安装即装备 + 热加载现状：SkillHotReloader 订阅 registry
+                // 变更实时同步工具表，早已无需重启（旧文案是历史遗留）。
+                activationStore?.activate(manifest.id)
                 buildString {
                     appendLine("✅ Skill installed successfully!")
                     appendLine("  Name: ${manifest.name}")
@@ -204,8 +209,11 @@ class SkillInstallTool(
                     if (manifest.promptInjection != null) {
                         appendLine("  Prompt injection: active")
                     }
+                    if (activationStore != null) {
+                        appendLine("  Equipped: its methodology is live in your system prompt from this turn on.")
+                    }
                     appendLine()
-                    appendLine("The skill is now active. Restart the agent for its tools to register in the ToolRegistry.")
+                    appendLine("Hot-reload: the skill's tools register immediately — no restart needed. You may use them now.")
                 }
             },
             onFailure = { e -> "❌ Skill installation failed: ${e.message}" }

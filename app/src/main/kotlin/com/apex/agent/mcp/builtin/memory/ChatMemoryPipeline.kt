@@ -1,5 +1,7 @@
 package com.apex.agent.mcp.builtin.memory
 
+import com.apex.agent.core.engine.ChatEmotion
+import com.apex.agent.core.engine.ChatSignalDetector
 import com.apex.agent.core.llm.LlmMessage
 import com.apex.agent.core.llm.LlmResponse
 import com.apex.agent.core.llm.runtime.LlmRequestContext
@@ -29,7 +31,15 @@ import kotlinx.serialization.json.jsonPrimitive
  *    （"## Remembered About You"），模型无需先调 memory 工具才知道用户是谁；
  * 3. **存储共生**：与 memory MCP 共享同一个 [KnowledgeGraphStore] 实例
  *    （`<filesDir>/mcp_memory/memory.json`）——自动记忆与模型显式写的记忆
- *    同图同源，用户经 memory 工具 / mcp_call 全部可见、可删、可改。
+ *    同图同源，用户经 memory 工具 / mcp_call 全部可见、可删、可改；
+ * 4. **情绪纵览（R2）**：每轮用 [ChatSignalDetector] 与引擎同一套口径判定
+ *    情绪，滚动窗口（近 [TONE_WINDOW] 轮）汇总为「用户近况」实体的单条
+ *    基调观察（delete+recreate 有界替换，永不膨胀）——下次对话开头模型
+ *    就知道用户近来的情绪基调，开口不再「没记性」；
+ * 5. **里程碑日历（R2）**：句子级「日期模式 × 人生事件标记」双命中即沉淀
+ *    为「用户里程碑」观察（下周三面试/10月2日领证/我妈生日…），召回时
+ *    作为独立段注入——Agent 能在日子临近时自然提起，这是 operit/Mem0
+ *    都没有的「时间感知」能力。
  *
  * ## 数据面
  *
@@ -63,11 +73,18 @@ class ChatMemoryPipeline @Inject constructor(
     /** 蒸馏节拍计数器（进程级；重启归零无害——只是少蒸一次）。 */
     private val turnCounter = AtomicInteger(0)
 
+    /** 情绪基调滚动窗（近 [TONE_WINDOW] 个情绪轮；进程级，重启后由新一轮重建）。 */
+    private val toneWindow = ArrayDeque<ChatEmotion>()
+
     init {
-        // 幂等：画像实体不存在则建（已存在时 createEntities 合并语义零副作用）
+        // 幂等：画像/近况/里程碑实体不存在则建（已存在时 createEntities 合并语义零副作用）
         runCatching {
             store.createEntities(
-                listOf(GraphEntity(name = PROFILE_ENTITY, entityType = PROFILE_TYPE))
+                listOf(
+                    GraphEntity(name = PROFILE_ENTITY, entityType = PROFILE_TYPE),
+                    GraphEntity(name = STATE_ENTITY, entityType = STATE_TYPE),
+                    GraphEntity(name = MILESTONE_ENTITY, entityType = MILESTONE_TYPE)
+                )
             )
         }
     }
@@ -78,18 +95,31 @@ class ChatMemoryPipeline @Inject constructor(
      * 检索与当前用户消息相关的长期记忆，格式化为注入段内容。
      *
      * 组成：画像实体最近 [MAX_PROFILE_ITEMS] 条观察（稳定事实，恒注入）+
-     * 按消息关键词检索命中的主题实体观察（模型显式写的记忆，按需注入）。
-     * 总长钳制 [MAX_RECALL_CHARS]；无可召回内容返回 null。
+     * 「用户近况」情绪基调（R2）+「用户里程碑」最近几条（R2）+ 按消息
+     * 关键词检索命中的主题实体观察。总长钳制 [MAX_RECALL_CHARS]；
+     * 无可召回内容返回 null。
      */
     suspend fun recall(userText: String): String? = runCatching {
         val profile = profileObservations()
+        val tone = stateObservation()
+        val milestones = milestoneObservations().takeLast(MAX_MILESTONE_RECALL)
         val related = relatedEntities(userText)
-        if (profile.isEmpty() && related.isEmpty()) return null
+        if (profile.isEmpty() && tone == null && milestones.isEmpty() && related.isEmpty()) return null
 
         buildString {
             if (profile.isNotEmpty()) {
                 appendLine("### 关于用户")
                 profile.forEach { appendLine("- $it") }
+            }
+            tone?.let {
+                if (isNotEmpty()) appendLine()
+                appendLine("### 用户近况")
+                appendLine("- $it")
+            }
+            if (milestones.isNotEmpty()) {
+                if (isNotEmpty()) appendLine()
+                appendLine("### 里程碑（用户提过的重要日子）")
+                milestones.forEach { appendLine("- $it") }
             }
             if (related.isNotEmpty()) {
                 if (isNotEmpty()) appendLine()
@@ -111,6 +141,15 @@ class ChatMemoryPipeline @Inject constructor(
         runCatching { captureHeuristic(userText) }
             .onFailure { e ->
                 AppLogger.instance.warn(LogCategory.CS_MEM, "ChatMemoryPipeline", "启发式捕获失败(忽略): ${e.message}")
+            }
+        // R2：情绪基调滚动窗 + 里程碑日历（同为防御式，失败只记日志）
+        runCatching { updateTone(userText) }
+            .onFailure { e ->
+                AppLogger.instance.warn(LogCategory.CS_MEM, "ChatMemoryPipeline", "情绪基调更新失败(忽略): ${e.message}")
+            }
+        runCatching { captureMilestones(userText) }
+            .onFailure { e ->
+                AppLogger.instance.warn(LogCategory.CS_MEM, "ChatMemoryPipeline", "里程碑捕获失败(忽略): ${e.message}")
             }
         val n = turnCounter.incrementAndGet()
         if (n % DISTILL_EVERY_N_TURNS == 0) {
@@ -147,6 +186,75 @@ class ChatMemoryPipeline @Inject constructor(
                     "启发式捕获 $added 条用户事实入画像"
                 )
             }
+        }
+    }
+
+    // ── R2：情绪基调滚动窗（用户近况实体，单条有界替换）─────────
+
+    /**
+     * 每轮情绪判定（与引擎注入 Emotional Attunement 同一口径）→ 滚动窗
+     * → 基调汇总单条写入「用户近况」。仅情绪轮计入窗口（NONE 不冲淡）；
+     * delete+recreate+add 三步实现「替换」语义，实体永远只持一条观察。
+     */
+    private fun updateTone(userText: String) {
+        val signal = ChatSignalDetector.detect(userText)
+        if (signal.emotion == ChatEmotion.NONE) return
+        val summary = synchronized(toneWindow) {
+            toneWindow.addLast(signal.emotion)
+            while (toneWindow.size > TONE_WINDOW) toneWindow.removeFirst()
+            summarizeToneLocked()
+        }
+        runCatching {
+            store.deleteEntities(listOf(STATE_ENTITY))
+            store.createEntities(listOf(GraphEntity(name = STATE_ENTITY, entityType = STATE_TYPE)))
+            store.addObservations(STATE_ENTITY, listOf(summary))
+        }.onFailure { e ->
+            AppLogger.instance.warn(LogCategory.CS_MEM, "ChatMemoryPipeline", "基调落盘失败(忽略): ${e.message}")
+        }
+    }
+
+    /** 窗口汇总：主导情绪 + 计数；平票负向优先（SAD 序最低，thenByDescending 使其胜出）。 */
+    private fun summarizeToneLocked(): String {
+        val counts = toneWindow.groupingBy { it }.eachCount()
+        val (dominant, hits) = counts.entries
+            .maxWith(compareBy<Map.Entry<ChatEmotion, Int>> { it.value }.thenByDescending { it.key.ordinal })
+        val label = TONE_LABELS[dominant] ?: dominant.name
+        return "近期情绪基调:偏${label}（近期记录中${hits}轮${label}，留意用户状态、先关心人再办事）"
+    }
+
+    // ── R2：里程碑日历（用户里程碑实体）────────────────────────
+
+    /**
+     * 句子级「日期模式 × 人生事件标记」双命中即整句入库（≤2 句/轮，内容
+     * 级去重由 store 保证）。创作型指令（帮我写/文案…）中的日子是素材
+     * 不是用户的日子，命中护栏直接跳过该句。
+     */
+    private fun captureMilestones(userText: String) {
+        val hits = userText.split(Regex("[，。！？；\\n,.!?;]+"))
+            .map { it.trim() }
+            .filter { it.length in 4..60 }
+            .filterNot { s -> MILESTONE_GUARDS.any { s.contains(it) } }
+            .filter { s -> DATE_PATTERN.containsMatchIn(s) && EVENT_MARKERS.any { s.contains(it) } }
+            .take(MAX_MILESTONE_PER_TURN)
+        if (hits.isEmpty()) return
+        val added = store.addObservations(MILESTONE_ENTITY, hits)
+        if (added > 0) {
+            AppLogger.instance.info(
+                LogCategory.CS_MEM, "ChatMemoryPipeline",
+                "里程碑捕获 $added 条"
+            )
+            compactMilestonesIfNeeded()
+        }
+    }
+
+    /** 超限压缩：只保留最近 [MAX_MILESTONE_ITEMS] 条（delete+recreate）。 */
+    private fun compactMilestonesIfNeeded() {
+        val all = milestoneObservations()
+        if (all.size <= MAX_MILESTONE_ITEMS) return
+        runCatching {
+            store.deleteEntities(listOf(MILESTONE_ENTITY))
+            store.createEntities(listOf(GraphEntity(name = MILESTONE_ENTITY, entityType = MILESTONE_TYPE)))
+            store.addObservations(MILESTONE_ENTITY, all.takeLast(MAX_MILESTONE_ITEMS))
         }
     }
 
@@ -220,6 +328,27 @@ class ChatMemoryPipeline @Inject constructor(
         }.getOrDefault(emptyList())
     }
 
+    /** 「用户近况」唯一基调观察；实体缺失/空观察返回 null。 */
+    private fun stateObservation(): String? {
+        return runCatching {
+            store.readGraph().entities
+                .firstOrNull { it.name == STATE_ENTITY }
+                ?.observations
+                ?.lastOrNull()
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    /** 「用户里程碑」全部观察（插入序）。 */
+    private fun milestoneObservations(): List<String> {
+        return runCatching {
+            store.readGraph().entities
+                .firstOrNull { it.name == MILESTONE_ENTITY }
+                ?.observations
+                .orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
     /**
      * 按用户消息关键词检索主题实体（排除画像本体，画像恒注入无需重复）。
      * 关键词 = 分词后长度 ≥ 2 的 CJK/拉丁段；每段一次 searchNodes（内存
@@ -262,6 +391,12 @@ class ChatMemoryPipeline @Inject constructor(
         const val PROFILE_ENTITY = "用户画像"
         const val PROFILE_TYPE = "chat_memory_profile"
 
+        /** R2：「用户近况」（情绪基调，单条替换）与「用户里程碑」（日期事件）。 */
+        const val STATE_ENTITY = "用户近况"
+        const val STATE_TYPE = "chat_memory_state"
+        const val MILESTONE_ENTITY = "用户里程碑"
+        const val MILESTONE_TYPE = "chat_memory_milestone"
+
         /** 自我披露标记词（句级匹配，含其一且含「我」即整句入库）。 */
         val SELF_DISCLOSURE_MARKERS = listOf(
             "我叫", "我的名字", "我是", "我在", "我喜欢", "我爱", "我偏好", "我最爱",
@@ -269,6 +404,37 @@ class ChatMemoryPipeline @Inject constructor(
             "我正在", "我打算", "我要考", "我今年", "我用", "我的手机", "我们团队", "我家里"
         )
 
+        /** 情绪基调标签（检测器枚举 → 用户可读中文）。 */
+        val TONE_LABELS = mapOf(
+            ChatEmotion.SAD to "低落", ChatEmotion.ANXIOUS to "焦虑",
+            ChatEmotion.ANGRY to "烦躁易怒", ChatEmotion.JOYFUL to "欢快"
+        )
+
+        /** 日期模式：具体日期/星期/相对日/节日（与事件标记双命中才算里程碑）。 */
+        val DATE_PATTERN = Regex(
+            "\\d{1,2}月\\d{1,2}[日号]|周[一二三四五六日天]|明天|后天|下周|" +
+                "这周末|周末|月底|年底|元旦|春节|除夕|元宵|清明|端午|中秋|" +
+                "国庆|五一|情人节|母亲节|父亲节|高考|考研"
+        )
+
+        /** 人生事件标记（与日期模式双命中）。 */
+        val EVENT_MARKERS = listOf(
+            "生日", "纪念日", "领证", "结婚", "婚礼", "订婚", "求婚", "相亲",
+            "面试", "笔试", "考试", "考研", "考公", "开学", "毕业", "入职",
+            "离职", "搬家", "体检", "手术", "复诊", "答辩", "开题", "交房",
+            "提车", "摇号", "出发", "返程", "预产期", "放榜", "出成绩"
+        )
+
+        /** 创作护栏：这些句式里的日子是素材不是用户的日子。 */
+        val MILESTONE_GUARDS = listOf(
+            "帮我写", "写一篇", "写个", "写一段", "文案", "帮我翻译", "翻译成",
+            "生成", "润色", "仿写", "续写", "例句", "示例", "假设"
+        )
+
+        const val TONE_WINDOW = 6
+        const val MAX_MILESTONE_PER_TURN = 2
+        const val MAX_MILESTONE_ITEMS = 30
+        const val MAX_MILESTONE_RECALL = 5
         const val DISTILL_EVERY_N_TURNS = 4
         const val MAX_HEURISTIC_PER_TURN = 3
         const val MAX_PROFILE_ITEMS = 10

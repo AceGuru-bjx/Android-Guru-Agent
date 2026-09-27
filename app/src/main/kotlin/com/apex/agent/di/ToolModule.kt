@@ -864,7 +864,7 @@ object ToolModule {
         // ═══ 13. Skill 工具接线（此前缺口：skill_* 管理工具与已启用技能的
         // composite/script 工具从未注册进 ToolRegistry，安装后形同虚设）═══
         registry.register(SafeAgentTool(SkillSearchTool(httpClient)))
-        registry.register(SafeAgentTool(SkillInstallTool(skillRegistry, httpClient)))
+        registry.register(SafeAgentTool(SkillInstallTool(skillRegistry, httpClient, skillActivation)))
         registry.register(SafeAgentTool(SkillCreateTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillListTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillUninstallTool(skillRegistry)))

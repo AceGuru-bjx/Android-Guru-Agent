@@ -163,6 +163,10 @@ class ApexAgentEngine(
     @Volatile
     private var chatMemoryNote: String? = null
 
+    /** 本轮聊天信号（共情/澄清，ChatSignalDetector）。execute() 入口填充，finally 复位。 */
+    @Volatile
+    private var chatSignal: ChatSignal? = null
+
     /** T76 — 压缩后重注入的任务状态 system 消息（N-9，TaskRuntime 调用）。 */
     fun injectSystemContext(content: String) {
         conversationHistory.add(LlmMessage.System(content))
@@ -407,6 +411,7 @@ class ApexAgentEngine(
             firstGreetingTurn =
                 conversationHistory.none { it is LlmMessage.User } &&
                     SmallTalkDetector.isGreetingOnly(input.text)
+            chatSignal = ChatSignalDetector.detect(input.text)
             // 聊天长期记忆召回：失败折叠为 null（记忆子系统异常绝不阻断主对话）。
             chatMemoryNote = try {
                 memoryObserver?.recallChatMemory(input.text)?.takeIf { it.isNotBlank() }
@@ -547,6 +552,7 @@ class ApexAgentEngine(
             // 复位轮次级注入态（防止下一轮携带上一轮的问候约束/记忆快照）。
             firstGreetingTurn = false
             chatMemoryNote = null
+            chatSignal = null
             // Cancel any dangling plan-confirmation deferred so it doesn't leak.
             planConfirmationDeferred?.complete(PlanDecision.legacy(false))
             planConfirmationDeferred = null
@@ -1138,7 +1144,8 @@ class ApexAgentEngine(
         globalRules = globalRulesText,
         // 首轮纯问候硬约束 + 聊天记忆召回（execute() 置位，finally 复位）。
         firstTurnGreeting = firstGreetingTurn,
-        memoryContext = chatMemoryNote
+        memoryContext = chatMemoryNote,
+        chatSignal = chatSignal
     )
 
     // SPEC / Reflection 模式 prompt 包装器已迁至 EnginePromptDelegates.kt（#168 零净增腾挪，调用点零改动）。

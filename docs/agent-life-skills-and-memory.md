@@ -26,7 +26,11 @@
 | 「聊天记不住我」 | 跨会话忘记用户偏好/背景 | cs-mem 只记 UI 轨迹；知识图谱 MCP 只能靠模型显式调用写入；对话内容无人沉淀 |
 | 技能库扩张的隐形墙 | 46+ 技能全量注入会撞请求体积上限 | `SkillRegistry.getPromptInjections()` 把所有启用技能全文注入每次请求 |
 
-## 2. 技能矩阵：10 → 46（assets/skills 目录）
+## 2. 技能矩阵：10 → 46 → 70（assets/skills 目录）
+
+> Round 2 新增 24 个（§9.2）：创作表达/人际情感/生活技能/数码消费/兴趣爱好全
+> 覆盖——小红书文案、起名、恋爱军师、解梦、MBTI、收纳、清洁、搬家、减脂
+> 食谱、咖啡茶饮、户外徒步……详见下文 §9.2。
 
 新增 36 个 prompt 型技能（apex-skill-v1 manifest，随 APK 打包、首启幂等释放），覆盖：
 
@@ -148,3 +152,64 @@ trace 脱敏。
 - 记忆蒸馏的 ADD/UPDATE/NOOP 决策（当前只增；冲突事实靠内容级去重兜底）
 - `## Remembered About You` 的设置页开关与 MemoryScreen 联动展示（自动记忆目前
   与显式记忆同图可见，可再加过滤视图）
+
+## 9. Round 2 增量：共情引擎 × 里程碑记忆 × 安装即装备
+
+### 9.1 共情引擎（ChatSignalDetector，core 新文件）
+
+情绪四分类（低落/焦虑/愤怒/欢快，词表命中数最多者胜，平票负向优先）+
+模糊求助检测（归一化整串精确匹配：「怎么办」命中、「我电脑蓝屏了怎么办」
+不命中），在 `ApexAgentEngine.execute` 入口与首轮问候检测同位运行，产出
+`ChatSignal` 注入系统提示词：
+
+- `## Emotional Attunement (THIS TURN)`：负向情绪 → 先处理心情再处理任务
+  （一句真诚回应，不说教、不命令式安慰、不毒鸡汤；任务紧随——行动本身就是
+  安慰）；欢快 → 同频具名庆祝；危机措辞 → 安全优先转介；
+- `## Vague Request (THIS TURN)`：无宾语短求助禁止猜主题倾倒长文，
+  强制「一个聚焦追问 + 2-4 个具体选项」；
+- 话题延续规则（静态层追加）：非工具型闲聊回答落定后可收尾一行 ≤3 个延伸
+  方向（工具重任务/长回答/用户要结束时跳过）。
+
+护栏：任务指令拦截（帮我写/翻译成/生成一…里的情绪词是素材不是用户状态）、
+代码围栏拦截、超长拦截——宁可漏判不可误判（与 SmallTalkDetector 同哲学）。
+
+### 9.2 技能矩阵 46 → 70（+24）
+
+创作表达/人际情感 12（小红书文案、朋友圈文案、短视频脚本、诗词对联、故事
+大王、起名大师、恋爱军师、人情世故、社交礼仪、解梦趣谈、MBTI人格、节日
+祝福）+ 生活技能/数码消费/兴趣 12（收纳整理、养花种草、清洁妙招、家电急救、
+搬家攻略、数码选购、隐私卫士、一周食谱、减脂食谱、咖啡茶饮、读书搭子、
+户外徒步）。边界纪律：清洁剂混用剧毒警示/断电断气红线/减脂极端节食拒绝/
+户外安全红线置顶/解梦与 MBTI 全程娱乐性质声明/恋爱军师拒绝操控话术。
+
+### 9.3 记忆增强：情绪基调 + 里程碑日历（ChatMemoryPipeline R2）
+
+- **情绪纵览**：每轮与引擎同一套口径判定情绪 → 滚动窗（近 6 个情绪轮）
+  → 「用户近况」实体单条基调（delete+recreate 有界替换）→ 召回注入
+  `### 用户近况`——跨对话开头模型就知道用户近来状态；
+- **里程碑日历**：句子级「日期模式（X月X日/周X/明天/节日…）× 人生事件
+  标记（生日/面试/领证/搬家…）」双命中 → 「用户里程碑」实体（≤2 条/轮、
+  30 条封顶压缩）→ 召回注入 `### 里程碑`——时间感知是 operit/Mem0 都没有的；
+- 创作护栏：帮我写/文案/翻译…里的日子是素材，不入库。
+
+### 9.4 市场热加载闭环收口：安装即装备
+
+链路核实：install/uninstall/setEnabled → `SkillRegistry.changes`（SharedFlow）
+→ `SkillHotReloader.resync` → 工具表热更；`getSkillDigests` 实时 → 目录热更。
+唯一缺口：新装技能只 enabled 不在激活集，方法论并未装载。修复：
+- `MarketInstallManager.installSkillFromJson`（全部安装路径收口点：URL/模板/
+  文件/魔搭/GitHub/ClawHub）安装成功即 `activate`；
+- `SkillInstallTool`（模型侧 skill_install 工具）同样接入，并修正历史遗留的
+  「需重启生效」错误文案（热加载下无需重启）；
+- 提示语升级：「已安装并装备 Skill：xx，下一轮对话即生效」。
+
+### 9.5 Round 2 验证
+
+| 项 | 结果 |
+| --- | --- |
+| kotlinc 全模块编译（main 源） | logging / llm-adapter / tool-registry / agent-engine 全绿（1306 classes） |
+| ChatMemoryPipeline + KnowledgeGraphStore 提取编译 | 全绿（24 classes） |
+| 新增 ChatSignalDetectorTest 16 + RolePromptTest 9 | 全绿 |
+| BundledSkills/SkillHotReloader/ModePresets/EngineToolSystemV4/HumanAssist/DecisionPoint 72 | 全绿（回归零破） |
+| 门禁 file_size / code_quality / kotlin_balance（8 个改动 kt） | 全绿；ApexAgentEngine 1194/1200（预算内） |
+| 70 技能资产 | 24 新增 JSON 逐个验证；id 全局唯一；promptInjection 1.5-1.9KB |
