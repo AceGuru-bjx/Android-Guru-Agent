@@ -49,7 +49,7 @@ import com.apex.agent.ui.screen.terminal.ToggleRow
  * 终端专属设置抽屉（T87 从 TerminalScreen.kt 拆出 —— Screen 行数预算治理）。
  *
  * 新增（T87 终端体验完善）：
- *  - **配色方案入口**（[onOpenSchemePicker]）：20 套 Termux 风格主题；
+ *  - **配色方案入口**（[onOpenSchemePicker]）：31 套 Termux 风格主题；
  *  - **bold-as-bright 开关**：xterm 传统（ls/ls 彩色输出的约定）；
  *  - **命令历史入口**（[onOpenHistory]）。
  *

@@ -249,12 +249,126 @@ object TerminalColorSchemeDefs {
         bBlue = 0xFF99CCFF, bMagenta = 0xFFFF99FF, bCyan = 0xFF99FFFF, bWhite = 0xFFFFFFFF
     )
 
+    // ─── VS Code Dark+（官方集成终端 ANSI 板）───
+    val VSCODE_DARK_PLUS: TerminalColorScheme = scheme(
+        id = "vscode-dark-plus", name = "VS Code Dark+", nameZh = "VS Code 深",
+        background = 0xFF1E1E1E, foreground = 0xFFD4D4D4,
+        cursor = 0xFFD4D4D4, selection = 0x66264F78,
+        black = 0xFF000000, red = 0xFFCD3131, green = 0xFF0DBC79, yellow = 0xFFE5E510,
+        blue = 0xFF2472C8, magenta = 0xFFBC3FBC, cyan = 0xFF11A8CD, white = 0xFFE5E5E5,
+        bBlack = 0xFF666666, bRed = 0xFFF14C4C, bGreen = 0xFF23D18B, bYellow = 0xFFF5F543,
+        bBlue = 0xFF3B8EEA, bMagenta = 0xFFD670D6, bCyan = 0xFF29B8DB, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── JetBrains Darcula（IDE 控制台语义）───
+    val JETBRAINS_DARCULA: TerminalColorScheme = scheme(
+        id = "darcula-jb", name = "Darcula (JB)", nameZh = "Darcula 工作台",
+        background = 0xFF2B2B2B, foreground = 0xFFA9B7C6,
+        cursor = 0xFFBBBBBB, selection = 0x662F4F4F,
+        black = 0xFF000000, red = 0xFFFF6B68, green = 0xFFA8C023, yellow = 0xFFD6BF55,
+        blue = 0xFF5394EC, magenta = 0xFFAE8ABE, cyan = 0xFF299999, white = 0xFFA9B7C6,
+        bBlack = 0xFF555555, bRed = 0xFFFF8785, bGreen = 0xFFA8C023, bYellow = 0xFFD6BF55,
+        bBlue = 0xFF7EAEF1, bMagenta = 0xFFB85ED2, bCyan = 0xFF37B5B5, bWhite = 0xFFD0D0D0
+    )
+
+    // ─── Night Owl（Sarah Drasner）───
+    val NIGHT_OWL: TerminalColorScheme = scheme(
+        id = "night-owl", name = "Night Owl", nameZh = "夜枭",
+        background = 0xFF011627, foreground = 0xFFD6DEEB,
+        cursor = 0xFF80A4C2, selection = 0x6637578B,
+        black = 0xFF011627, red = 0xFFEF5350, green = 0xFF22DA6E, yellow = 0xFFADDB67,
+        blue = 0xFF82AAFF, magenta = 0xFFC792EA, cyan = 0xFF21C7C8, white = 0xFFFFFFFF,
+        bBlack = 0xFF575656, bRed = 0xFFEF5350, bGreen = 0xFF22DA6E, bYellow = 0xFFADDB67,
+        bBlue = 0xFF82AAFF, bMagenta = 0xFFC792EA, bCyan = 0xFF21C7C8, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── Palenight ───
+    val PALENIGHT: TerminalColorScheme = scheme(
+        id = "palenight", name = "Pale Night", nameZh = "暗夜微光",
+        background = 0xFF292D3E, foreground = 0xFFA6ACCD,
+        cursor = 0xFFA6ACCD, selection = 0x66444A68,
+        black = 0xFF292D3E, red = 0xFFF07178, green = 0xFFC3E88D, yellow = 0xFFFFCB6B,
+        blue = 0xFF82AAFF, magenta = 0xFFC792EA, cyan = 0xFF89DDFF, white = 0xFFD0D0D0,
+        bBlack = 0xFF676E95, bRed = 0xFFF07178, bGreen = 0xFFC3E88D, bYellow = 0xFFFFCB6B,
+        bBlue = 0xFF82AAFF, bMagenta = 0xFFC792EA, bCyan = 0xFF89DDFF, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── Material Theme Darker ───
+    val MATERIAL_DARKER: TerminalColorScheme = scheme(
+        id = "material-darker", name = "Material Darker", nameZh = "Material 暗板",
+        background = 0xFF263238, foreground = 0xFFEEFFFF,
+        cursor = 0xFFFFCC00, selection = 0x66455A64,
+        black = 0xFF263238, red = 0xFFFF5370, green = 0xFFC3E88D, yellow = 0xFFFFCB6B,
+        blue = 0xFF82AAFF, magenta = 0xFFC792EA, cyan = 0xFF89DDFF, white = 0xFFEEFFFF,
+        bBlack = 0xFF546E7A, bRed = 0xFFFF5370, bGreen = 0xFFC3E88D, bYellow = 0xFFFFCB6B,
+        bBlue = 0xFF82AAFF, bMagenta = 0xFFC792EA, bCyan = 0xFF89DDFF, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── KDE Breeze（Konsole 默认）───
+    val BREEZE: TerminalColorScheme = scheme(
+        id = "breeze", name = "Breeze", nameZh = "微风",
+        background = 0xFF232627, foreground = 0xFFFCFCFC,
+        cursor = 0xFFFCFCFC, selection = 0x663D6B80,
+        black = 0xFF232627, red = 0xFFED1515, green = 0xFF11D116, yellow = 0xFFF67400,
+        blue = 0xFF1D99F3, magenta = 0xFF9B59B6, cyan = 0xFF1ABC9C, white = 0xFFFCFCFC,
+        bBlack = 0xFF7F8C8D, bRed = 0xFFC0392B, bGreen = 0xFF1CDC9A, bYellow = 0xFFFDBC4B,
+        bBlue = 0xFF3DAEE9, bMagenta = 0xFF8E44AD, bCyan = 0xFF16A085, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── Srcery ───
+    val SRCERY: TerminalColorScheme = scheme(
+        id = "srcery", name = "Srcery", nameZh = "Srcery",
+        background = 0xFF1C1B19, foreground = 0xFFFCE8C3,
+        cursor = 0xFFFBB829, selection = 0x66504F49,
+        black = 0xFF1C1B19, red = 0xFFEF2F27, green = 0xFF519F50, yellow = 0xFFFBB829,
+        blue = 0xFF2C78BF, magenta = 0xFFE02C6D, cyan = 0xFF0AAEB3, white = 0xFFD0BFA1,
+        bBlack = 0xFF918175, bRed = 0xFFF75341, bGreen = 0xFF98BC37, bYellow = 0xFFFED06E,
+        bBlue = 0xFF68A8E4, bMagenta = 0xFFFF5C8F, bCyan = 0xFF53FCE9, bWhite = 0xFFFCE8C3
+    )
+
+    // ─── Gruvbox Light（唯一暖浅色方案）───
+    val GRUVBOX_LIGHT: TerminalColorScheme = scheme(
+        id = "gruvbox-light", name = "Gruvbox Light", nameZh = "Gruvbox 浅",
+        dark = false,
+        background = 0xFFFBF1C7, foreground = 0xFF3C3836,
+        cursor = 0xFF928374, selection = 0x66EBDBB2,
+        black = 0xFFFBF1C7, red = 0xFF9D0006, green = 0xFF79740E, yellow = 0xFFB57614,
+        blue = 0xFF076678, magenta = 0xFF8F3F71, cyan = 0xFF427B58, white = 0xFF3C3836,
+        bBlack = 0xFF928374, bRed = 0xFF9D0006, bGreen = 0xFF79740E, bYellow = 0xFFB57614,
+        bBlue = 0xFF076678, bMagenta = 0xFF8F3F71, bCyan = 0xFF427B58, bWhite = 0xFF282828
+    )
+
+    // ─── One Half Light ───
+    val ONE_HALF_LIGHT: TerminalColorScheme = scheme(
+        id = "one-half-light", name = "One Half Light", nameZh = "One Half 浅",
+        dark = false,
+        background = 0xFFFAFAFA, foreground = 0xFF383A42,
+        cursor = 0xFF4F525D, selection = 0x66E5E5E6,
+        black = 0xFF383A42, red = 0xFFE45649, green = 0xFF50A14F, yellow = 0xFFC18401,
+        blue = 0xFF4078F2, magenta = 0xFFA626A4, cyan = 0xFF0184BC, white = 0xFFFAFAFA,
+        bBlack = 0xFF4F525D, bRed = 0xFFE06C75, bGreen = 0xFF98C379, bYellow = 0xFFE5C07B,
+        bBlue = 0xFF61AFEF, bMagenta = 0xFFC678DD, bCyan = 0xFF56B6C2, bWhite = 0xFFFFFFFF
+    )
+
+    // ─── Amber Phosphor（琥珀磷屏 —— Matrix 的姊妹款）───
+    val AMBER_PHOSPHOR: TerminalColorScheme = scheme(
+        id = "amber-phosphor", name = "Amber Phosphor", nameZh = "琥珀磷屏",
+        background = 0xFF160D00, foreground = 0xFFFFB000,
+        cursor = 0xFFFFB000, selection = 0x66806000,
+        black = 0xFF332000, red = 0xFFFF9E3D, green = 0xFFCC8400, yellow = 0xFFFFCC66,
+        blue = 0xFFAA7C00, magenta = 0xFFDD9500, cyan = 0xFFBB9500, white = 0xFFFFD680,
+        bBlack = 0xFF664200, bRed = 0xFFFFB266, bGreen = 0xFFDDA200, bYellow = 0xFFFFDD99,
+        bBlue = 0xFFCC9C33, bMagenta = 0xFFEEAE33, bCyan = 0xFFDDB533, bWhite = 0xFFFFE6B3
+    )
+
     /** 全部内置方案（展示顺序 = 本列表顺序）。 */
     val ALL: List<TerminalColorScheme> = listOf(
         APEX_MINT, TERMUX, DRACULA, NORD, GRUVBOX_DARK, MONOKAI, ONE_HALF_DARK,
         ATOM_ONE_DARK, TOKYO_NIGHT, CATPPUCCIN_MOCHA, EVERFOREST, ROSE_PINE,
         KANAGAWA, SYNTHWAVE_84, AYU_DARK, GITHUB_DARK, SOLARIZED_DARK, SOLARIZED_LIGHT,
-        UBUNTU, MATRIX, HIGH_CONTRAST
+        UBUNTU, MATRIX, HIGH_CONTRAST, VSCODE_DARK_PLUS, JETBRAINS_DARCULA, NIGHT_OWL,
+        PALENIGHT, MATERIAL_DARKER, BREEZE, SRCERY, GRUVBOX_LIGHT, ONE_HALF_LIGHT,
+        AMBER_PHOSPHOR
     )
 
     // ── 构造助手（可缺省：未给的亮色 = 基础色提亮 12%）──

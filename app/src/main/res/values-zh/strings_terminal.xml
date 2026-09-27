@@ -145,7 +145,7 @@
     <string name="term_scheme_current">当前主题</string>
     <string name="term_scheme_change">更换</string>
     <string name="term_scheme_picker_title">终端配色方案</string>
-    <string name="term_scheme_picker_desc">21 套内置 Termux 风格主题 —— 点击即时生效，无需重启会话</string>
+    <string name="term_scheme_picker_desc">31 套内置 Termux 风格主题 —— 点击即时生效，无需重启会话</string>
     <string name="term_bold_as_bright">粗体渲染为亮色</string>
     <string name="term_bold_as_bright_desc">xterm 传统：粗体 + 基础色显示为亮色变体（ls 等彩色输出依赖此约定）</string>
 

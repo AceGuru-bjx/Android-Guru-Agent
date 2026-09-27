@@ -10,7 +10,7 @@
 | 2 | 「Shell 模式只有部分命令可以用」 | Android 本地 shell = toybox 工具集（先天有限）+ 无命令发现入口 + 无 HOME/历史 | mksh rc（`$ENV` 注入）：user@host:cwd 提示符 + 历史记录 + `cmds`（PATH 全量命令列表）+ `cmdf`（命令定位）+ apt 诚实引导（明说 Ubuntu 会话才有）+ 别名；命令历史抽屉（持久化） |
 | 3 | 「输入的时候 …输入的文字中间有很大的空白」「运行之后想运行第二个命令，中间有一大段空白」 | 渲染层 follow 滚动目标错误：`scrollToItem(totalRows - 1)` 滚到屏幕最后一行 —— 提示符之后的整屏空行全部进入视口（打开即空屏；每条命令后又是整屏空白） | follow 目标 = **光标行贴视口底部**（Termux 语义：提示符紧贴键盘上沿）；「跳到最新」浮标同修 |
 | 4 | 「Shell 模式也要用白色字体，不然黑色啥也看不清」 | `TerminalGrid.baseStyle` 不带 color —— 无 ANSI 着色的普通文本落不到任何 SpanStyle，`BasicText` 兜底色是**纯黑**，在深色终端底上黑字黑底 | baseStyle 显式携带 scheme 前景色（白）；T87 配色系统上线后前景由 scheme 决定 |
-| 5 | 「终端文字颜色要看情况彩色，像 Termux 项目一样」 | 旧渲染只透传 ANSI 16 色的标准板色值，无主题系统 | **21 套 Termux 风格配色方案**（Termux/Dracula/Nord/Gruvbox/Solarized/Monokai/Tokyo Night/Catppuccin/Ubuntu/Matrix…）+ 渲染层 ANSI 重映射（`TerminalAnsiRemapper`）+ bold-as-bright + 选择器 UI（即时换肤，零引擎改动） |
+| 5 | 「终端文字颜色要看情况彩色，像 Termux 项目一样」 | 旧渲染只透传 ANSI 16 色的标准板色值，无主题系统 | **31 套 Termux 风格配色方案**（Termux/Dracula/Nord/Gruvbox/Solarized/Monokai/Tokyo Night/Catppuccin/Ubuntu/Matrix…）+ 渲染层 ANSI 重映射（`TerminalAnsiRemapper`）+ bold-as-bright + 选择器 UI（即时换肤，零引擎改动） |
 | 6 | 「Ubuntu 还是会显示 apt 未引导」 | 引导失败后的降级 READY（bootstrapNote）此前只显示原因不给出口；真机 proot 启动失败被 #1 的盲区掩盖 | 死会话/ExecFailed 诚实上报（#1）+ guest bashrc 的 `apt-fix` 一键引导修复（DNS→dpkg→apt update）+ `command_not_found_handle`（找不到命令 → `apt install <pkg>` 提示） |
 | 7 | 「我这个项目的终端真的能被 agent 调用吗」 | 无自证入口 | `terminal.diagnostics` 工具（新注册）：会话/后端面 + **smokeTest=true 真实执行探针**（`printf` 回显自证 exec 链路端到端可用）+ nextActions 结构化建议 |
 
@@ -25,7 +25,7 @@ Default fg → 0 → scheme.foreground
 bold + 基础色 → bold-as-bright → scheme.ansi[i+8]（xterm 传统，ls 彩色输出依赖）
 ```
 
-- 方案模型：`TerminalColorScheme`（21 套，`TerminalColorSchemeDefs`）—— 纯 Kotlin `Long`，JVM 直测。
+- 方案模型：`TerminalColorScheme`（31 套，`TerminalColorSchemeDefs`）—— 纯 Kotlin `Long`，JVM 直测。
 - 注入：`LocalTerminalColorScheme` / `LocalTerminalBoldAsBright`（CompositionLocal，切换整树换色）。
 - 持久化：`TerminalColorSchemeSettings`（SharedPreferences，未知 id 兜底默认）。
 

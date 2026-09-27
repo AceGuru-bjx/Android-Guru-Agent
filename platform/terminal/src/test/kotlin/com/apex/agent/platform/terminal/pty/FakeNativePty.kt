@@ -58,6 +58,10 @@ class FakeNativePty : NativePty {
     private val idCounter = AtomicInteger(0)
     private val pidCounter = AtomicInteger(20000)
 
+    /** T87：下次 nativeCreateSessionArgv 注入的 exec 失败原因（单发）。 */
+    @Volatile
+    var pendingSpawnFailure: String? = null
+
     override fun nativeCreateSession(shell: String, cwd: String, rows: Int, cols: Int, env: Array<String>): Int {
         val id = idCounter.incrementAndGet()
         val pid = pidCounter.incrementAndGet()
@@ -85,6 +89,10 @@ class FakeNativePty : NativePty {
             id = id, shell = argv[0], cwd = cwd, rows = rows, cols = cols, pid = pid,
             argv = argv, spawnEnv = env.toMap()
         )
+        // T87：可注入的 exec 失败模拟（对应真实 native 层 CLOEXEC 报告管道 ——
+        // SessionManagerImpl.createFromSpec 据此当场揭穿死会话）。
+        pendingSpawnFailure?.let { s.spawnError = it; s.alive.set(false); s.exited.set(true) }
+        pendingSpawnFailure = null
         sessions[id] = s
         s.outputBuffer.append("FakeNativePty shell ready\n\$ ")
         return id

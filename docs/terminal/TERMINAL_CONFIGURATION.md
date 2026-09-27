@@ -8,7 +8,7 @@
 - 字号（8–32，双指捏合同源）；
 - 单色模式（忽略 ANSI 颜色，保留字形）；
 - 键盘辅助行（ESC/TAB/CTRL/方向…）显隐；
-- **配色方案**：21 套 Termux 风格主题（含浅色 Solarized Light 与高对比白），点击即时生效；
+- **配色方案**：31 套 Termux 风格主题（含浅色 Solarized Light 与高对比白），点击即时生效；
 - **粗体渲染为亮色**（bold-as-bright，默认开）；
 - **命令历史**（500 条，持久化）；
 - **扩展键行**（自定义宏，Termux extra-keys 等价物）；
@@ -40,7 +40,7 @@ F1=key:F1                     # 特殊键（TerminalKey 名）
 
 ## 工程视角
 
-- 方案定义：`app/.../terminal/scheme/TerminalColorSchemeDefs.kt`（21 套，ARGB Long，纯 Kotlin 可单测）；
+- 方案定义：`app/.../terminal/scheme/TerminalColorSchemeDefs.kt`（31 套，ARGB Long，纯 Kotlin 可单测）；
 - 渲染重映射：`TerminalAnsiRemapper`（引擎标准板 → scheme；见
   `docs/terminal/TERMINAL_EXPERIENCE_OVERHAUL_T87.md` §1 的协议）；
 - 注入：`TerminalRenderer` 顶层 `CompositionLocalProvider`（scheme + boldAsBright）；
