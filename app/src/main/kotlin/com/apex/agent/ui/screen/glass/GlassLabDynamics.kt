@@ -6,6 +6,7 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.StartOffset
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
@@ -156,7 +157,7 @@ private fun ConicBorderCard() {
 
 // ── 2. 镜面扫掠 ──────────────────────────────────────────────────────────────
 
-/** 周期性斜向光带：4.2s 扫过一次 + 1.6s 停顿（StartOffset 相位）。 */
+/** 周期性斜向光带：4.2s 扫过一次 + 1.6s 真停顿（keyframes 停留同值段）。 */
 @Composable
 private fun SpecularSweepCard() {
     val cardShape = RoundedCornerShape(16.dp)
@@ -165,10 +166,16 @@ private fun SpecularSweepCard() {
     val sheen = transition.animateFloat(
         initialValue = -0.4f,
         targetValue = 1.4f,
+        // keyframes 实现「扫完即停」：前 4200ms 扫掠，后 1600ms 停在卡外
+        //（Restart + StartOffset 只是首次延迟，背靠背循环并没有停顿）
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-            initialStartOffset = StartOffset(1600)
+            animation = keyframes {
+                durationMillis = 5800 // 4200 扫 + 1600 停
+                (-0.4f) at 0 with FastOutSlowInEasing
+                1.4f at 4200
+                1.4f at 5800
+            },
+            repeatMode = RepeatMode.Restart
         ),
         label = "sheen"
     )

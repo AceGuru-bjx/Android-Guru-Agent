@@ -71,7 +71,9 @@ enum class DownloadMirror(val id: String, val prefix: String) {
  * 网络 RTT，而非跳转到 GitHub 后的假延迟）。失败的节点不进入结果表。
  */
 class MirrorSpeedProbe(
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    // 共享 [UpdateHttp.client]（newBuilder 派生：连接池/线程池复用，
+    // 仅覆盖测速专属语义——不跟随重定向 + 5s 短超时）
+    private val client: OkHttpClient = UpdateHttp.client.newBuilder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .followRedirects(false)

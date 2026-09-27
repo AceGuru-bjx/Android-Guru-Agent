@@ -94,6 +94,28 @@ class AgentChatViewModel @Inject constructor(
     internal var historyPersistJob: Job? = null
     val uiState: StateFlow<AgentChatUiState> = _uiState.asStateFlow()
 
+    /**
+     * 抽屉徽标窄化流（P1 重组风暴修复）：抽屉只消费 mode/thinkingLevel/
+     * historyDepth 三个字段——直接 collectAsState uiState 会让流式输出期间
+     * 每个 token 的 copy() 新实例都把整个抽屉（含 13 个玻璃导航项）重组
+     * 一遍；结构去重后流式期间抽屉零重组。
+     */
+    val drawerBadges: StateFlow<DrawerBadges> = _uiState
+        .map { DrawerBadges(it.mode, it.thinkingLevel, it.historyDepth) }
+        .distinctUntilChanged()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            DrawerBadges(AgentMode.BUILD, ThinkingLevel.STANDARD, 0)
+        )
+
+    /** 抽屉徽标快照（窄字段 + distinctUntilChanged，天然结构去重）。 */
+    data class DrawerBadges(
+        val mode: AgentMode,
+        val thinkingLevel: ThinkingLevel,
+        val historyDepth: Int
+    )
+
     /** #168 AUTO 档：最近一次自适应选档理由（引擎 IterationStart 后由 EventApplier 拉取刷新）。 */
     internal val _lastAdaptiveDecision = MutableStateFlow<String?>(null)
     val lastAdaptiveDecision: StateFlow<String?> = _lastAdaptiveDecision.asStateFlow()
