@@ -40,6 +40,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.apex.agent.BuildConfig
 import com.apex.agent.R
 import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.ui.glass.GlassNavigationItem
@@ -82,118 +83,137 @@ fun ApexDrawerContent(
                     .hazeSource(glassState)
             )
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
+                modifier = Modifier.fillMaxSize()
             ) {
-                // ═══ 品牌头部（霓虹光晕，随内容滚动） ═══
+                // ═══ 可滚动导航区（weight(1f)：列表短时底座仍沉底）═══
                 Column(
                     modifier = Modifier
+                        .weight(1f)
                         .fillMaxWidth()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                                    Color.Transparent
-                                )
-                            )
-                        )
-                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Surface(
-                            modifier = Modifier.size(48.dp),
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                            tonalElevation = 0.dp
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Default.SmartToy,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(28.dp),
-                                    tint = MaterialTheme.colorScheme.primary
+                    // ═══ 品牌头部（霓虹光晕，随内容滚动） ═══
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                        Color.Transparent
+                                    )
                                 )
-                            }
-                        }
-                        Column {
-                            Text(
-                                "APEX//AGENT",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
                             )
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            .padding(20.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                modifier = Modifier.size(48.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                tonalElevation = 0.dp
                             ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Default.SmartToy,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(28.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                            Column {
                                 Text(
-                                    stringResource(R.string.drawer_tagline),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    "APEX//AGENT",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        "v1.0",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        stringResource(R.string.drawer_tagline),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Text(
+                                            "v${BuildConfig.VERSION_NAME}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // ═══ 玻璃导航项 —— 每项独立玻璃材质，Normal 极轻 ═══
+                    val destinations = listOf(
+                        DrawerDestination.Agent,
+                        // Coding 模式：与 Agent 平级的独立工作流页，导航紧随其后
+                        DrawerDestination.Code,
+                        DrawerDestination.Terminal,
+                        DrawerDestination.Market,
+                        DrawerDestination.Memory,
+                        DrawerDestination.Tasks,
+                        DrawerDestination.Storage,
+                        DrawerDestination.Permissions,
+                        // #167 加密剪切板金库：与权限页相邻（同为安全入口）
+                        DrawerDestination.Vault,
+                        DrawerDestination.Log,
+                        DrawerDestination.Settings,
+                        DrawerDestination.GlassLab
+                    )
+
+                    destinations.forEach { dest ->
+                        GlassNavigationItem(
+                            icon = dest.icon,
+                            label = stringResource(dest.labelRes),
+                            selected = currentDestination == dest,
+                            onClick = { onDestinationSelected(dest) },
+                            state = glassState,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
                 }
 
+                // ═══ 固定底座：关于入口（最下方）+ 状态区 ═══
+                // v1.4.3：关于从设置页升级为一级页面 —— 固定在抽屉最下方，
+                // 不随导航列表滚动（版本号已在品牌头部徽章展示）。
                 HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // ═══ 玻璃导航项 —— 每项独立玻璃材质，Normal 极轻 ═══
-                val destinations = listOf(
-                    DrawerDestination.Agent,
-                    // Coding 模式：与 Agent 平级的独立工作流页，导航紧随其后
-                    DrawerDestination.Code,
-                    DrawerDestination.Terminal,
-                    DrawerDestination.Market,
-                    DrawerDestination.Memory,
-                    DrawerDestination.Tasks,
-                    DrawerDestination.Storage,
-                    DrawerDestination.Permissions,
-                    // #167 加密剪切板金库：与权限页相邻（同为安全入口）
-                    DrawerDestination.Vault,
-                    DrawerDestination.Log,
-                    DrawerDestination.Settings,
-                    DrawerDestination.GlassLab
+                Spacer(modifier = Modifier.height(6.dp))
+                GlassNavigationItem(
+                    icon = DrawerDestination.About.icon,
+                    label = stringResource(DrawerDestination.About.labelRes),
+                    selected = currentDestination == DrawerDestination.About,
+                    onClick = { onDestinationSelected(DrawerDestination.About) },
+                    state = glassState,
+                    modifier = Modifier.padding(horizontal = 12.dp)
                 )
-
-                destinations.forEach { dest ->
-                    GlassNavigationItem(
-                        icon = dest.icon,
-                        label = stringResource(dest.labelRes),
-                        selected = currentDestination == dest,
-                        onClick = { onDestinationSelected(dest) },
-                        state = glassState,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
 
                 // ═══ 底部状态（等宽 chip） ═══
-                HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                )
                 Column(
                     modifier = Modifier.padding(16.dp)
                 ) {

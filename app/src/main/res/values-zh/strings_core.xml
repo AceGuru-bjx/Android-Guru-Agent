@@ -15,6 +15,7 @@
     <string name="drawer_log">运行日志</string>
     <string name="drawer_settings">设置</string>
     <string name="drawer_glasslab">玻璃实验室</string>
+    <string name="drawer_about">关于</string>
     <string name="drawer_open_nav">打开导航</string>
     <string name="drawer_tagline">全能 AI 助手</string>
     <string name="drawer_mem_count">%1$d 条</string>
@@ -510,4 +511,33 @@
     <string name="github_menu_connect">连接 GitHub</string>
     <string name="github_menu_token">GitHub Token (ghp_*) 密钥访问</string>
     <string name="common_done">完成</string>
+
+    <!-- ═══ 关于页（抽屉底部入口，v1.4.3+）═══ -->
+    <string name="about_section_build">版本与构建</string>
+    <string name="about_section_update">软件更新</string>
+    <string name="about_section_features">功能一览</string>
+    <string name="about_section_stack">技术栈</string>
+    <string name="about_section_links">相关链接</string>
+    <string name="about_update_current">当前版本 v%1$s (%2$d)</string>
+    <string name="about_update_auto_hint">每次进入本页自动检查一次</string>
+    <string name="about_update_retry">重试</string>
+    <string name="about_update_new_badge">新版本</string>
+    <string name="about_update_progress_mb">下载中 %1$d%% · 已下载 %2$s</string>
+    <string name="about_update_patch_recommended">增量更新 · 推荐</string>
+    <string name="about_feature_agent_title">Agent 对话</string>
+    <string name="about_feature_agent_desc">全能 AI 助手：多档思考、工具调用与技能生态</string>
+    <string name="about_feature_coding_title">Coding 模式</string>
+    <string name="about_feature_coding_desc">独立编码工作流：专属引擎实例与代码工作区</string>
+    <string name="about_feature_terminal_title">Ubuntu 终端</string>
+    <string name="about_feature_terminal_desc">APK 内置完整 Ubuntu 24.04 CLI 环境，离线可用</string>
+    <string name="about_feature_market_title">技能市场</string>
+    <string name="about_feature_market_desc">按需安装技能、MCP 服务与插件</string>
+    <string name="about_feature_vault_title">加密金库</string>
+    <string name="about_feature_vault_desc">Token 与 API 密钥的加密剪切板金库</string>
+    <string name="about_feature_glass_title">液态玻璃</string>
+    <string name="about_feature_glass_desc">基于 Haze 的玻璃材质系统，附玻璃实验室实时演示</string>
+    <string name="about_link_source">源码仓库</string>
+    <string name="about_link_release">发布通道</string>
+    <string name="about_link_issues">问题反馈</string>
+    <string name="about_footer">Apex Agent · 开源共建</string>
 </resources>

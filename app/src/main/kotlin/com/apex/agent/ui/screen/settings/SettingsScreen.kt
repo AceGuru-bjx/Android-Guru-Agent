@@ -275,7 +275,7 @@ private fun InterfaceTab(agent: AgentSettings, onAgent: (AgentSettings) -> Unit)
         AppearanceSection(agent, onAgent)
         ChatDisplaySection(agent, onAgent)
         NotesSection()
-        AboutSection()
+        // 「关于」区已迁至抽屉最下方的一级页面（v1.4.3，见 ui/screen/about/）
     }
 }
 
