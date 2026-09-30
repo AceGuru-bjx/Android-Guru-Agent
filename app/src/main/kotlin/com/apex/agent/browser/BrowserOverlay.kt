@@ -199,7 +199,13 @@ class BrowserOverlay @Inject constructor(
             chromeWiring.resync()
             rebindWebView(engine.activeWebView())
         } catch (e: Exception) {
-            // 无悬浮窗权限或系统拒绝：静默降级，引擎照常后台工作
+            // 无悬浮窗权限或系统拒绝：静默降级，引擎照常后台工作。
+            // 竞态修复：addView 已成功而后续步骤（lifecycle 驱动 Compose 重组 /
+            // rebindWebView）抛异常时，若只清引用不摘窗，全屏 TYPE_APPLICATION_OVERLAY
+            // 会永久滞留屏幕，且 doHide() 因 rootView==null 直接 return——用户再也无法
+            // 关闭这个"僵尸窗口"。因此必须先 removeViewImmediate 兜底再清引用。
+            runCatching { windowManager.removeViewImmediate(root) }
+            runCatching { owner.onDestroy() }
             rootView = null
             webViewHost = null
             composeView = null

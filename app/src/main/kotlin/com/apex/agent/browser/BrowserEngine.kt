@@ -925,6 +925,12 @@ class BrowserEngine @Inject constructor(
         onProgress: ((percent: Int, phase: String) -> Unit)? = null,
     ): ByteArray? = withContext(Dispatchers.Main) {
         val wv = activeTab()?.webView ?: return@withContext null
+        // 边界守卫：引擎是"后台无父"驱动，WebView 从未挂到浮窗时 width/height == 0，
+        // Bitmap.createBitmap(0, 0) 会抛 IllegalArgumentException（width and height must be > 0）。
+        if (wv.width <= 0 || wv.height <= 0) {
+            onProgress?.invoke(100, "视口尚未布局（后台模式），本次截图跳过")
+            return@withContext null
+        }
         onProgress?.invoke(50, "正在渲染视口截图…")
         // P1-4（6-c）：后台（未 attach/layout）WebView 尚未布局时 width/height 均为 0，
         // Bitmap.createBitmap(0,0) 必抛 IllegalArgumentException。先手动 measure/layout

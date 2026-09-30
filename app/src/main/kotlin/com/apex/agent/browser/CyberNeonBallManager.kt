@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.CycleInterpolator
@@ -95,6 +96,7 @@ class CyberNeonBallManager @Inject constructor(
      */
     fun dismiss() = mainHandler.post {
         ballView = null
+        cancelPulse()
         runCatching { EasyFloat.dismiss(tag) }
     }
 
@@ -203,6 +205,9 @@ class CyberNeonBallManager @Inject constructor(
             pulseAnimator = null
             pulseRing.visibility = View.INVISIBLE
             pulseRing.clearAnimation()
+            // 修复：clearAnimation() 只清 View 补间动画，停不掉 INFINITE 属性动画——
+            // 无限循环的 ObjectAnimator 强持有 pulseRing 及整棵球 View 树，dismiss 后依然每帧 invalidate。
+            cancelPulse()
         }
     }
 
@@ -255,6 +260,11 @@ class CyberNeonBallManager @Inject constructor(
             repeatCount = ObjectAnimator.INFINITE
             start()
         }
+    }
+
+    private fun cancelPulse() {
+        runCatching { pulseAnimator?.cancel() }
+        pulseAnimator = null
     }
 
     private fun triggerVibration() {
