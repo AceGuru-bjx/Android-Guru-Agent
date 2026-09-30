@@ -86,7 +86,7 @@ import com.apex.agent.R
  *
  * ## 修复：部分设备点击后键盘不弹（P0，与主线程卡死并列的键盘两大根因之二）
  *
- * 终端页 [com.apex.agent.ui.screen.terminal.TerminalRenderer] 已验证：**只靠获得焦点
+ * 终端页（现 [com.apex.agent.ui.screen.terminal.TerminalViewHost] 的 View 层 requestFocusAndShowKeyboard）已验证：**只靠获得焦点
  * 在部分设备/输入法上不会拉起 IME**（焦点到位但 IME 未被请求显示），必须显式
  * `keyboardController.show()`。聊天页此前完全没有这层兑底。现在：焦点从无到有
  * （用户点击 / 程序请求）即显式 show() —— 不挂 pointerInput/clickable，避免重蹈
@@ -158,7 +158,7 @@ fun AdaptiveInputField(
 
     // ── P0 键盘兑底：焦点到位 ≠ IME 显示（部分设备/输入法），显式补一次 show()。──
     // 触发条件严格限定 false→true（避免隐藏键盘后又被动弹出）；失败静默
-    //（controller 未挂载等时序异常不应炸 UI）。与 TerminalRenderer.showKeyboard 同款。
+    //（controller 未挂载等时序异常不应炸 UI）。与 TerminalViewHost/终端 View 的 requestFocusAndShowKeyboard 同款。
     val keyboardController = LocalSoftwareKeyboardController.current
     // ── IME insets 重分发防御（用户反馈「键盘弹出时输入框有时不上抬」）──
     // 根因：BottomSheet/Dialog/Popup 等弹层关闭后，Activity 窗口的 WindowInsets

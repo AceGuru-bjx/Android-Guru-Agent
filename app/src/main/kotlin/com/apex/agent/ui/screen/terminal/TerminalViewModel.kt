@@ -360,7 +360,7 @@ class TerminalViewModel @Inject constructor(
 
     /** 写入用户文本（IME 提交 / 硬件键盘字符），RAW 直通 PTY。
      *
-     * 回车（IME 以 \r 文本下发，TerminalRenderer 已把 \n 归一为 \r）视为行提交：
+     * 回车（IME 以 \r 文本下发，:terminal-view 已把 \n 归一为 \r）视为行提交：
      * 命中黑白名单 → 拦截整个写入（含回车），命令不执行。
      */
     fun sendInput(text: String) {
@@ -440,8 +440,13 @@ class TerminalViewModel @Inject constructor(
      *
      * ENTER = 行提交（黑白名单检查，拦截则不写入）；BACKSPACE = 行缓冲退格；
      * 其余特殊键（方向/历史/TAB…）行状态不可知 → 清空行缓冲（下次回车不检查）。
+     *
+     * T88（3）：[mods] 为 xterm 修饰位掩码（KeyEventMapping.MOD_* / emulator
+     * KeyModifiers 同值）——非零时走 [encodeKeyWithMods] 完整修饰协议
+     *（Shift+方向 = ESC[1;2A 词选择、Ctrl+F 键等）；零 = 旧路径不变（默认值
+     * 保证既有单参调用方/函数引用完全兼容）。
      */
-    fun sendKey(key: TerminalKey) {
+    fun sendKey(key: TerminalKey, mods: Int = 0) {
         val sid = _activeSessionId.value ?: return
         viewModelScope.launch {
             when (key) {
@@ -457,6 +462,16 @@ class TerminalViewModel @Inject constructor(
                 }
                 TerminalKey.BACKSPACE -> if (pendingLine.isNotEmpty()) pendingLine.setLength(pendingLine.length - 1)
                 else -> pendingLine.setLength(0)
+            }
+            if (mods != 0) {
+                val bytes = encodeKeyWithMods(key, mods)
+                if (bytes != null && bytes.isNotEmpty()) {
+                    terminalRuntime.write(
+                        sid, InputOwner.USER, TerminalRuntime.WriteKind.RAW,
+                        text = String(bytes, Charsets.ISO_8859_1)
+                    )
+                    return@launch
+                }
             }
             if (key == TerminalKey.ARROW_UP || key == TerminalKey.ARROW_DOWN ||
                 key == TerminalKey.ARROW_LEFT || key == TerminalKey.ARROW_RIGHT
@@ -474,6 +489,42 @@ class TerminalViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    /**
+     * T88（3）：键身份 + 修饰位 → xterm 参数化序列（KeyEventMapping 完整协议）。
+     *
+     * 平台 [TerminalKey] → Android keycode 对照，再经 [KeyEventMapping.encode]
+     * 出 `ESC[1;m{final}` 形参化序列（DECCKM/DECKPAM 模式感知）。无对照
+     *（CTRL_C 等信号语义键）或编码器无映射 → null（调用方回落旧路径）。
+     */
+    private fun encodeKeyWithMods(key: TerminalKey, mods: Int): ByteArray? {
+        val keyCode = when (key) {
+            TerminalKey.ARROW_UP -> KeyEventMapping.KEYCODE_DPAD_UP
+            TerminalKey.ARROW_DOWN -> KeyEventMapping.KEYCODE_DPAD_DOWN
+            TerminalKey.ARROW_LEFT -> KeyEventMapping.KEYCODE_DPAD_LEFT
+            TerminalKey.ARROW_RIGHT -> KeyEventMapping.KEYCODE_DPAD_RIGHT
+            TerminalKey.HOME -> KeyEventMapping.KEYCODE_MOVE_HOME
+            TerminalKey.END -> KeyEventMapping.KEYCODE_MOVE_END
+            TerminalKey.PAGE_UP -> KeyEventMapping.KEYCODE_PAGE_UP
+            TerminalKey.PAGE_DOWN -> KeyEventMapping.KEYCODE_PAGE_DOWN
+            TerminalKey.INSERT -> KeyEventMapping.KEYCODE_INSERT
+            TerminalKey.DELETE -> KeyEventMapping.KEYCODE_FORWARD_DEL
+            TerminalKey.ENTER -> KeyEventMapping.KEYCODE_ENTER
+            TerminalKey.TAB -> KeyEventMapping.KEYCODE_TAB
+            TerminalKey.BACKSPACE -> KeyEventMapping.KEYCODE_DEL
+            TerminalKey.ESC -> KeyEventMapping.KEYCODE_ESCAPE
+            in TerminalKey.F1..TerminalKey.F12 ->
+                KeyEventMapping.KEYCODE_F1 + (key.ordinal - TerminalKey.F1.ordinal)
+            else -> 0
+        }
+        if (keyCode == 0) return null
+        val modes = KeyEventMapping.KeyModes(
+            applicationCursor = _renderState.value?.applicationCursor ?: false,
+            applicationKeypad = _renderState.value?.applicationKeypad ?: false,
+            numLock = true
+        )
+        return KeyEventMapping.encode(keyCode, mods, modes)
     }
 
     /** Ctrl+字母（工具栏 CTRL 锁存 / 硬件 Ctrl 组合）。
@@ -630,15 +681,6 @@ class TerminalViewModel @Inject constructor(
             )
         }
     }
-
-    /** 双指捏合调字号（Termux 手势）：步进 1，钳制 6..32。 */
-    fun adjustFontSize(delta: Int) {
-        if (delta == 0) return
-        updateSettings { copy(fontSize = (fontSize + delta).coerceIn(6, 32)) }
-    }
-
-    /** OSC 8 链接 URI 查询（屏内 link id → URI；悬空/未知 → null）。 */
-    fun linkUriOf(linkId: Int): String? = _renderState.value?.linkTable?.get(linkId)
 
     // ═══════════════════════ Ubuntu 生命周期入口 ═══════════════════════
 

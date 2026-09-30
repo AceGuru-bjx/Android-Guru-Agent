@@ -23,6 +23,23 @@ class ScreenBuffer(
     private val scrollback: ArrayDeque<Array<TerminalCell>> = ArrayDeque()
 
     /**
+     * v0.3（reflow 基座）：行接续标志 —— [rowWrapped] 为 true 表示该行的内容
+     * 软换行延续到下一行（DECAWM 打满后自动折行；宽字符末列折行同置位）。
+     * 逻辑行重组（resize rewrap）据此把视觉行链拼回逻辑行。
+     *
+     * 维护规则（与 native vt_screen.wrapFlags_ 对齐）：
+     *  - 只有真正发生 wrap 时置 true（putPrintable 折行路径）；
+     *  - 全行擦除（eraseRows / 空白填充行）断链 → false；
+     *  - scroll/insert/delete 只在**全宽**操作时随行旋转；区间列操作（左右边距）
+     *    无法保证接续链完整性 → 区域内保守置 false；
+     *  - resize 保留被复制行的标志；resetTo 归零。
+     */
+    private var wrapFlags = BooleanArray(rows)
+
+    /** scrollback 行的接续标志（与 [scrollback] 逐位同步）。 */
+    private val scrollbackWrapped = ArrayDeque<Boolean>()
+
+    /**
      * T85（M-2）：自创建起滚入 scrollback 的总行数 —— **只增不减**
      *（超出 [maxScrollbackLines] 被逐出的最旧行也计入）。
      * 作为 UI 行稳定 key 的单调基准（见 TerminalRenderSnapshot.scrollbackBase）。
@@ -92,75 +109,155 @@ class ScreenBuffer(
     /** Erase entire rows range. */
     fun eraseRows(fromRow: Int, toRow: Int, style: TerminalStyle = TerminalStyle.DEFAULT) {
         for (r in fromRow..toRow.coerceAtMost(rows - 1)) {
+            if (r < 0) continue
             for (c in 0 until cols) cells[r][c] = TerminalCell.BLANK.copy(style = style)
+            wrapFlags[r] = false  // 全行擦除断开接续链（native 对齐）
         }
     }
 
-    /** Scroll up by n lines within [top, bottom] (lines move up, blank at bottom). */
-    fun scrollUp(n: Int, top: Int, bottom: Int) {
+    /**
+     * v0.3：行接续标志访问器（reflow / DECSTBM 逻辑行重组用）。
+     * [r] 越界返回 false（安全缺省）。
+     */
+    fun setRowWrapped(r: Int, wrapped: Boolean) {
+        if (r in 0 until rows) wrapFlags[r] = wrapped
+    }
+
+    /** 该行是否软换行延续到下一行（见 [wrapFlags] 维护规则）。 */
+    fun rowWrapped(r: Int): Boolean = r in 0 until rows && wrapFlags[r]
+
+    /** scrollback 第 [i] 行（旧→新）的接续标志。 */
+    fun scrollbackRowWrapped(i: Int): Boolean =
+        i in 0 until scrollbackWrapped.size && scrollbackWrapped.elementAt(i)
+
+    /**
+     * Scroll up by n lines within [top, bottom] (lines move up, blank at bottom).
+     *
+     * v0.3：左右边距重载 —— [left]/[right] 给出水平滚动窗口（DECLRMM 全语义），
+     * 窗口外的列不动；全宽调用（默认 0..cols-1）与旧语义完全一致。
+     */
+    fun scrollUp(n: Int, top: Int, bottom: Int, left: Int = 0, right: Int = cols - 1) {
         if (n <= 0 || top >= bottom) return
         val count = minOf(n, bottom - top + 1)
+        val fullWidth = left <= 0 && right >= cols - 1
         // Save the truly scrolled-out top lines BEFORE moving rows (§15/§23)
-        if (hasScrollback && top == 0) {
+        if (fullWidth && hasScrollback && top == 0) {
             for (i in 0 until count) {
-                if (scrollback.size >= maxScrollbackLines) scrollback.pollFirst()
+                if (scrollback.size >= maxScrollbackLines) {
+                    scrollback.pollFirst(); scrollbackWrapped.pollFirst()
+                }
                 scrollback.addLast(cells[top + i].copyOf())
+                scrollbackWrapped.addLast(wrapFlags[top + i])
                 linesEverScrolled++  // T85：单调基准（含被逐出行）
             }
         }
-        // Move lines up
-        for (r in top..(bottom - count)) {
-            cells[r] = cells[r + count]
-        }
-        // Blank freed lines at bottom
-        for (r in (bottom - count + 1)..bottom) {
-            cells[r] = Array(cols) { TerminalCell.BLANK }
+        if (fullWidth) {
+            // 全宽：整行搬移 + 接续标志随行旋转（native 对齐）
+            for (r in top..(bottom - count)) {
+                cells[r] = cells[r + count]
+                wrapFlags[r] = wrapFlags[r + count]
+            }
+            for (r in (bottom - count + 1)..bottom) {
+                cells[r] = Array(cols) { TerminalCell.BLANK }
+                wrapFlags[r] = false
+            }
+        } else {
+            // 边距窗口：只有 [left..right] 列参与搬移，窗口外列原封不动；
+            // 接续链被破坏 → 区域内标志保守归零。
+            for (r in top..(bottom - count)) {
+                for (c in left..right) cells[r][c] = cells[r + count][c]
+            }
+            for (r in (bottom - count + 1)..bottom) {
+                for (c in left..right) cells[r][c] = TerminalCell.BLANK
+                wrapFlags[r] = false
+            }
         }
     }
 
-    /** Scroll down by n lines (lines move down, blank at top). */
-    fun scrollDown(n: Int, top: Int, bottom: Int) {
+    /**
+     * Scroll down by n lines (lines move down, blank at top).
+     * v0.3：左右边距重载（语义同 [scrollUp]）。全宽时接续标志随行旋转。
+     */
+    fun scrollDown(n: Int, top: Int, bottom: Int, left: Int = 0, right: Int = cols - 1) {
         if (n <= 0 || top >= bottom) return
         val count = minOf(n, bottom - top + 1)
-        for (r in bottom downTo (top + count)) {
-            cells[r] = cells[r - count]
+        val fullWidth = left <= 0 && right >= cols - 1
+        if (fullWidth) {
+            for (r in bottom downTo (top + count)) {
+                cells[r] = cells[r - count]
+                wrapFlags[r] = wrapFlags[r - count]
+            }
+        } else {
+            for (r in bottom downTo (top + count)) {
+                for (c in left..right) cells[r][c] = cells[r - count][c]
+            }
         }
         for (r in top until (top + count)) {
-            cells[r] = Array(cols) { TerminalCell.BLANK }
+            if (fullWidth) cells[r] = Array(cols) { TerminalCell.BLANK }
+            else for (c in left..right) cells[r][c] = TerminalCell.BLANK
+            wrapFlags[r] = false
         }
     }
 
-    /** Insert n blank lines at [row], shifting rest down (within scroll region). */
-    fun insertLines(row: Int, n: Int, top: Int, bottom: Int) {
+    /**
+     * Insert n blank lines at [row], shifting rest down (within scroll region).
+     * v0.3：左右边距重载 —— 边距窗口内插行（窗口外列不动）；插入区接续标志归零。
+     */
+    fun insertLines(row: Int, n: Int, top: Int, bottom: Int, left: Int = 0, right: Int = cols - 1) {
         if (row !in top..bottom) return
         val count = minOf(n, bottom - row + 1)
-        for (r in bottom downTo (row + count)) {
-            cells[r] = cells[r - count]
+        val fullWidth = left <= 0 && right >= cols - 1
+        if (fullWidth) {
+            for (r in bottom downTo (row + count)) {
+                cells[r] = cells[r - count]
+                wrapFlags[r] = wrapFlags[r - count]
+            }
+        } else {
+            for (r in bottom downTo (row + count)) {
+                for (c in left..right) cells[r][c] = cells[r - count][c]
+            }
         }
         for (r in row until (row + count)) {
-            cells[r] = Array(cols) { TerminalCell.BLANK }
+            if (fullWidth) cells[r] = Array(cols) { TerminalCell.BLANK }
+            else for (c in left..right) cells[r][c] = TerminalCell.BLANK
+            wrapFlags[r] = false
         }
     }
 
-    /** Delete n lines at [row], shifting rest up (within scroll region). */
-    fun deleteLines(row: Int, n: Int, top: Int, bottom: Int) {
+    /**
+     * Delete n lines at [row], shifting rest up (within scroll region).
+     * v0.3：左右边距重载（语义同 [insertLines]）。
+     */
+    fun deleteLines(row: Int, n: Int, top: Int, bottom: Int, left: Int = 0, right: Int = cols - 1) {
         if (row !in top..bottom) return
         val count = minOf(n, bottom - row + 1)
-        for (r in row..(bottom - count)) {
-            cells[r] = cells[r + count]
+        val fullWidth = left <= 0 && right >= cols - 1
+        if (fullWidth) {
+            for (r in row..(bottom - count)) {
+                cells[r] = cells[r + count]
+                wrapFlags[r] = wrapFlags[r + count]
+            }
+        } else {
+            for (r in row..(bottom - count)) {
+                for (c in left..right) cells[r][c] = cells[r + count][c]
+            }
         }
         for (r in (bottom - count + 1)..bottom) {
-            cells[r] = Array(cols) { TerminalCell.BLANK }
+            if (fullWidth) cells[r] = Array(cols) { TerminalCell.BLANK }
+            else for (c in left..right) cells[r][c] = TerminalCell.BLANK
+            wrapFlags[r] = false
         }
     }
 
     /** Resize buffer (§21). Keeps top-left content. */
     fun resize(newRows: Int, newCols: Int) {
         val newCells = Array(newRows) { Array(newCols) { TerminalCell.BLANK } }
+        val newWrap = BooleanArray(newRows)
         val copyRows = minOf(rows, newRows)
         val copyCols = minOf(cols, newCols)
         for (r in 0 until copyRows) {
             for (c in 0 until copyCols) newCells[r][c] = cells[r][c]
+            newWrap[r] = wrapFlags[r]  // 接续标志随行保留（裁剪路径）
             // P2：缩列边界腰斩的宽字符对（lead 落在 newCols-1、trail 被截掉）
             // → 清成 BLANK，防末列孤儿 lead 使 overlay 2 列步进越界。
             if (newCols > 0 && newCells[r][newCols - 1].isWideLead) {
@@ -168,8 +265,49 @@ class ScreenBuffer(
             }
         }
         cells = newCells
+        wrapFlags = newWrap
         rows = newRows
         cols = newCols
+    }
+
+    /**
+     * v0.3（reflow 重建）：重置到指定网格并清空 scrollback ——
+     * [loadRow] / [pushScrollbackRow] 随后逐行回填。`linesEverScrolled`
+     * 单调基准**保留**（后续 push 继续累加，UI 行稳定 key 始终单调）。
+     */
+    fun resetTo(newRows: Int, newCols: Int) {
+        rows = newRows.coerceAtLeast(1)
+        cols = newCols.coerceAtLeast(1)
+        cells = Array(rows) { Array(cols) { TerminalCell.BLANK } }
+        wrapFlags = BooleanArray(rows)
+        scrollback.clear()
+        scrollbackWrapped.clear()
+    }
+
+    /**
+     * v0.3（reflow 重建）：整行回填（cells 长度应等于 [cols]；多截少补空白）
+     * + 接续标志。宽字符对不完整性由调用方以 [repairRow] 兜底。
+     */
+    fun loadRow(row: Int, cells: Array<TerminalCell>, wrapped: Boolean) {
+        if (row !in 0 until rows) return
+        val n = minOf(cells.size, cols)
+        for (c in 0 until n) this.cells[row][c] = cells[c]
+        for (c in n until cols) this.cells[row][c] = TerminalCell.BLANK
+        wrapFlags[row] = wrapped
+    }
+
+    /**
+     * v0.3（reflow 重建）：把一行推入 scrollback（容量淘汰最旧；`linesEverScrolled`
+     * 单调累加，与 [scrollUp] 的推入同语义）。
+     */
+    fun pushScrollbackRow(cells: Array<TerminalCell>, wrapped: Boolean) {
+        if (!hasScrollback || maxScrollbackLines <= 0) return
+        if (scrollback.size >= maxScrollbackLines) {
+            scrollback.pollFirst(); scrollbackWrapped.pollFirst()
+        }
+        scrollback.addLast(cells.copyOf())
+        scrollbackWrapped.addLast(wrapped)
+        linesEverScrolled++
     }
 
     /**
@@ -193,7 +331,9 @@ class ScreenBuffer(
         for (r in 0 until rows) {
             for (c in 0 until cols) cells[r][c] = TerminalCell.BLANK
         }
+        wrapFlags.fill(false)
         scrollback.clear()
+        scrollbackWrapped.clear()
     }
 
     /**
@@ -202,6 +342,7 @@ class ScreenBuffer(
      */
     fun clearScrollback() {
         scrollback.clear()
+        scrollbackWrapped.clear()
     }
 
     /** Render visible screen as plain text (rows joined by \n, trailing trim). */

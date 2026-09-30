@@ -97,6 +97,17 @@ class TabStops(initialCols: Int) {
         stops = newStops
         cols = newCols
     }
+
+    /**
+     * v0.3（session 序列化）：当前制表位快照（HTS/TBC 定制过的状态原样带出）。
+     * 返回数组长度 == 当前列数；restore 时长度不符则被忽略（防错位）。
+     */
+    internal fun stopsSnapshot(): BooleanArray = stops.copyOf()
+
+    /** v0.3（session 反序列化）：整体恢复制表位（[stops] 长度必须等于当前列数）。 */
+    internal fun restoreStops(stops: BooleanArray) {
+        if (stops.size == cols) this.stops = stops.copyOf()
+    }
 }
 
 /**

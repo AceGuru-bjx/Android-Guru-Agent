@@ -19,7 +19,7 @@ import com.apex.agent.platform.terminal.workspace.WorkspacePath
  * 保留在本文件的类型均为 P71/T72 生产路径的活代码：
  *   - [PRootBinaryProvider]/[PRootBinaryInfo]/[PRootVersion]   二进制定位与校验
  *   - [PRootLaunchRequest]/[PRootBind]/[PRootCommand]          spawn 请求与产物
- *   - [PRootCommandBuilder]                                    argv 构造（-r/-0/--kill-on-exit/-b/-w/-E/--）
+ *   - [PRootCommandBuilder]                                    argv 构造（-r/-0/--kill-on-exit/-b/-w/--/env-trampoline）
  *   - [RootfsValidator] 及校验类型                              rootfs 布局校验
  *
  * Spec: PR #63 sections 1-74（共享部分）/ PR #75 计划 §3（P71 架构）。
@@ -110,20 +110,16 @@ class PRootCommandBuilderImpl : PRootCommandBuilder {
             args.add("-w")
             args.add(guestCwd)
         }
-        // Environment passthrough
-        for ((key, value) in request.environment) {
-            // TM6: argument-injection guard — proot's `-E KEY=VALUE` parser takes the
-            // raw string. A `\n` or NUL in the value would corrupt argv boundaries /
-            // confuse downstream parsers in the guest. Reject them explicitly.
-            require(value.indexOf('\n') < 0 && value.indexOf('\u0000') < 0) {
-                "PRootError:InvalidEnv — value for '$key' must not contain '\\n' or NUL " +
-                    "(got ${value.length} chars); proot -E KEY=VALUE parser is argument-injected"
-            }
-            args.add("-E")
-            args.add("$key=$value")
-        }
-        // Executable + arguments (after --)
+        // Environment passthrough —— T88 根治：不再使用 proot `-E`（捆绑的 5.1.107
+        // 不支持该选项，用户设备上 bootstrap 直接报 proot error: unknown option '-E'）。
+        // 改用 Termux proot-distro 同款 env trampoline：guest 命令变成
+        // `/usr/bin/env -i K=V … <executable> <args…>`，5.1~5.4+ 全兼容。
+        // 防注入校验（key 形态 / value 无 \n、NUL）下沉到 [PRootEnvTrampoline]。
+        //
+        // TM6 历史注释存档：原 -E 守卫拒绝 value 中的 `\n`/NUL，语义由
+        // PRootEnvTrampoline.guestPrefix 完整平移并加强（key 形态校验）。
         args.add("--")
+        args.addAll(PRootEnvTrampoline.guestPrefix(request.environment))
         args.add(request.executable)
         args.addAll(request.arguments)
         return PRootCommand(executable = prootBinary, arguments = args)

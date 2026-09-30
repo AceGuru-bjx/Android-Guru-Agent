@@ -17,7 +17,7 @@ import java.io.File
  *        symlink 指向 nativeLibraryDir 内真实文件，遵循 Termux/UserLAnd 先例）
  *  2. proot 临时目录 `<cacheDir>/proot-tmp/`（Android 的 /tmp 不可写）
  *  3. [hostEnv] —— forkpty child / ProcessBuilder 的 env（G4：与 guest env 严格分离，
- *     guest env 只经 proot 的 -E 传入）：
+ *     guest env 只经 env trampoline 传入（T88））：
  *       PROOT_TMP_DIR   proot 自身临时目录
  *       PROOT_LOADER    guest loader（宿主侧 ptrace 注入用）
  *       PROOT_LOADER_32 32 位 guest loader（存在时）
@@ -70,7 +70,7 @@ class PRootHostEnvironment(
     }
 
     /**
-     * proot 进程的 host env（G4：不含任何 guest 变量；guest env 由 argv 的 -E 携带）。
+     * proot 进程的 host env（G4：不含任何 guest 变量；guest env 由 argv 的 env trampoline 携带）。
      * 调用前必须先 [prepare] 成功。
      */
     fun hostEnv(extra: Map<String, String> = emptyMap()): Map<String, String> {

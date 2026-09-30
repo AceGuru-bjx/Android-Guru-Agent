@@ -255,8 +255,8 @@ class UbuntuTerminalRuntimeWiringTest {
         File(layout.baseDir.value, "workspaces/default").apply { mkdirs() }
             .let { File(it, "marker.txt").writeText("bind-works") }
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -307,8 +307,8 @@ class UbuntuTerminalRuntimeWiringTest {
         argv.removeAt(argv.size - 1)
         argv.addAll(listOf("-c", "cat /workspace/marker.txt"))
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -333,8 +333,8 @@ class UbuntuTerminalRuntimeWiringTest {
             "echo persist-me > /root/PERSIST.txt && cat /root/PERSIST.txt && " +
                 "test -f /root/.bashrc && echo BASHRC-OK"))
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -355,44 +355,33 @@ class UbuntuTerminalRuntimeWiringTest {
         val argv2 = pty2.argvOf(nid2).toMutableList()
         argv2.removeAt(argv2.size - 1)
         argv2.addAll(listOf("-c", "cat /root/PERSIST.txt"))
-        val (a2, ge2) = adaptForUpstreamProot(argv2)
-        val exec2 = executorWith(ge2).execute(
+        val a2 = adaptForUpstreamProot(argv2)
+        val exec2 = executorWith().execute(
             PRootCommand(AbsolutePath(a2[0]), a2.drop(1)), timeoutMs = 120_000
         )
         assertTrue("second session sees home: '${exec2.stdout}'", exec2.stdout.contains("persist-me"))
     }
 
-    // ─── upstream proot 5.4 host adaptation（与 T72 E2E 相同的语义等价层）───
+    // ─── upstream proot host adaptation（与 T72 E2E 同层）───
 
-    private fun adaptForUpstreamProot(argv: List<String>): Pair<List<String>, Map<String, String>> {
-        val env = mutableMapOf<String, String>()
-        val out = mutableListOf<String>()
-        var i = 0
-        while (i < argv.size) {
-            val a = argv[i]
-            when {
-                a == "--" -> { /* upstream: no separator */ }
-                a == "--kill-on-exit" -> { /* Termux/5.2+ extension */ }
-                a == "-E" -> {
-                    val kv = argv[i + 1]
-                    val eq = kv.indexOf('=')
-                    if (eq > 0) env[kv.substring(0, eq)] = kv.substring(eq + 1)
-                    i++
-                }
-                else -> out.add(a)
-            }
-            i++
-        }
-        return out to env
+    /**
+     * T88：设备 argv 与上游（Debian/CI）proot 的唯一差异只剩两个 proot 选项：
+     * `--`（上游自研 argv 解析器不识别，Termux 补丁才支持）与 `--kill-on-exit`
+     * （一次性 exec 不需要）。**guest env 不再适配** —— env trampoline
+     * （`/usr/bin/env -i K=V … cmd`）在上游 proot 上原样合法且语义一致，
+     * 测试由此真正执行生产 argv 形状，而不是把 -E 偷偷搬到宿主 env 里
+     * （旧适配层正是 CI 全绿而设备炸 -E 的共犯）。
+     */
+    private fun adaptForUpstreamProot(argv: List<String>): List<String> {
+        return argv.filter { it != "--" && it != "--kill-on-exit" }
     }
 
-    private fun executorWith(adaptedEnv: Map<String, String>): ProotExecutor {
+    private fun executorWith(): ProotExecutor {
         val hostEnv = mutableMapOf<String, String>(
             "PROOT_NO_SECCOMP" to "1",
             "PATH" to "/usr/bin:/bin"
         )
         System.getenv("LD_LIBRARY_PATH")?.let { hostEnv["LD_LIBRARY_PATH"] = it }
-        hostEnv.putAll(adaptedEnv)
         return ProotExecutor(hostEnv = { hostEnv })
     }
 }
