@@ -41,6 +41,19 @@ import okhttp3.OkHttpClient
 @InstallIn(SingletonComponent::class)
 object McpModule {
 
+    /**
+     * 知识图谱记忆存储单例：memory MCP transport 与 [ChatMemoryPipeline]
+     * （聊天自动记忆）共享同一实例与同一份 `<filesDir>/mcp_memory/memory.json`
+     * —— 自动沉淀与显式写入同图同源，避免双实例互踩落盘。
+     */
+    @Provides
+    @Singleton
+    fun provideKnowledgeGraphStore(@ApplicationContext context: Context): com.apex.agent.mcp.builtin.memory.KnowledgeGraphStore {
+        return com.apex.agent.mcp.builtin.memory.KnowledgeGraphStore(
+            java.io.File(context.filesDir, "mcp_memory")
+        )
+    }
+
     @Provides
     @Singleton
     fun provideMcpManager(
@@ -52,7 +65,9 @@ object McpModule {
         codeWorkspaceRoots: CodeWorkspaceRoots,
         // v0.2 #149：PRoot 沙箱 launcher 的宿主环境（libproot 路径 + host env）
         hostEnvironment: PRootHostEnvironment,
-        rootfsBaseDir: File
+        rootfsBaseDir: File,
+        // 共享知识图谱单例（memory MCP 与聊天自动记忆同图同源，见 provideKnowledgeGraphStore）
+        knowledgeGraphStore: com.apex.agent.mcp.builtin.memory.KnowledgeGraphStore
     ): McpManager {
         val configDir = File(context.filesDir, "mcp_config")
         val manager = McpManager(
@@ -73,7 +88,7 @@ object McpModule {
                 BuiltinSearchMcpServer.ID to { BuiltinSearchMcpTransport(httpClient) },
                 BuiltinFsMcpServer.ID to { BuiltinFsMcpTransport(codeWorkspaceRoots) },
                 BuiltinMemoryMcpServer.ID to {
-                    BuiltinMemoryMcpTransport(File(context.filesDir, "mcp_memory"))
+                    BuiltinMemoryMcpTransport(knowledgeGraphStore)
                 },
                 BuiltinThinkingMcpServer.ID to { BuiltinThinkingMcpTransport() }
             ),

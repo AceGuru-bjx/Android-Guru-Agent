@@ -40,6 +40,23 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
     ws.ws_xpixel = 0;
     ws.ws_ypixel = 0;
 
+    // ── T87：exec 失败捕获管道（CLOEXEC 双关闭协议）──
+    //
+    // 真机上 proot 会话可能「forkpty 成功 + execv 立即失败」（ENOENT/ELIBBAD/
+    // EACCES/内存不足…）——旧链路对此全盲：Kotlin 拿到正常 id，会话进程已死，
+    // 之后每次 write 都 EIO，用户只看到「输入失败」，根因永远不可见。
+    //
+    // 协议（Android Runtime.exec / Termux 同款）：
+    //   pipe2(O_CLOEXEC) → fork → child：execv 成功 = 内核自动关闭写端；
+    //   失败 = 显式写 errno（int）后 _exit(127)。
+    //   parent：阻塞 read —— 返回 0（EOF，exec 成功）或 4 字节 errno（失败）。
+    //   阻塞有界：child 在 exec 前只做信号重置/fd 关闭/chdir/setenv（全微秒级）。
+    int execPipe[2] = {-1, -1};
+    if (pipe2(execPipe, O_CLOEXEC) != 0) {
+        // pipe 失败（fd 耗尽，极罕见）：降级为旧行为（无 exec 诊断），不阻断创建。
+        execPipe[0] = execPipe[1] = -1;
+    }
+
     // forkpty: 创建PTY对并fork子进程
     // 父进程获得master fd，子进程连接到slave
     int masterFd = -1;
@@ -49,11 +66,17 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
     if (pid_ < 0) {
         LOGE("Session %d: forkpty failed: %s", id_, strerror(errno));
         masterFd_.store(-1, std::memory_order_release);
+        if (execPipe[0] >= 0) ::close(execPipe[0]);
+        if (execPipe[1] >= 0) ::close(execPipe[1]);
         return;
     }
 
     if (pid_ == 0) {
         // ═══ 子进程 ═══
+        // exec 报告管道写端（O_CLOEXEC：execv 成功即由内核关闭；失败时显式写 errno）。
+        // 注意：必须保住这个 fd —— 下方「关闭 0/1/2 之外所有 fd」的循环要跳过它。
+        const int childExecPipe = execPipe[1];
+        if (execPipe[0] >= 0) ::close(execPipe[0]);   // 子进程用不到读端
 
         // Termux 修法（termux.c）：fork 自 Java/ART 进程会继承被阻塞的信号掩码
         //（ART 会屏蔽部分信号），子进程可能因此收不到 SIGTERM/SIGINT。
@@ -73,6 +96,7 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
         // app 打开的文件/socket、**其他会话的 PTY master fd** 都会被子进程继承 ——
         // 泄漏其他会话的 master fd 会让对应 slave 永远读不到 EOF（会话僵而不死）。
         // close_range 需内核 5.9+（minSdk 26 覆盖不到旧设备），故用 /proc/self/fd。
+        // T87：exec 报告管道写端必须豁免（见上方协议说明）。
         {
             DIR* dir = opendir("/proc/self/fd");
             if (dir != nullptr) {
@@ -81,7 +105,7 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
                 while ((ent = readdir(dir)) != nullptr) {
                     // 目录项非数字（“.”/“..”）时 atoi 返回 0，天然安全（0 不 > 2）。
                     const int fd = atoi(ent->d_name);
-                    if (fd > 2 && fd != dirFd) {
+                    if (fd > 2 && fd != dirFd && fd != childExecPipe) {
                         ::close(fd);  // :: 前缀：避免被成员 close() 遮蔽
                     }
                 }
@@ -126,11 +150,40 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
         execv(cargv[0], cargv.data());
 
         // execv 仅在失败时返回（ENOENT/EACCES/ENOEXEC...）—— 127 语义与 shell 一致。
+        // T87：把 errno 写入报告管道后父进程可见（旧行为只进 logcat，用户盲）。
         LOGE("Session %d: execv(%s) failed: %s", id_, cargv[0], strerror(errno));
+        const int execErrno = errno;
+        if (childExecPipe >= 0) {
+            ssize_t ignored = ::write(childExecPipe, &execErrno, sizeof(execErrno));
+            (void)ignored;  // 尽力上报：管道异常时父进程靠 EOF+退出码兑底
+            ::close(childExecPipe);
+        }
         _exit(127);
     }
 
     // ═══ 父进程 ═══
+    // T87：读取 exec 报告 —— EOF（execv 成功，CLOEXEC 自动关写端）或 errno。
+    // 有界阻塞：child 在 exec 前的全部动作（信号/fd/chdir/env）是微秒级；
+    // proot 启动慢发生在 exec **之后**，不影响此处。
+    if (execPipe[1] >= 0) ::close(execPipe[1]);   // 父进程用不到写端
+    if (execPipe[0] >= 0) {
+        int reportedErrno = 0;
+        ssize_t n = ::read(execPipe[0], &reportedErrno, sizeof(reportedErrno));
+        ::close(execPipe[0]);
+        if (n == static_cast<ssize_t>(sizeof(reportedErrno)) && reportedErrno != 0) {
+            spawnError_ = std::string("execv(") +
+                (argv.empty() ? "(empty)" : argv[0]) + ") failed: " + strerror(reportedErrno);
+            LOGE("Session %d: spawn error: %s", id_, spawnError_.c_str());
+            // exec 已失败：子进程已 _exit，master 写入只会 EIO —— 立即收尸并标记。
+            alive_ = false;
+            reapChild();
+            masterFd_.store(-1, std::memory_order_release);
+            ::close(masterFd);
+            return;   // 会话保留在 engine 里（spawnError 可查），但不可用。
+        }
+        // n==0：exec 成功（EOF）；n<0 或短读：降级不诊断（不影响会话可用性）。
+    }
+
     alive_ = true;
 
     // master fd 设为非阻塞

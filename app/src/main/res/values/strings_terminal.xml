@@ -110,6 +110,11 @@
     <string name="term_copy">Copy</string>
     <string name="term_jump_latest">↓ Jump to latest</string>
     <string name="term_paste">Paste</string>
+    <!-- T88 (3): TerminalViewHost context menu (long-press / auto-detected URL) -->
+    <string name="term_select_all">Select all</string>
+    <string name="term_clear_selection">Clear selection</string>
+    <string name="term_open_link">Open link</string>
+    <string name="term_copy_link">Copy link</string>
 
     <!-- ═══ ViewModel notices (LanguageManager.getString) ═══ -->
     <string name="term_notice_ubuntu_unavailable">Ubuntu environment unavailable: %1$s</string>
@@ -132,4 +137,34 @@
     <string name="term_notice_session_gone">❌ Session closed\n</string>
     <string name="term_notice_truncated">…(truncated)\n</string>
     <string name="term_notice_fallback_android">⚠️ Ubuntu session unavailable — falling back to Android shell (apt commands may fail)\n</string>
+    <!-- ═══ T87: Terminal Experience Overhaul ═══ -->
+    <!-- Session death (honest feedback instead of bare "input failed") -->
+    <string name="term_notice_session_dead">Session has exited (process ended). Tap "Restart session" or create a new one.</string>
+    <string name="term_session_dead_title">Session exited</string>
+    <string name="term_session_dead_ubuntu">The Ubuntu (proot) process has ended — exit or killed by the system.\nRestart re-launches bash with the same environment.</string>
+    <string name="term_session_dead_local">The Android shell process has ended.\nRestart opens a fresh local shell.</string>
+    <string name="term_session_restart">Restart session</string>
+
+    <!-- Color scheme picker (Termux-style themes) -->
+    <string name="term_scheme_section">Color scheme</string>
+    <string name="term_scheme_current">Current theme</string>
+    <string name="term_scheme_change">Change</string>
+    <string name="term_scheme_picker_title">Terminal color scheme</string>
+    <string name="term_scheme_picker_desc">31 built-in Termux-style themes — switches instantly, no session restart needed</string>
+    <string name="term_bold_as_bright">Bold as bright color</string>
+    <string name="term_bold_as_bright_desc">xterm convention: bold + base color renders as bright variant (ls/colors depend on it)</string>
+
+    <!-- Command history -->
+    <string name="term_history_section">Command history</string>
+    <string name="term_history_desc">Commands you submitted in this terminal (persisted across restarts)</string>
+    <string name="term_history_open">Open history</string>
+    <string name="term_history_title">Command history</string>
+    <string name="term_history_hint">Tap to send to the current session · copy icon to clipboard</string>
+    <string name="term_history_empty">no commands yet — type something</string>
+    <string name="term_history_clear">Clear</string>
+    <!-- Extra keys (Termux extra-keys equivalent) -->
+    <string name="term_extra_keys_section">Extra keys row</string>
+    <string name="term_extra_keys_desc">Custom macro buttons above the keyboard (e.g. apt-fix=cmd:apt-get update). Formats: label=cmd:… (run), label=text:… (type), label=key:F1, label=ctrl:c, label=paste</string>
+    <string name="term_extra_keys_hint">label=cmd:apt-get update</string>
+    <string name="term_extra_keys_reset">Reset to defaults</string>
 </resources>

@@ -22,7 +22,7 @@ import com.apex.agent.platform.terminal.workspace.GuestUserHome
  *  - `DEBIAN_FRONTEND=noninteractive` 只在 [aptGuestEnv] 中出现 —— 交互式 bash 会话
  *    绝不继承它（否则 apt install 在交互 shell 里会跳过所有交互提示，破坏用户体验）。
  *  - `LD_LIBRARY_PATH`/`PROOT_LOADER`/`PROOT_TMP_DIR` 只在 host 层 —— guest 看不到
- *    （proot 的 -E 不传递这些）。
+ *    （proot 不透传宿主 env —— T88 起一律经 env trampoline 注入）。
  *  - `HOME=/root`、`PATH=/usr/local/sbin:...` 只在 guest 层。
  *
  * 本类是 Linux 环境变量的**唯一权威来源**。LinuxPRootBackend.buildGuestEnv 的内联

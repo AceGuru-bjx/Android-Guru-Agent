@@ -43,6 +43,9 @@ class GuestUserHome(
         // 历史版本，都幂等补齐 —— 旧用户的 .bashrc 没有 -d 探测脚本，
         // JDK 装了 gradle/sdkmanager 依然找不到 JAVA_HOME。
         ensureToolchainEnvBlock()
+        // T87：富化 bashrc（彩色 PS1 / command_not_found_handle / apt-fix 引导）
+        // —— 幂等受管块，已有标记对则不重写（用户改动优先）。
+        com.apex.agent.platform.terminal.profile.UbuntuBashProfile.ensure(hostHomeDir)
         hostHomeDir
     }
 
@@ -85,9 +88,13 @@ class GuestUserHome(
                 copyRecursivelySeeding(entry, File(hostHomeDir, entry.name))
             }
         }
-        // 无论 skel 是否存在/是否含 .bashrc —— 交互提示符必须可用（最小兜底）
+        // 无论 skel 是否存在/是否含 .bashrc —— 交互提示符必须可用。
+        // T87：兜底从 MINIMAL_BASHRC 升级为 UbuntuBashProfile 全量（彩色 PS1/
+        // command_not_found_handle/apt-fix；受管块幂等标记齐全）。
         if (!File(hostHomeDir, ".bashrc").exists()) {
-            File(hostHomeDir, ".bashrc").writeText(MINIMAL_BASHRC)
+            File(hostHomeDir, ".bashrc").writeText(
+                com.apex.agent.platform.terminal.profile.UbuntuBashProfile.generate()
+            )
         }
     }
 

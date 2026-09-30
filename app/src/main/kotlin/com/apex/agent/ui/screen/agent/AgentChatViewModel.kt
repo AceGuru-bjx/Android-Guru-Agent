@@ -16,14 +16,20 @@ import com.apex.agent.core.llm.ReasoningEffort
 import com.apex.agent.core.engine.modes.ModePreset
 import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.tools.ToolRegistry
+import com.apex.agent.core.tools.skill.SkillActivationStore
+import com.apex.agent.core.tools.skill.SkillAutoActivator
 import com.apex.agent.platform.csmem.session.CsMemSessionManager
 import com.apex.agent.github.GithubTokenManager
+import com.apex.agent.net.NetworkMonitor
+import com.apex.agent.notify.ApexNotifications
+import com.apex.agent.notify.ForegroundTracker
+import com.apex.agent.share.SharedIntake
+import com.apex.agent.usage.UsageLedger
 import com.apex.agent.ui.screen.settings.AgentSettings
 import com.apex.agent.ui.screen.settings.SettingsRepository
 import com.apex.agent.ui.screen.settings.activeModePreset
 import com.apex.agent.ui.screen.settings.activeRole
 import com.apex.agent.ui.screen.settings.allRoles
-import com.apex.agent.ui.screen.settings.withPresetUpserted
 import com.apex.agent.ui.screen.settings.withRoleActivated
 import com.apex.agent.ui.language.LanguageManager
 import com.apex.agent.R
@@ -51,23 +57,41 @@ class AgentChatViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     private val preprocessor: PredictiveAttachmentPreprocessor,
     internal val userQuestionBridge: UserQuestionBridge,
-    private val settingsRepository: SettingsRepository,
+    // v1.4.4 #4：internal —— EventApplier 读 taskCompletionNotify 设置
+    internal val settingsRepository: SettingsRepository,
     // God-file 预算拆分：AgentChatEventApplier 扩展需读工具元数据（classifyTool 路由徽章）
     internal val toolRegistry: ToolRegistry,
-    @ApplicationContext private val context: Context,
+    // v1.4.4 #4/#6/#7：internal —— ChatSessionOps/EventApplier 扩展共用；
+    // 亦供 AgentChatHtmlPreview.kt 扩展（God-file 预算拆分）。
+    @ApplicationContext internal val context: Context,
     // T76：任务运行时控制器（execute/abort 经此获得 checkpoint/恢复能力）
     private val taskController: AgentTaskStatusController,
     // 历史对话仓库（归档/恢复/删除；逻辑主体在 AgentChatHistoryController.kt）
     internal val chatHistory: ChatHistoryManager,
     // 工作区根解析（HTML 预览路径用）：code_* 工具写的 HTML 按此根解析相对路径；
     // default 工作区即 Agent 沙箱根（终端会话 guest /workspace 同源）。
-    private val workspaceRoots: CodeWorkspaceRoots,
+    // internal —— AgentChatHtmlPreview.kt 扩展共用（God-file 预算拆分）。
+    internal val workspaceRoots: CodeWorkspaceRoots,
     // i18n：用户可见 toast / 系统行 / 工具步骤文案按当前语言取词（组合外场景）
     private val languageManager: LanguageManager,
     // v2：斜杠路由需要 MCP 连接快照（/mcp:<id> 引导提示词据此生成）
     private val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
     // P2：删除/清空历史会话时同步清理附件文件（AgentChatHistoryController 扩展使用）
-    internal val attachmentCleanup: AttachmentCleanupManager
+    internal val attachmentCleanup: AttachmentCleanupManager,
+    // 技能渐进披露：自动装备（消息命中 tags 零成本预激活）+ 斜杠装备写入。
+    private val skillAutoActivator: SkillAutoActivator,
+    internal val skillActivation: SkillActivationStore,
+    // ═══ v1.4.4 新增（全部 internal —— 扩展文件共用）═══
+    /** #6 用量账本：每轮 LLM 真实 usage 落盘（EventApplier UsageUpdated 钩子）。 */
+    internal val usageLedger: UsageLedger,
+    /** #7 分享接收：外部 ACTION_SEND 入站的待处理载荷（init 订阅消费）。 */
+    internal val sharedIntake: SharedIntake,
+    /** #4 前台跟踪：任务完成通知的静音判定（用户正看屏幕时不打批）。 */
+    internal val foregroundTracker: ForegroundTracker,
+    /** #4 通知中心：任务完成通知发射器。 */
+    internal val notifications: ApexNotifications,
+    /** #6 网络监测：离线状态源（Screen 顶部横幅消费）。 */
+    val networkMonitor: NetworkMonitor
 ) : ViewModel() {
 
     /** i18n：按当前语言取无参文案（internal —— AgentChatEventApplier 扩展共用）。 */
@@ -91,6 +115,28 @@ class AgentChatViewModel @Inject constructor(
     internal var currentHistorySessionCreatedAt: Long? = null
     internal var historyPersistJob: Job? = null
     val uiState: StateFlow<AgentChatUiState> = _uiState.asStateFlow()
+
+    /**
+     * 抽屉徽标窄化流（P1 重组风暴修复）：抽屉只消费 mode/thinkingLevel/
+     * historyDepth 三个字段——直接 collectAsState uiState 会让流式输出期间
+     * 每个 token 的 copy() 新实例都把整个抽屉（含 13 个玻璃导航项）重组
+     * 一遍；结构去重后流式期间抽屉零重组。
+     */
+    val drawerBadges: StateFlow<DrawerBadges> = _uiState
+        .map { DrawerBadges(it.mode, it.thinkingLevel, it.historyDepth) }
+        .distinctUntilChanged()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            DrawerBadges(AgentMode.BUILD, ThinkingLevel.STANDARD, 0)
+        )
+
+    /** 抽屉徽标快照（窄字段 + distinctUntilChanged，天然结构去重）。 */
+    data class DrawerBadges(
+        val mode: AgentMode,
+        val thinkingLevel: ThinkingLevel,
+        val historyDepth: Int
+    )
 
     /** #168 AUTO 档：最近一次自适应选档理由（引擎 IterationStart 后由 EventApplier 拉取刷新）。 */
     internal val _lastAdaptiveDecision = MutableStateFlow<String?>(null)
@@ -296,6 +342,29 @@ class AgentChatViewModel @Inject constructor(
     /** 一次性 UI 反馈（Toast 级）：异步动作真实结果由 Screen 收集展示。UX-1：internal（非 private）供 AgentMessageActions.kt 同包扩展访问。 */
     internal val _uiFeedback = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val uiFeedback: SharedFlow<String> = _uiFeedback.asSharedFlow()
+
+    // ═══ v1.4.4 #7：分享接收 —— 外部分享文本/图片预填输入区 ═══
+    // 刻意放在这里的独立 init 块（在 attachmentManager/_uiFeedback 声明之后）：
+    // Kotlin 属性与 init 块按声明顺序执行，而 viewModelScope 是 Main.immediate ——
+    // StateFlow.collect 会同步发射当前值，若此代码在首个 init 块（依赖成员声明
+    // 之前），冷启动分享路径会在构造期访问未初始化成员直接 NPE。
+    // StateFlow 持久载荷（冷启动 onCreate 路径也不丢）：文本进草稿、图片挂
+    // 附件条；不自动发送（分享 ≠ 授权发送，用户仍需点发送键）。图片必须在
+    // URI 权限窗口内即时拷沙箱，不等用户点发送。
+    init {
+        viewModelScope.launch {
+            sharedIntake.pending.collect { payload ->
+                if (payload == null) return@collect
+                val textFilled = payload.text?.takeIf { it.isNotBlank() }
+                if (textFilled != null) updateInputText(textFilled)
+                payload.imageUri?.let { uri ->
+                    runCatching { attachmentManager.attachImage(uri) }
+                }
+                _uiFeedback.tryEmit(strFmt(R.string.chat_share_received))
+                sharedIntake.consume()
+            }
+        }
+    }
 
     /**
      * Agent 主动提问时的待处理问题。
@@ -639,6 +708,10 @@ class AgentChatViewModel @Inject constructor(
         text: String,
         currentAttachments: List<Attachment>
     ) {
+        // 技能自动装备（渐进披露零成本路）：消息命中已安装技能的 tags/id/name
+        // → 发送前预激活（≤ 2 个），本轮提示词即携带方法论全文；异常静默不阻断发送。
+        runCatching { skillAutoActivator.autoEquip(text) }
+
         // 异步落盘附件（IO 线程）
         // 优先使用预拷贝结果，未预拷贝的回退到同步拷贝
         val persistedAttachments = try {
@@ -793,100 +866,9 @@ class AgentChatViewModel @Inject constructor(
         }
     }
 
-    fun setMode(mode: AgentMode) {
-        _uiState.update { it.copy(mode = mode) }
-        // P1-1（6-c）：patchConfig 只改 mode/customInstruction，保留其余引擎配置（原 updateConfig 重置全部）。
-        // #168：CUSTOM 模式注入当前生效指令（选中预设优先，回退旧单串）。
-        (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
-            cfg.copy(
-                mode = mode,
-                customInstruction = if (mode == AgentMode.CUSTOM) {
-                    settingsRepository.effectiveCustomInstruction().ifBlank { cfg.customInstruction }
-                } else cfg.customInstruction
-            )
-        }
-    }
-
-    // #197：toolkitStore/函数调用已迁至 Coding 屏（CodeViewModel 注入同一
-    // @Singleton ChatToolkitStore——Agent 屏不再消费，无跨屏状态串扰）。
-
-    /**
-     * #168 upsert CUSTOM 模式预设（模板工坊页编辑入口）。
-     *
-     * 保存后自动选中（withPresetUpserted 语义）；生效链路复用 init 里的
-     * agentSettings collector → patchConfig(customInstruction)，下一轮请求生效。
-     */
-    fun upsertModePreset(preset: ModePreset) {
-        settingsRepository.updateAgentSettings { withPresetUpserted(preset) }
-    }
-
-    /** 用户确认/驳回了 Spec 模式的规格，恢复引擎执行。 */
-    fun submitSpecConfirmation(confirmed: Boolean) {
-        _uiState.update { it.copy(awaitingSpecConfirmation = false) }
-        (agentEngine as? ApexAgentEngine)?.submitSpecConfirmation(confirmed)
-    }
-
-    fun setThinkingLevel(level: ThinkingLevel) {
-        // #168：档位选择持久化到 AgentSettings（跨重启恢复，patchConfig 即时生效）。
-        settingsRepository.updateAgentSettings { copy(thinkingLevelOverride = level.name.lowercase()) }
-        applyThinkingLevel(level)
-        if (level == ThinkingLevel.AUTO) {
-            _lastAdaptiveDecision.value = null // 决策理由由下一轮 IterationStart 刷新
-        }
-        // 双级思考控制（RikkaHub 式）：档位不再自动映射/覆写模型原生 reasoning effort ——
-        // 第一级（模型原生强度）由 ReasoningEffort chips 独立控制并持久化到 Profile，
-        // 与本档位（引擎提示词层）完全解耦，两者独立生效。
-    }
-
-    /** 档位 → UI 状态 + 引擎配置（setThinkingLevel 与启动恢复共用）。 */
-    private fun applyThinkingLevel(level: ThinkingLevel) {
-        _uiState.update { it.copy(thinkingLevel = level, forceDeepThinking = level == ThinkingLevel.MAXIMUM) }
-        // P1-1（6-c）：patchConfig 只改 thinkingLevel，保留其余引擎配置。
-        (agentEngine as? ApexAgentEngine)?.patchConfig { cfg -> cfg.copy(thinkingLevel = level) }
-    }
-
-    /**
-     * 双级思考控制第二级：强制深度思考开关。
-     *
-     * ON → 引擎 ThinkingLevel 钉 MAXIMUM（七步 ToT 提示词 + 工具自检 + 终检清单，
-     * 提示词层强制，对任何模型生效）；OFF → 回退 STANDARD 三步 CoT。
-     * 与第一级（模型原生 reasoning effort，Profile 字段）互不干涉。
-     */
-    fun setForceDeepThinking(enabled: Boolean) {
-        settingsRepository.updateAgentSettings {
-            copy(forceDeepThinking = enabled, thinkingLevelOverride = if (enabled) "maximum" else "standard")
-        }
-        applyThinkingLevel(if (enabled) ThinkingLevel.MAXIMUM else ThinkingLevel.STANDARD)
-    }
-
-    /** #168：thinkingLevelOverride 字符串 → ThinkingLevel（未知/空值 → null = 不覆盖）。 */
-    private fun thinkingLevelFromOverride(value: String): ThinkingLevel? =
-        runCatching { ThinkingLevel.valueOf(value.trim().uppercase()) }.getOrNull()
-
     // ═══ HTML 产物预览（应用内 WebView）═══
-
-    /**
-     * 把工具调用中提取的 HTML 路径（相对 / 绝对 / guest /workspace 前缀）
-     * 解析为宿主侧可读文件路径；解析失败（不存在/不可读）返回 null。
-     *
-     * 三段式判定：
-     * 1. guest `/workspace/...` → 工作区根替换（终端会话与 code_* 同源目录）；
-     * 2. 宿主绝对路径直接验证存在性；
-     * 3. 相对路径 → activeRoot（null 时兜底 default 工作区）下解析。
-     */
-    fun resolveHtmlPreviewPath(rawPath: String): String? {
-        val root = workspaceRoots.activeRoot()
-            ?: File(context.filesDir, "linux/workspaces/default")
-        val candidate: File = when {
-            rawPath.startsWith("/workspace/", ignoreCase = true) ->
-                File(root, rawPath.removePrefix("/workspace/"))
-            rawPath.startsWith("/") -> File(rawPath)
-            else -> File(root, rawPath)
-        }
-        return if (HtmlArtifactDetector.isPreviewableHostFile(candidate.absolutePath)) {
-            candidate.absolutePath
-        } else null
-    }
+    // resolveHtmlPreviewPath() 已抽出到 AgentChatHtmlPreview.kt（internal 扩展，
+    // 调用点 vm.resolveHtmlPreviewPath 解析不变）。
 
     /**
      * #169 计划确认（人控升级）：confirmed=false 取消；true 时可携带步骤勾选
@@ -1113,7 +1095,9 @@ class AgentChatViewModel @Inject constructor(
         val result = SlashCommands.handle(
             command,
             githubTokenManager,
-            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet())
+            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet()),
+            // /skill:<id> 路由时同步装备（写入激活存储，本轮提示词即携带方法论）
+            skillActivation = skillActivation
         )
 
         // 指令会取消上一个流式任务：先清空流式缓冲，防残留文本串入新一轮。

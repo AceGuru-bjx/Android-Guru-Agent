@@ -54,6 +54,33 @@ interface ExecutionMemoryObserver {
      * 默认返回 [BypassOutcome.NotAttempted]（观察者未注入时静默跳过）。
      */
     suspend fun tryBypass(): BypassOutcome = BypassOutcome.NotAttempted
+
+    /**
+     * 聊天记忆召回（对话自动记忆的读取面）。
+     *
+     * 引擎在 execute() 入口、构建本轮消息前调用：实现方基于用户文本
+     * 检索长期记忆（用户偏好 / 背景事实 / 历史任务结论），返回一段
+     * 已格式化的上下文文本（注入系统提示词 "## Remembered About You" 段）；
+     * 无可召回内容返回 null（段落省略，既有调用方零变化）。
+     *
+     * 实现约定：快（内存索引 / 本地文件读取级别），失败必须吞掉返回 null
+     * ——绝不因记忆子系统异常阻断主对话。
+     */
+    suspend fun recallChatMemory(userText: String): String? = null
+
+    /**
+     * 聊天记忆自动沉淀（对话自动记忆的写入面）。
+     *
+     * 引擎在每轮 execute() 收尾（finally）调用一次：传入本轮用户原文与
+     * 最终助手回复。实现方异步提取值得长期记住的事实（用户自述、偏好、
+     * 进行中的事项），写入长期存储。轻量启发式提取可零成本同步完成；
+     * LLM 蒸馏类重活应转后台协程，本方法不应阻塞超过几十毫秒。
+     *
+     * 默认空实现（观察者未注入 / 未实现聊天记忆时静默跳过）。
+     */
+    suspend fun onConversationTurn(userText: String, assistantText: String) {
+        // 默认空实现
+    }
 }
 
 /**

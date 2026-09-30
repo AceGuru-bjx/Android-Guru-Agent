@@ -67,7 +67,10 @@ fun ApexDrawerContent(
     tokenManager: GithubTokenManager
 ) {
     val agentVm: AgentChatViewModel = hiltViewModel()
-    val agentState by agentVm.uiState.collectAsStateWithLifecycle()
+    // 窄化徽标流：抽屉只需要 mode/thinkingLevel/historyDepth 三字段——
+    // 直接订阅全量 uiState 会在流式输出期间（每 token 一次 copy）把整个
+    // 抽屉重组风暴掉（抽屉关闭时也保持组合，照样重组）
+    val badges by agentVm.drawerBadges.collectAsStateWithLifecycle()
     val githubState by tokenManager.connectionState.collectAsStateWithLifecycle()
     val glassState = remember { HazeState() }
 
@@ -174,11 +177,15 @@ fun ApexDrawerContent(
                         DrawerDestination.Market,
                         DrawerDestination.Memory,
                         DrawerDestination.Tasks,
+                        // v1.4.4 #6：用量仪表盘（数据洞察，与任务历史相邻）
+                        DrawerDestination.Usage,
                         DrawerDestination.Storage,
                         DrawerDestination.Permissions,
                         // #167 加密剪切板金库：与权限页相邻（同为安全入口）
                         DrawerDestination.Vault,
                         DrawerDestination.Log,
+                        // v1.4.4 #7：诊断中心（日志/崩溃/设备信息，与日志页相邻）
+                        DrawerDestination.Diagnostics,
                         DrawerDestination.Settings,
                         DrawerDestination.GlassLab
                     )
@@ -223,12 +230,12 @@ fun ApexDrawerContent(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        StatusChip("MODE", agentState.mode.name)
-                        StatusChip("THINK", agentState.thinkingLevel.name)
+                        StatusChip("MODE", badges.mode.name)
+                        StatusChip("THINK", badges.thinkingLevel.name)
                     }
-                    if (agentState.historyDepth > 0) {
+                    if (badges.historyDepth > 0) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        StatusChip("MEM", stringResource(R.string.drawer_mem_count, agentState.historyDepth))
+                        StatusChip("MEM", stringResource(R.string.drawer_mem_count, badges.historyDepth))
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     // GitHub 连接状态常显（不再仅在触发 /mcp:github 时提示）

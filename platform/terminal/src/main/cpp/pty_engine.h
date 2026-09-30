@@ -73,6 +73,12 @@ public:
     bool isAlive(int sessionId);
     int getPid(int sessionId);
     int getExitCode(int sessionId);
+
+    /**
+     * T87：exec 失败原因（"" = exec 成功或会话不存在）。
+     * 构造期阻塞 read 已保证：会话一创建，结论立即可查（无 TOCTOU）。
+     */
+    std::string spawnError(int sessionId);
     void closeSession(int sessionId);
     void closeAll();
     int activeCount();

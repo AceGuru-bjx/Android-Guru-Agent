@@ -249,14 +249,18 @@ class NativePtyArgvInstrumentationTest {
         env.prepare().getOrThrow()
         val hostEnv = env.hostEnv()
 
-        // proot -r / (Android 本机作为 rootfs) -- /system/bin/sh -c 'echo …'
+        // proot -r / (Android 本机作为 rootfs) -- /system/bin/env -i … /system/bin/sh -c 'echo …'
+        // T88：argv 形状与生产一致（env trampoline，无 -E —— 捆绑 proot 5.1.107
+        // 不支持该选项）。rootfs=/ 时 trampoline 落在 Android 宿主文件系统上，
+        // /system/bin/env 是 toybox 的一部分（API 23+ 必有）。
         val argv = arrayOf(
             File(nativeDir, "libproot.so").absolutePath,
             "-r", "/",
             "--kill-on-exit",
             "-w", "/data/local/tmp",
-            "-E", "TERM=dumb",
-            "--", "/system/bin/sh", "-c", "echo P71_PROOT_CHAIN_OK"
+            "--",
+            "/system/bin/env", "-i", "TERM=dumb",
+            "/system/bin/sh", "-c", "echo P71_PROOT_CHAIN_OK"
         )
         val envKeys = hostEnv.keys.toTypedArray()
         val envVals = hostEnv.values.toTypedArray()

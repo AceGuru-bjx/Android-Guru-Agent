@@ -53,6 +53,14 @@ interface NativePtyJniBridge {
     fun nativeIsAlive(sessionId: Int): Boolean
     fun nativeGetPid(sessionId: Int): Int
     fun nativeGetExitCode(sessionId: Int): Int
+
+    /**
+     * T87：exec 失败原因（空串 = exec 成功或会话不存在）。
+     * createSessionArgv 返回后立即可查（native 构造期阻塞 read 已定论）。
+     * 「创建成功但进程即死」（如 proot ENOENT/ELIBBAD）由此获得确切根因。
+     */
+    fun nativeGetSpawnError(sessionId: Int): String?
+
     fun nativeCloseSession(sessionId: Int)
     fun nativeCloseAll()
     fun nativeActiveCount(): Int
@@ -136,6 +144,8 @@ class NativePty : NativePtyJniBridge {
     override external fun nativeIsAlive(sessionId: Int): Boolean
     override external fun nativeGetPid(sessionId: Int): Int
     override external fun nativeGetExitCode(sessionId: Int): Int
+    /** T87：exec 失败原因（见 [NativePtyJniBridge.nativeGetSpawnError]）。 */
+    override external fun nativeGetSpawnError(sessionId: Int): String?
     override external fun nativeCloseSession(sessionId: Int)
     override external fun nativeCloseAll()
     override external fun nativeActiveCount(): Int

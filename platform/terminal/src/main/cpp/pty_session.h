@@ -100,6 +100,20 @@ public:
     void close();
     int exitCode() const { return exitCode_.load(std::memory_order_relaxed); }
 
+    /**
+     * T87（exec 失败诚实上报）：构造期 execv 失败的确切原因（errno → 人类可读）。
+     * 空串 = exec 成功（或尚未检测）。构造函数内的阻塞 read 保证构造返回时
+     * 结论已定 —— 无 TOCTOU 窗口。
+     *
+     * 背景：proot 会话在真机上可能因 exec 失败而「创建成功、进程即死」——
+     * 旧链路对 Kotlin 只返回一个 id，之后每次 write 都 EIO →
+     * 用户只看到「输入失败」，根因（如 ENOENT/ELIBBAD/EACCES）永远不可见。
+     */
+    std::string spawnError() const { return spawnError_; }
+
+    /** exec 是否失败（spawnError_ 非空的便捷判定）。 */
+    bool spawnFailed() const { return !spawnError_.empty(); }
+
 private:
     void reapChild();
 
@@ -127,6 +141,8 @@ private:
     bool killProcessGroup(int sig);
 
     int id_;
+    // T87：execv 失败原因（构造期确定；空 = 成功）。immutable after constructor。
+    std::string spawnError_;
     // P70 生命周期加固：masterFd_ 会被 close()（可能来自另一个线程）置 -1，
     // 与 readEx/write 并发读写 —— 用 atomic 消除数据竞争（fd 关闭后 read/write
     // 返回 EBADF → ERROR_，由上层按状态语义处理，而非 UB）。

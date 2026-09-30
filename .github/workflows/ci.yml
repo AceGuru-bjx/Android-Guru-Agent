@@ -365,6 +365,19 @@ jobs:
             -Pkotlin.incremental=false \
             --stacktrace
 
+      - name: Run terminal-emulator + terminal-view unit tests (T88)
+        run: |
+          # T88 缺口修复：terminal-emulator 的 VT 引擎测试（v0.3 234+ 项：
+          # 边距/DECRQM/OSC 10-12/reflow/session 序列化/字符集/DCS/DECALN）
+          # 此前从未进 CI（只在本地 kotlinc+JUnitCore 跑）—— proot -E 事故的
+          # 教训是"没进 CI 的验证等于不存在"。terminal-view（T88 新模块，Termux
+          # 级 View 渲染层）的 148 项纯 JVM 逻辑测试（滚动模型/选区/手势/键映射/
+          # 调色板解析/样式折叠/网格几何）同批纳入。
+          ./gradlew :terminal-emulator:testDebugUnitTest :terminal-view:testDebugUnitTest \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
       - name: Compile platform:terminal instrumentation tests (P70 real-JNI PTY)
         run: |
           # P70: NativePtyJniInstrumentationTest exercises the real forkpty/JNI

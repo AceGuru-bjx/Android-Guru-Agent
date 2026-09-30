@@ -55,6 +55,10 @@ include(":terminal-emulator")
 // 上游：AceGuru-mjh/apex-vt-native（129 项奇偶校验测试 + NDK CI）
 include(":terminal-native")
 
+// Terminal view — T88 Termux 级自定义 View 渲染层（Canvas 网格 / 滚动 / 选择 / IME）
+// 依赖 :terminal-emulator 的纯数据模型（RenderCell/TerminalRenderSnapshot），不依赖 Compose
+include(":terminal-view")
+
 // 插件SDK
 include(":plugin-sdk:plugin-api")
 include(":plugin-sdk:plugin-host")

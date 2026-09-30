@@ -183,7 +183,14 @@ class T81CapabilityProbeTest {
 
     /** 脚本化执行：按 guest argv 返回预置结果（which/version）。 */
     private fun scriptedExec(results: Map<String, Pair<Int, String>>): suspend (PRootCommand) -> com.apex.agent.platform.terminal.proot.BoundedExecution = { command ->
+        // T88：argv 现在是 `… -- /usr/bin/env -i K=V… <executable> <args…>`。
+        // 脚本键取「真实 guest 命令」（剥掉 trampoline 前缀），顺带断言形状。
         val argvTail = command.arguments.dropWhile { it != "--" }.drop(1)
+            .dropWhile { a ->
+                a == com.apex.agent.platform.terminal.proot.PRootEnvTrampoline.ENV_EXECUTABLE ||
+                    a == com.apex.agent.platform.terminal.proot.PRootEnvTrampoline.CLEAN_ENV_FLAG ||
+                    (a.contains('=') && a.substringBefore('=').all { it.isLetterOrDigit() || it == '_' })
+            }
         val key = argvTail.joinToString(" ")
         val (code, out) = results[key] ?: (1 to "")
         com.apex.agent.platform.terminal.proot.BoundedExecution(

@@ -192,7 +192,9 @@ internal fun UpdatePanel() {
     LaunchedEffect(activeDownload?.id) {
         val active = activeDownload ?: return@LaunchedEffect
         while (true) {
-            val (percent, bytes) = downloader.progress(active.id)
+            // DownloadManager.query 是主线程 binder/ContentProvider 调用
+            //（300MB 下载持续数分钟 = 数千次主线程 IPC）→ 收敛到 IO
+            val (percent, bytes) = withContext(Dispatchers.IO) { downloader.progress(active.id) }
             downloadPercent = percent
             downloadedBytes = bytes
             if (activeDownload?.id != active.id) break
@@ -452,8 +454,12 @@ internal fun UpdatePanel() {
                                             fontWeight = FontWeight.SemiBold,
                                             color = MaterialTheme.colorScheme.primary
                                         )
-                                        val saved =
+                                        val saved = if (full.sizeBytes > 0) {
+                                            // 守卫：清单缺 sizeBytes（旧 schema/手写清单）时
+                                            // 默认 0，Long 除零会直接抛 ArithmeticException
                                             100 - (patch.sizeBytes * 100 / full.sizeBytes).toInt()
+                                                .coerceIn(0, 100)
+                                        } else 0
                                         Text(
                                             stringResource(
                                                 R.string.settings_about_update_patch_hint,
@@ -845,5 +851,6 @@ private fun mirrorLabel(mirror: DownloadMirror): String = when (mirror) {
     DownloadMirror.GHPROXY_COM -> "gh-proxy.com"
 }
 
-/** 字节数 → 「318 MB」式人类可读体积。 */
-private fun formatMb(bytes: Long): String = "${bytes / 1024 / 1024} MB"
+/** 字节数 → 「318.4 MB」式人类可读体积（一位小数：<1MB 不再显示成 0 MB）。 */
+private fun formatMb(bytes: Long): String =
+    String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)

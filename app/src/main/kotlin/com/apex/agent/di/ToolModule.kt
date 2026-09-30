@@ -27,6 +27,7 @@ import com.apex.agent.platform.terminal.tools.legacy.LegacyReadTool
 import com.apex.agent.platform.terminal.tools.legacy.LegacySendTool
 import com.apex.agent.platform.terminal.tools.legacy.LegacyListTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalBackendsTool
+import com.apex.agent.platform.terminal.tools.v2.TerminalDiagnosticsTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalCloseTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalCreateTool
 import com.apex.agent.platform.terminal.tools.v2.TerminalExecTool
@@ -214,6 +215,9 @@ val TERMINAL_TOOL_RUN_POLICIES: Map<String, ToolRunPolicy> = mapOf(
     // terminal.linux.status 全量 6 维检查：每维一次 proot exec（10~30s 级），
     //   全量可达数分钟（quick=true 轻量）。
     "terminal.linux.status" to ToolRunPolicy(timeoutMs = 300_000L, maxRetries = 0),
+    // terminal.diagnostics（T87）：会话/后端面秒回；smokeTest=true 含一次
+    //   真实 exec 探针（最坏 600s —— 与 terminal.exec 同预算）。
+    "terminal.diagnostics" to ToolRunPolicy(timeoutMs = 660_000L, maxRetries = 0),
     // terminal.wait：schema 无 timeoutMs 上限，模型可请求 > 60s 等待
     //   （默认 60s 恰好撞 mutating 预算线）。给足等待自身上限 + 余量。
     "terminal.wait" to ToolRunPolicy(timeoutMs = 660_000L, maxRetries = 0)
@@ -520,7 +524,9 @@ object ToolModule {
         // #167 加密剪切板金库（vault_* 工具族 + 执行器脱敏装饰）
         vaultRepository: VaultRepository,
         // #172 上下文回顾三件套的数据源：当前会话持久化消息（SharedPrefs 单例）。
-        conversationMemory: com.apex.agent.core.engine.ConversationMemory
+        conversationMemory: com.apex.agent.core.engine.ConversationMemory,
+        // 技能渐进披露：skill_activate 工具 + 子代理引擎工厂共享的激活存储。
+        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore
     ): ToolRegistry {
         val registry = DefaultToolRegistry()
 
@@ -738,6 +744,34 @@ object ToolModule {
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
         // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
+        // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
+        // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
+        //（rootfs 就绪 → Ubuntu；否则回退 su>Shizuku>local-sh）—— 探到的就是
+        // Agent 实际会走的那条链路。
+        registry.register(SafeAgentTool(TerminalToolAdapter(
+            TerminalDiagnosticsTool(
+                runtime = terminalRuntime,
+                execProbe = { cmd ->
+                    runCatching {
+                        val probeEngine = ExecEngine(ProotCommandSpawner(
+                            hostEnvironment = hostEnvironment,
+                            rootfsDir = rootfsBaseDir,
+                            isRootfsReady = { File(rootfsBaseDir, "current").exists() },
+                            defaultWorkspaceDir = File(context.filesDir, "linux/workspaces/default"),
+                            persistentHomeDir = File(context.filesDir, "linux/home"),
+                            fallback = PrivilegedCommandSpawner()
+                        ))
+                        val result = probeEngine.execute(
+                            com.apex.agent.platform.terminal.exec.ExecRequest(
+                                command = cmd,
+                                timeoutMs = 120_000L
+                            )
+                        )
+                        result.stdout.ifBlank { result.stderr }
+                    }.getOrNull()
+                }
+            )
+        )))
         registry.register(SafeAgentTool(TerminalToolAdapter(
             TerminalUbuntuInstallTool(rootfsProvisioner, rootfsTarget)
         )))
@@ -862,10 +896,13 @@ object ToolModule {
         // ═══ 13. Skill 工具接线（此前缺口：skill_* 管理工具与已启用技能的
         // composite/script 工具从未注册进 ToolRegistry，安装后形同虚设）═══
         registry.register(SafeAgentTool(SkillSearchTool(httpClient)))
-        registry.register(SafeAgentTool(SkillInstallTool(skillRegistry, httpClient)))
+        registry.register(SafeAgentTool(SkillInstallTool(skillRegistry, httpClient, skillActivation)))
         registry.register(SafeAgentTool(SkillCreateTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillListTool(skillRegistry)))
         registry.register(SafeAgentTool(SkillUninstallTool(skillRegistry)))
+        // 技能渐进披露：模型侧装载入口。目录在系统提示词，方法论全文经本工具
+        // 装载（工具结果即时返回全文 + 写入激活集持续注入后续轮次）。
+        registry.register(SafeAgentTool(SkillActivateTool(skillRegistry, skillActivation)))
 
         // ═══ 14. Tool System v3 新工具（纯 JVM，零新依赖）═══
         // wait：Anthropic computer-use 语义的有界可取消等待（UI 稳定窗口）；
@@ -977,7 +1014,11 @@ object ToolModule {
                     skillRegistry = skillRegistry,
                     privilegeInfoProvider = privilegeInfoProvider,
                     environmentInfoProvider = environmentInfoProvider,
-                    modelRuntime = modelRuntime
+                    modelRuntime = modelRuntime,
+                    // 渐进披露：子代理共享主代理的技能激活集（主代理装备的
+                    // 方法论在子代理上下文同样生效；未激活则仅目录可见，
+                    // 避免 46 技能全量注入撞爆子代理请求）。
+                    skillActivation = skillActivation
                 )
             },
             // Issue #165 —— SubagentStop：子代理回合收官（结果返回前）非阻断派发。

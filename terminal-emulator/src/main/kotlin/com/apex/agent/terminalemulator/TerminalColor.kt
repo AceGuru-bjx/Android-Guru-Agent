@@ -74,7 +74,13 @@ data class TerminalStyle(
      * SGR 0（属性重置）**不清除**链接编号 —— xterm 语义：链接状态独立于
      * 颜色属性，仅受 OSC 8 闭链影响（否则 `红字链接` 一过 SGR 0 就断链）。
      */
-    val linkIndex: Int = 0
+    val linkIndex: Int = 0,
+    /**
+     * v0.3（SGR 58）下划线描色 —— 与 38/48 对称（58;5;n / 58;2;r;g;b 及冒号形式）。
+     * [TerminalColor.Default] = 未设置（宿主回退前景色）；SGR 59 归位。
+     * kitty/nvim 的彩色下划线（拼写检查波浪线、diff 着重线）依赖此通道。
+     */
+    val underlineColor: TerminalColor = TerminalColor.Default
 ) {
     companion object { val DEFAULT = TerminalStyle() }
 }

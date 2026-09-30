@@ -34,10 +34,12 @@ class PRootCommandBuilderTest {
         assertEquals("/lib/libproot.so", cmd.executable.value)
         assertEquals("-r", cmd.arguments[0])
         assertEquals("/data/rootfs/v1", cmd.arguments[1])
-        // guest command lives after "--": executable then its arguments
+        // T88: guest 命令在 "--" 之后，且以 env trampoline 开头（proot 5.1.107 兼容）
         val dd = cmd.arguments.indexOf("--")
         assertTrue(dd > 0)
-        assertEquals("/bin/bash", cmd.arguments[dd + 1])
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, cmd.arguments[dd + 1])
+        assertEquals(PRootEnvTrampoline.CLEAN_ENV_FLAG, cmd.arguments[dd + 2])
+        assertEquals("/bin/bash", cmd.arguments[cmd.arguments.size - 2])
         assertEquals("-i", cmd.arguments.last())
     }
 
@@ -59,11 +61,66 @@ class PRootCommandBuilderTest {
     }
 
     @Test fun `builds with environment passthrough`() {
-        val req = PRootLaunchRequest(rootfs(), "/bin/sh", environment = mapOf("HOME" to "/root"))
+        val req = PRootLaunchRequest(
+            rootfs(), "/bin/sh",
+            // 显式带 PATH —— 免触发兜底注入，断言可以精确到逐元素
+            environment = linkedMapOf("HOME" to "/root", "PATH" to "/usr/bin:/bin")
+        )
         val cmd = PRootCommandBuilderImpl().build(req, AbsolutePath("/p"), AbsolutePath("/r"), AbsolutePath("/w"))
-        val idx = cmd.arguments.indexOf("-E")
-        assertTrue(idx > 0)
-        assertEquals("HOME=/root", cmd.arguments[idx + 1])
+        // T88：env trampoline —— guest 命令变为 env -i HOME=/root PATH=… /bin/sh
+        val dd = cmd.arguments.indexOf("--")
+        assertTrue(dd > 0)
+        assertEquals(
+            listOf(
+                PRootEnvTrampoline.ENV_EXECUTABLE, PRootEnvTrampoline.CLEAN_ENV_FLAG,
+                "HOME=/root", "PATH=/usr/bin:/bin", "/bin/sh"
+            ),
+            cmd.arguments.subList(dd + 1, cmd.arguments.size)
+        )
+    }
+
+    @Test fun `environment never uses proot -E flag (bundled 5_1_107 compatibility)`() {
+        // T88 根因回归：捆绑 proot 5.1.107.92 的选项表没有 -E（proot-me/proot
+        // 上游 master 也没有 —— 那是本仓库自造的 argv 形状）。一旦 -E 回归，
+        // 设备上 bootstrap 立刻报 `proot error: unknown option '-E'`。
+        val req = PRootLaunchRequest(
+            rootfs(), "/bin/bash", listOf("-c", "echo hi"),
+            environment = mapOf("TERM" to "xterm-256color", "HOME" to "/root")
+        )
+        val cmd = PRootCommandBuilderImpl().build(req, AbsolutePath("/p"), AbsolutePath("/r"), AbsolutePath("/w"))
+        val argv = listOf(cmd.executable.value) + cmd.arguments
+        assertTrue(
+            "argv must not contain -E: $argv",
+            PRootArgvContract.legacyIncompatibleFlags(argv).isEmpty()
+        )
+        assertTrue("env trampoline present", PRootArgvContract.hasEnvTrampoline(argv))
+    }
+
+    @Test fun `empty environment still injects PATH for env lookup`() {
+        // env -i 后 guest 需要解析可执行名（如 apt-get）；无 PATH 的 guest
+        // 连内建查找都失灵 —— 空 env 时 trampoline 兜底注入权威 PATH。
+        val cmd = PRootCommandBuilderImpl().build(
+            PRootLaunchRequest(rootfs(), "/bin/sh"),
+            AbsolutePath("/p"), AbsolutePath("/r"), AbsolutePath("/w")
+        )
+        val dd = cmd.arguments.indexOf("--")
+        assertTrue(
+            "PATH fallback present",
+            cmd.arguments.subList(dd + 1, cmd.arguments.size).any {
+                it.startsWith("PATH=") && it.contains("/usr/bin")
+            }
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `invalid env key rejected by trampoline`() {
+        // TM6 平移：key 含 '=' 或 '-' 前缀会被 /usr/bin/env 误解析，必须在构造层拒绝
+        PRootEnvTrampoline.guestPrefix(mapOf("-BAD-KEY" to "x"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `env value with newline rejected by trampoline`() {
+        PRootEnvTrampoline.guestPrefix(mapOf("TERM" to "xterm\nRESET"))
     }
 
     @Test fun `command separates executable and arguments`() {
@@ -74,7 +131,12 @@ class PRootCommandBuilderTest {
         // proot is the executable; guest command lives after "--"
         val dd = cmd.arguments.indexOf("--")
         assertTrue(dd > 0)
-        assertEquals(listOf("/bin/bash", "-c", "echo hi"), cmd.arguments.subList(dd + 1, cmd.arguments.size))
+        // T88: trampoline 前缀（env -i + PATH 兜底）在 executable 之前
+        assertEquals(
+            listOf("/bin/bash", "-c", "echo hi"),
+            cmd.arguments.takeLast(3)
+        )
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, cmd.arguments[dd + 1])
     }
 
     @Test fun `workspace always bound to slash workspace`() {

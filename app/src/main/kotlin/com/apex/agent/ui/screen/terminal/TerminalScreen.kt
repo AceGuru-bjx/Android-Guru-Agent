@@ -77,6 +77,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
 import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
+import com.apex.agent.ui.screen.terminal.history.TerminalHistorySheet
+import com.apex.agent.ui.screen.terminal.scheme.TerminalSchemePickerSheet
+import com.apex.agent.ui.screen.terminal.settings.TerminalSettingsDrawer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -118,6 +121,8 @@ fun TerminalScreen(
     val scope = rememberCoroutineScope()
     var showNewSessionDialog by remember { mutableStateOf(false) }
     var showEnvironmentCenter by remember { mutableStateOf(false) }
+    var showSchemePicker by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
 
     // 保持屏幕常亮：看长任务输出（编译 / apt / 训练日志）时不被息屏打断 ——
     // Termux 默认持有 wakelock，这里用等价的 window flag，交给用户开关。
@@ -157,6 +162,15 @@ fun TerminalScreen(
             TerminalSettingsDrawer(
                 settings = settings,
                 onSettings = viewModel::updateSettings,
+                schemeName = viewModel.currentSchemeDisplayName(),
+                onOpenSchemePicker = { showSchemePicker = true },
+                boldAsBright = viewModel.boldAsBright.collectAsStateWithLifecycle().value,
+                onBoldAsBright = viewModel::setBoldAsBright,
+                onOpenHistory = { showHistory = true },
+                extraKeys = viewModel.extraKeys.collectAsStateWithLifecycle().value,
+                onAddExtraKey = viewModel::addExtraKey,
+                onRemoveExtraKey = viewModel::removeExtraKey,
+                onResetExtraKeys = viewModel::resetExtraKeys,
                 blacklist = blacklist,
                 whitelist = whitelist,
                 onAddBlack = viewModel::addBlacklist,
@@ -205,10 +219,21 @@ fun TerminalScreen(
                     .weight(1f)
             ) {
                 if (hasSession) {
-                    TerminalRenderer(
+                    // T88（3）：:terminal-view Canvas 直绘（替换 LazyColumn+BasicText
+                    // 渲染链 —— 滚动/选区/IME/鼠标上报全部下放 View 层）。
+                    TerminalViewHost(
                         viewModel = viewModel,
                         modifier = Modifier.fillMaxSize()
                     )
+                    // T87：死会话覆盖层 —— 会话进程已退出时不再让用户对着
+                    // 死 PTY 敲字（旧体验：每次输入弹「输入失败」却无路可走）。
+                    if (activeTab != null && !activeTab.isAlive) {
+                        DeadSessionOverlay(
+                            isUbuntu = activeTab.isUbuntu,
+                            onRestart = viewModel::restartActiveSession,
+                            onClose = { viewModel.closeSession(activeTab.id) }
+                        )
+                    }
                 } else {
                     EnvironmentPanel(
                         phase = ubuntu.phase,
@@ -275,12 +300,97 @@ fun TerminalScreen(
             onInstallAndroid = viewModel::installAndroidOnly
         )
     }
+
+    // ═══ T87：配色方案选择器 ═══
+    if (showSchemePicker) {
+        TerminalSchemePickerSheet(
+            currentSchemeId = viewModel.colorSchemeId.collectAsStateWithLifecycle().value,
+            onPick = { viewModel.setColorScheme(it) },
+            onDismiss = { showSchemePicker = false }
+        )
+    }
+
+    // ═══ T87：命令历史 ═══
+    if (showHistory) {
+        TerminalHistorySheet(
+            entries = viewModel.commandHistoryEntries.collectAsStateWithLifecycle().value,
+            onPick = { cmd ->
+                viewModel.sendInput(cmd)
+                showHistory = false
+            },
+            onClear = { viewModel.clearCommandHistory() },
+            onDismiss = { showHistory = false }
+        )
+    }
+}
+
+// ═══════════════════════ T87：死会话覆盖层 ═══════════════════════
+
+/**
+ * 会话已退出覆盖层（半透明盖在终端 grid 上）。
+ *
+ * - 「重启会话」→ 同 backend 重建（[TerminalViewModel.restartActiveSession]）；
+ * - 「关闭」→ 移除 tab；
+ * - 下方如实展示发生了什么（进程结束 = 退出/被杀；不再伪装成输入故障）。
+ */
+@Composable
+private fun DeadSessionOverlay(
+    isUbuntu: Boolean,
+    onRestart: () -> Unit,
+    onClose: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xB00E1411)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = ConsoleTheme.amber,
+                modifier = Modifier.size(40.dp)
+            )
+            Text(
+                stringResource(R.string.term_session_dead_title),
+                color = ConsoleTheme.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                stringResource(
+                    if (isUbuntu) R.string.term_session_dead_ubuntu else R.string.term_session_dead_local
+                ),
+                color = ConsoleTheme.dim,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextButton(
+                    onClick = onRestart,
+                    modifier = Modifier
+                        .background(ConsoleTheme.accentSoft, RoundedCornerShape(10.dp))
+                ) {
+                    Text(stringResource(R.string.term_session_restart), color = ConsoleTheme.accent, fontSize = 13.sp)
+                }
+                TextButton(onClick = onClose) {
+                    Text(stringResource(R.string.term_close), color = ConsoleTheme.dim, fontSize = 13.sp)
+                }
+            }
+        }
+    }
 }
 
 // ═══════════════════════ 控制台主题 ═══════════════════════
 
 /**
- * 终端页控制台配色（自含深色调色 —— 与 [TerminalRenderer] 的终端内容区一致，
+ * 终端页控制台配色（自含深色调色 —— 与 [TerminalViewHost] 的终端内容区一致，
  * 不随 App 浅/深主题漂移；强调色取 App dark 主题 primary「neon mint」0xFF4EE9B0）。
  */
 internal object ConsoleTheme {
@@ -294,7 +404,7 @@ internal object ConsoleTheme {
     val chipActive = Color(0xFF1F3429)
     /** 分隔线。 */
     val stroke = Color(0xFF233029)
-    /** 主文本（提亮至近白 —— 与 TerminalRenderer 前景纯白统一，终端「白色字体」反馈）。 */
+    /** 主文本（提亮至近白 —— 与 TerminalViewHost 前景纯白统一，终端「白色字体」反馈）。 */
     val text = Color(0xFFF2F7F4)
     /** 次级文本。 */
     val dim = Color(0xFF7E948A)
@@ -988,155 +1098,3 @@ private fun SessionTypeCard(
 private fun formatMb(bytes: Long): String =
     String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-// ═══════════════════════ 终端专属设置抽屉 ═══════════════════════
-
-@Composable
-private fun TerminalSettingsDrawer(
-    settings: TerminalViewModel.TerminalSettings,
-    onSettings: (TerminalViewModel.TerminalSettings.() -> TerminalViewModel.TerminalSettings) -> Unit,
-    blacklist: Set<String>,
-    whitelist: Set<String>,
-    onAddBlack: (String) -> Unit,
-    onRemoveBlack: (String) -> Unit,
-    onAddWhite: (String) -> Unit,
-    onRemoveWhite: (String) -> Unit,
-    onClose: () -> Unit
-) {
-    ModalDrawerSheet(modifier = Modifier.width(340.dp)) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // 标题
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SurfaceBadge(Icons.Default.Settings, MaterialTheme.colorScheme.primary)
-                Text(stringResource(R.string.term_settings_title), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            }
-
-            // ═══ 1. 终端外观与交互 ═══
-            SettingsCard(Icons.Default.Settings, stringResource(R.string.term_appearance)) {
-                LabeledNumber(stringResource(R.string.term_font_size), settings.fontSize, 8, 32) { onSettings { copy(fontSize = it) } }
-                ToggleRow(stringResource(R.string.term_monochrome), settings.monochrome) { onSettings { copy(monochrome = it) } }
-                ToggleRow(stringResource(R.string.term_keybar), settings.showKeybar) { onSettings { copy(showKeybar = it) } }
-            }
-
-            // ═══ 1b. 反馈（对齐 Termux / ConnectBot 的终端反馈习惯）═══
-            SettingsCard(Icons.Default.Settings, stringResource(R.string.term_feedback)) {
-                ToggleRow(stringResource(R.string.term_vibrate_on_bell), settings.vibrateOnBell) {
-                    onSettings { copy(vibrateOnBell = it) }
-                }
-                Text(
-                    stringResource(R.string.term_vibrate_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                ToggleRow(stringResource(R.string.term_keep_screen_on), settings.keepScreenOn) {
-                    onSettings { copy(keepScreenOn = it) }
-                }
-                Text(
-                    stringResource(R.string.term_keep_screen_on_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // ═══ 2. 黑名单 / 白名单 ═══
-            SettingsCard(Icons.Default.Block, stringResource(R.string.term_blacklist_title)) {
-                Text(
-                    stringResource(R.string.term_blacklist_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = stringResource(R.string.term_blacklist),
-                    items = blacklist.toList().sorted(),
-                    onAdd = onAddBlack,
-                    onRemove = onRemoveBlack,
-                    danger = true
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = stringResource(R.string.term_whitelist),
-                    items = whitelist.toList().sorted(),
-                    onAdd = onAddWhite,
-                    onRemove = onRemoveWhite,
-                    danger = false
-                )
-            }
-
-            // ═══ 3. 入口提示（环境解包在环境中心）═══
-            Text(
-                stringResource(R.string.term_env_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
-                Text(stringResource(R.string.term_close))
-            }
-        }
-    }
-}
-
-// LabeledNumber / CommandListEditor 仅终端设置抽屉使用；SettingsCard / SurfaceBadge /
-// ToggleRow / DepRow / ActionButton 已提升至 EnvironmentCenterSheet.kt（同包共享）。
-
-@Composable
-private fun LabeledNumber(label: String, value: Int, min: Int, max: Int, onSet: (Int) -> Unit) {
-    var text by remember { mutableStateOf(value.toString()) }
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        OutlinedTextField(
-            value = text,
-            onValueChange = { t ->
-                text = t
-                // 修复静默分叉：越界输入只标红不落盘（原 coerce 后写入但框内仍显示越界值）
-                val n = t.toIntOrNull()
-                if (n != null && n in min..max) onSet(n)
-            },
-            isError = text.toIntOrNull()?.let { it !in min..max } ?: true,
-            supportingText = if (text.toIntOrNull()?.let { it !in min..max } ?: true) {
-                { Text("$min–$max") }
-            } else null,
-            modifier = Modifier.width(88.dp),
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            textStyle = MaterialTheme.typography.bodyMedium
-        )
-    }
-}
-
-@Composable
-private fun CommandListEditor(title: String, items: List<String>, onAdd: (String) -> Unit, onRemove: (String) -> Unit, danger: Boolean) {
-    var input by remember { mutableStateOf("") }
-    Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-    Spacer(Modifier.height(4.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = input,
-            onValueChange = { input = it },
-            modifier = Modifier.weight(1f),
-            singleLine = true,
-            placeholder = { Text(stringResource(R.string.term_cmd_hint), style = MaterialTheme.typography.bodySmall) },
-            textStyle = MaterialTheme.typography.bodySmall
-        )
-        TextButton(onClick = {
-            if (input.isNotBlank()) { onAdd(input.trim()); input = "" }
-        }) { Text(stringResource(R.string.term_add)) }
-    }
-    if (items.isNotEmpty()) {
-        Spacer(Modifier.height(6.dp))
-        androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height((items.size.coerceAtMost(4) * 36).dp)) {
-            items(items) { cmd ->
-                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("• $cmd", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                    TextButton(onClick = { onRemove(cmd) }) { Text(stringResource(R.string.term_remove), color = MaterialTheme.colorScheme.error) }
-                }
-            }
-        }
-    }
-}

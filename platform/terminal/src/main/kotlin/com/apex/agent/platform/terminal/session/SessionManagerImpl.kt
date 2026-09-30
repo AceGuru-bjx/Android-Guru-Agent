@@ -139,6 +139,21 @@ class SessionManagerImpl(
         if (nativeId < 0) {
             return@withLock Result.failure(RuntimeException("TerminalError:PtyUnavailable"))
         }
+        // T87（Ubuntu「输入失败」根因）：「创建成功但 execv 即败」（真机 proot
+        // ENOENT/ELIBBAD/EACCES…）在此当场揭穿 —— native 构造期的 CLOEXEC 报告
+        // 管道已定论。旧链路放行这种会话：进程已死、后续每次 write EIO，
+        // UI 只见「输入失败：TerminalError:WriteFailed」，根因永远不可见。
+        // 现在：关闭死会话 + 结构化失败（带确切 errno 语义）。
+        val spawnError = runCatching { native.nativeGetSpawnError(nativeId) }.getOrNull()
+        if (!spawnError.isNullOrBlank()) {
+            runCatching { native.nativeCloseSession(nativeId) }
+            return@withLock Result.failure(
+                RuntimeException(
+                    "TerminalError:ExecFailed — $spawnError" +
+                        "（argv0=${spec.argv.firstOrNull() ?: "?"}）"
+                )
+            )
+        }
         // 展示语义：LINUX 会话 shell=/bin/bash、cwd=guest -w；LOCAL 与旧路径一致。
         val shellDisplay = spec.shellDisplay ?: spec.argv[0]
         val cwdDisplay = spec.cwdDisplay ?: spec.metadata.guestCwd ?: spec.cwd

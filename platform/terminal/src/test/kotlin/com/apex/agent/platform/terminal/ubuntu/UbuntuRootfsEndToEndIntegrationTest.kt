@@ -274,39 +274,22 @@ class UbuntuRootfsEndToEndIntegrationTest {
     // ─── Level 2: LinuxPRootBackend SpawnSpec → REAL proot → Ubuntu userspace ───
 
     /**
-     * argv 适配：host proot 5.4（upstream）没有 Termux 扩展。
-     *  - 去掉 `--`（5.4 语法：options 直接跟 command）
-     *  - `-E K=V` 对 → 返回给调用方放进 ProcessBuilder env（upstream 继承语义）
+     * argv 适配：host proot 5.x（upstream）与生产 Termux proot 5.1.107 仅两处差异：
+     *  - 去掉 `--`（upstream 自研 argv 解析器不识别；Termux 补丁支持）
+     *  - 去掉 `--kill-on-exit`（upstream 5.1.0 不认；一次性 exec 不需要）
+     * T88：**guest env 不再适配** —— env trampoline（`/usr/bin/env -i K=V …`）
+     * 在 upstream proot 上原样合法，测试真正执行生产 argv 形状（旧适配层把 -E
+     * 偷搬到宿主 env，正是 CI 全绿而设备炸 `unknown option '-E'` 的共犯）。
      */
-    private fun adaptForUpstreamProot(argv: List<String>): Pair<List<String>, Map<String, String>> {
-        val env = mutableMapOf<String, String>()
-        val out = mutableListOf<String>()
-        var i = 0
-        while (i < argv.size) {
-            val a = argv[i]
-            when {
-                a == "--" -> { /* upstream: no separator */ }
-                a == "--kill-on-exit" -> { /* Termux/5.2+ extension; one-shot exec doesn't need it */ }
-                a == "-E" -> {
-                    val kv = argv[i + 1]
-                    val eq = kv.indexOf('=')
-                    if (eq > 0) env[kv.substring(0, eq)] = kv.substring(eq + 1)
-                    i++
-                }
-                else -> out.add(a)
-            }
-            i++
-        }
-        return out to env
-    }
+    private fun adaptForUpstreamProot(argv: List<String>): List<String> =
+        argv.filter { it != "--" && it != "--kill-on-exit" }
 
-    private fun executorWith(adaptedEnv: Map<String, String>): ProotExecutor {
+    private fun executorWith(): ProotExecutor {
         val hostEnv = mutableMapOf<String, String>(
             "PROOT_NO_SECCOMP" to "1",   // glibc 2.39 guest + ptrace seccomp accel conflict
             "PATH" to "/usr/bin:/bin"
         )
         System.getenv("LD_LIBRARY_PATH")?.let { hostEnv["LD_LIBRARY_PATH"] = it }
-        hostEnv.putAll(adaptedEnv)   // guest env rides the inherited env on upstream proot
         return ProotExecutor(hostEnv = { hostEnv })
     }
 
@@ -337,12 +320,13 @@ class UbuntuRootfsEndToEndIntegrationTest {
         }.getOrThrow()
         assertEquals("SpawnSpec argv[0] is the proot binary", prootBinary!!.absolutePath, spec.argv[0])
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(spec.argv)
+        val adaptedArgv = adaptForUpstreamProot(spec.argv)
         // replace the trailing "/bin/bash -i" with the test command
+        // （env trampoline 的 K=V 赋值保留在 bash 之前 —— guest 仍拿到注入的 env）
         val bashIdx = adaptedArgv.indexOfLast { it == "/bin/bash" }
         assertTrue("bash -i found in argv: $adaptedArgv", bashIdx > 0)
         val finalArgv = adaptedArgv.subList(0, bashIdx) + guestCommand
-        val executor = executorWith(guestEnv)
+        val executor = executorWith()
         return executor.execute(
             PRootCommand(AbsolutePath(finalArgv[0]), finalArgv.drop(1)),
             timeoutMs = timeoutMs

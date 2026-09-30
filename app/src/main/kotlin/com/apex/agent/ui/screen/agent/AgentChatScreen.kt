@@ -1,6 +1,5 @@
 package com.apex.agent.ui.screen.agent
 
-import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -72,9 +71,11 @@ import com.apex.agent.core.engine.AgentMode
 import com.apex.agent.ui.component.AdaptiveInputField
 import com.apex.agent.ui.component.AttachButton
 import com.apex.agent.ui.component.AttachmentPreviewBar
+import com.apex.agent.ui.component.FeedbackSeverity
 import com.apex.agent.ui.component.FileOpener
 import com.apex.agent.ui.component.HtmlPreviewDialog
 import com.apex.agent.ui.component.ImageLightbox
+import com.apex.agent.ui.component.LocalFeedbackController
 import com.apex.agent.ui.component.SlashAutoCompleteHost
 import com.apex.agent.ui.component.SlashCommandButton
 import com.apex.agent.ui.component.SlashMenuProvider
@@ -164,10 +165,12 @@ fun AgentChatScreen(
     // #197 GitHub 连接已迁至 Coding 屏（Agent 屏删除 gh 连接入口）：
     // requestGithubConnect 收集器与 GithubTokenDialog 一并移除。
 
-    // 异步动作真实结果反馈（整理入记忆等：原“发起即报成功”，失败也误报）
+    // 异步动作真实结果反馈（v1.4.4 #6：Toast → 统一反馈层 —— 与全局 Snackbar
+    // 视觉一致，支持严重级配色与操作按钮；未包 FeedbackHost 时静默降级）
+    val feedbackController = LocalFeedbackController.current
     LaunchedEffect(Unit) {
         viewModel.uiFeedback.collect { msg ->
-            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            feedbackController.show(msg, FeedbackSeverity.INFO)
         }
     }
 
@@ -772,7 +775,7 @@ fun AgentChatScreen(
         )
     }
 
-    // ═══ 历史对话抽屉：恢复 / 删除 / 清空（数据源为防抖自动归档的会话库）═══
+    // ═══ 历史对话抽屉：恢复 / 删除 / 清空 + 重命名 / 置顶 / 搜索 / 导入导出（v1.4.4 #5）═══
     if (showHistory) {
         ChatHistorySheet(
             sessions = chatSessions,
@@ -780,7 +783,12 @@ fun AgentChatScreen(
             onRestore = { viewModel.restoreChatSession(it) },
             onDelete = { viewModel.deleteChatSession(it) },
             onClearAll = { viewModel.clearAllChatSessions() },
-            onDismiss = { showHistory = false }
+            onDismiss = { showHistory = false },
+            onRename = { id, title -> viewModel.renameChatSession(id, title) },
+            onTogglePin = { viewModel.toggleChatSessionPin(it) },
+            onExport = { ctx, id -> viewModel.exportChatSessionMarkdown(ctx, id) },
+            onImport = { uri -> viewModel.importChatSessionFromUri(uri) },
+            onSearch = { query -> viewModel.applyChatHistorySearch(query) }
         )
     }
     }

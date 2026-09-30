@@ -29,8 +29,9 @@ import java.io.File
  *   -b <workspaceDir>:/workspace
  *   -b <userHomeDir>:/root    # T75: 持久化用户 home（跨 rootfs 版本）
  *   -w /workspace             # guest 初始 cwd（request.cwd 映射）
- *   -E TERM=… -E LANG=… -E HOME=/root -E SHELL=/bin/bash -E PATH=… -E TMPDIR=/tmp
- *   -- /bin/bash -i           # 长生命周期交互 bash
+ *   -- /usr/bin/env -i        # T88: guest env trampoline（proot 5.1.107 兼容，取代 -E）
+ *     TERM=… LANG=… HOME=/root SHELL=/bin/bash PATH=… TMPDIR=/tmp
+ *     /bin/bash -i            # 长生命周期交互 bash
  * ```
  *
  * PTY 语义（§5.2/§11.1）：forkpty 使 proot 成为 session+group leader
@@ -129,7 +130,7 @@ class LinuxPRootBackend(
         //    "/workspace..." 直通；相对路径落 /workspace/<cwd>；其他绝对路径（/root 等）直通。
         val guestCwd = mapGuestCwd(request.cwd)
 
-        // 5. 构造 launch request（guest env 只经 -E；T75: 用户 home → /root 持久化 bind）
+        // 5. 构造 launch request（guest env 经 trampoline；T75: 用户 home → /root 持久化 bind）
         val guestEnv = buildGuestEnv(request.env)
         // T82：home bind + 系统级 bind（/proc /dev /sys，proot-distro 语义）+
         // 共享存储 bind（授权可用时 → guest /sdcard）。
@@ -184,7 +185,7 @@ class LinuxPRootBackend(
     }
 
     /**
-     * guest env 基线（§8.1）—— 只经 -E 进入 rootfs，与宿主 env 无关。
+     * guest env 基线（§8.1）—— 只经 env trampoline 进入 rootfs，与宿主 env 无关。
      * request.env 的显式键最后覆盖（调用方意图优先）。
      *
      * T81 (D-6)：基线直接取自 LinuxEnvironmentManager（唯一权威来源）——

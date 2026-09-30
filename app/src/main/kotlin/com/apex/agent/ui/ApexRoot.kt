@@ -16,8 +16,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Hub
@@ -61,11 +63,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
 import com.apex.agent.ui.component.ContextMeterBar
+import com.apex.agent.ui.component.FeedbackHost
+import com.apex.agent.ui.component.OfflineBanner
 import com.apex.agent.ui.glass.GlassIconButton
 import com.apex.agent.ui.screen.about.AboutScreen
 import com.apex.agent.ui.screen.agent.AgentChatScreen
 import com.apex.agent.ui.screen.agent.AgentChatViewModel
 import com.apex.agent.ui.screen.code.CodeScreen
+import com.apex.agent.ui.screen.diagnostics.DiagnosticsScreen
 import com.apex.agent.ui.screen.glass.GlassLabScreen
 import com.apex.agent.ui.screen.log.LogViewerScreen
 import com.apex.agent.ui.screen.market.MarketScreen
@@ -76,6 +81,7 @@ import com.apex.agent.ui.screen.storage.StorageScreen
 import com.apex.agent.ui.screen.tasks.TaskHistoryScreen
 import com.apex.agent.ui.screen.terminal.TerminalScreen
 import com.apex.agent.ui.screen.templates.TemplateStudioScreen
+import com.apex.agent.ui.screen.usage.UsageDashboardScreen
 import com.apex.agent.ui.screen.vault.VaultScreen
 import kotlinx.coroutines.launch
 
@@ -112,6 +118,10 @@ sealed class DrawerDestination(
     data object Settings : DrawerDestination("settings", R.string.drawer_settings, Icons.Default.Settings)
     // 玻璃实验室 —— 内部 Liquid Glass 验收页（Spec §20：背景变化/网格/高对比文字/移动元素）
     data object GlassLab : DrawerDestination("glasslab", R.string.drawer_glasslab, Icons.Default.BlurOn)
+    // v1.4.4 #6：用量仪表盘 —— 按天/按模型/按会话的 token 消耗分解（持久化账本）
+    data object Usage : DrawerDestination("usage", R.string.drawer_usage, Icons.Default.DataUsage)
+    // v1.4.4 #7：诊断中心 —— 应用/设备信息 + 崩溃记录 + 日志文件 + 一键诊断包
+    data object Diagnostics : DrawerDestination("diagnostics", R.string.drawer_diagnostics, Icons.Default.BugReport)
     // 关于页 —— 固定在抽屉最下方的独立入口（v1.4.3：从设置页「关于」区升级为一级页面；
     // 图标用 Outlined 与 Log 页的 Filled.Info 区分）
     data object About : DrawerDestination("about", R.string.drawer_about, Icons.Outlined.Info)
@@ -140,6 +150,8 @@ private val DestinationSaver = Saver<DrawerDestination, String>(
             DrawerDestination.Log.route -> DrawerDestination.Log
             DrawerDestination.Settings.route -> DrawerDestination.Settings
             DrawerDestination.GlassLab.route -> DrawerDestination.GlassLab
+            DrawerDestination.Usage.route -> DrawerDestination.Usage
+            DrawerDestination.Diagnostics.route -> DrawerDestination.Diagnostics
             DrawerDestination.About.route -> DrawerDestination.About
             else -> DrawerDestination.Agent
         }
@@ -161,6 +173,9 @@ fun ApexRoot() {
     val agentVm: AgentChatViewModel = hiltViewModel()
     val agentState by agentVm.uiState.collectAsStateWithLifecycle()
 
+    // ═══ v1.4.4 #6：全局网络状态 —— 离线横幅（所有页面顶部）═══
+    val isOnline by agentVm.networkMonitor.isOnline.collectAsStateWithLifecycle()
+
     // ═══ UX-2：系统返回键导航链 ═══
     // 非抽屉一级页（Settings/Terminal/Skill…）按返回 → 回 Agent 聊天主页；
     // Agent 页不拦截（交系统默认行为）。currentDestination 为 rememberSaveable
@@ -174,6 +189,10 @@ fun ApexRoot() {
         scope.launch { drawerState.close() }
     }
 
+    // ═══ v1.4.4 #6：统一反馈层 —— 全树提供 LocalFeedbackController ═══
+    // 包在最外层：任何页面的 Toast/Snackbar 反馈都走统一视觉（严重级配色 +
+    // SnackbarHost 底部弹出）。子树未消费无副作用；Noop 默认保证预览可用。
+    FeedbackHost {
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -243,6 +262,9 @@ fun ApexRoot() {
             // 把 IME insets 并入内容内边距，此处再 .imePadding() 会双重叠加（键盘弹出
             // 时输入栏被抬得过高）。去掉冗余 .imePadding()，保留 contentWindowInsets 路径。
             Column(modifier = Modifier.padding(padding)) {
+                // ═══ v1.4.4 #6：离线横幅（断网即现，恢复即隐；不影响任何页面布局）═══
+                OfflineBanner(isOnline = isOnline)
+
                 // ═══ 顶部上下文仪表盘长条（全局）═══
                 ContextMeterBar(
                     usedTokens = agentState.contextUsedTokens,
@@ -272,6 +294,8 @@ fun ApexRoot() {
                         DrawerDestination.Permissions -> PermissionsScreen()
                         DrawerDestination.Vault -> VaultScreen()
                         DrawerDestination.Log -> LogViewerScreen()
+                        DrawerDestination.Usage -> UsageDashboardScreen()
+                        DrawerDestination.Diagnostics -> DiagnosticsScreen()
                         DrawerDestination.Settings -> SettingsScreen(
                             // P2-6（6-c）：最小修复双顶栏返回链——SettingsScreen 自带
                             // TopAppBar 的返回键原为空操作（默认 onBack={}）；接回 Agent 页。
@@ -283,5 +307,6 @@ fun ApexRoot() {
                 }
             }
         }
+    }
     }
 }

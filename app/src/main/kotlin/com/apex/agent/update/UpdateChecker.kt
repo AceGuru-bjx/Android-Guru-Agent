@@ -4,12 +4,19 @@ import android.os.Build
 import com.apex.agent.core.logging.AppLogger
 import com.apex.agent.core.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.resume
 
 /**
  * 应用内更新检查 —— 双仓库发布架构的客户端侧。
@@ -20,54 +27,50 @@ import java.util.concurrent.TimeUnit
  * 设计约束：
  * - **零鉴权**：清单走 raw.githubusercontent CDN（公开仓库），无需任何 Token；
  * - **零新依赖**：OkHttp + kotlinx.serialization 均为项目既有栈；
- * - **三态结果**：[UpdateCheckResult] 密封层级让 UI 直接按类型渲染，无散落布尔。
+ * - **三态结果**：[UpdateCheckResult] 密封层级让 UI 直接按类型渲染，无散落布尔；
+ * - **共享客户端**：默认取 [UpdateHttp.client]（连接池/线程池进程级共享，
+ *   避免每次进页新建 OkHttp 实例堆积空闲连接）；
+ * - **可取消**：[check] 用 enqueue + invokeOnCancellation —— 离开页面即断流，
+ *   不再占用 IO 线程等到超时。
  */
 class UpdateChecker(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient = UpdateHttp.client
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
-     * 拉取清单并比对版本。IO 切换在内部完成，调用方只需在协程作用域内调用。
+     * 拉取清单并比对版本。协程取消会同步 cancel 底层 OkHttp 调用；
      * 网络异常一律折叠为 [UpdateCheckResult.Failed] —— 检查更新永不打断用户流程。
      */
-    suspend fun check(currentVersionCode: Int): UpdateCheckResult = withContext(Dispatchers.IO) {
-        runCatching {
-            val request = Request.Builder()
-                .url(UPDATE_MANIFEST_URL)
-                .header("Cache-Control", "no-cache")
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) error("HTTP ${response.code}")
-                val body = response.body?.string() ?: error("empty manifest body")
-                json.decodeFromString<UpdateManifest>(body)
+    suspend fun check(currentVersionCode: Int): UpdateCheckResult = runCatching {
+        val request = Request.Builder()
+            .url(UPDATE_MANIFEST_URL)
+            .header("Cache-Control", "no-cache")
+            .build()
+        val body = withContext(Dispatchers.IO) { client.awaitBody(request) }
+        json.decodeFromString<UpdateManifest>(body)
+    }.fold(
+        onSuccess = { manifest ->
+            AppLogger.instance.info(
+                LogCategory.SYSTEM,
+                "UpdateChecker",
+                "更新清单拉取成功：远端 v${manifest.versionName}(${manifest.versionCode}) / 本地 ($currentVersionCode)"
+            )
+            if (manifest.versionCode > currentVersionCode) {
+                UpdateCheckResult.Available(manifest)
+            } else {
+                UpdateCheckResult.UpToDate(manifest)
             }
-        }.fold(
-            onSuccess = { manifest ->
-                AppLogger.instance.info(
-                    LogCategory.SYSTEM,
-                    "UpdateChecker",
-                    "更新清单拉取成功：远端 v${manifest.versionName}(${manifest.versionCode}) / 本地 ($currentVersionCode)"
-                )
-                if (manifest.versionCode > currentVersionCode) {
-                    UpdateCheckResult.Available(manifest)
-                } else {
-                    UpdateCheckResult.UpToDate(manifest)
-                }
-            },
-            onFailure = { e ->
-                AppLogger.instance.warn(
-                    LogCategory.SYSTEM,
-                    "UpdateChecker",
-                    "更新检查失败：${e.message}"
-                )
-                UpdateCheckResult.Failed(e.message ?: e.javaClass.simpleName)
-            }
-        )
-    }
+        },
+        onFailure = { e ->
+            AppLogger.instance.warn(
+                LogCategory.SYSTEM,
+                "UpdateChecker",
+                "更新检查失败：${e.message}"
+            )
+            UpdateCheckResult.Failed(e.message ?: e.javaClass.simpleName)
+        }
+    )
 
     /**
      * 按设备 ABI 选最合适的下载地址：arm64 机型出纯净包（~300MB），
@@ -113,6 +116,46 @@ class UpdateChecker(
 /** 发布仓库 main 分支上版本清单的固定地址（由开发仓库 CI 自动维护）。 */
 const val UPDATE_MANIFEST_URL =
     "https://raw.githubusercontent.com/AceGuru-mjh/Android-Guru-Agent-Release/main/version.json"
+
+/**
+ * 更新链路共享 OkHttp 客户端（进程级单例）。
+ *
+ * OkHttp 官方要求客户端实例共享：每个实例自带连接池 + dispatcher 线程池，
+ * 页面级 remember 会在反复进出页时堆积空闲连接/线程（最长滞留 5 分钟）。
+ * 更新检查与镜像测速共用本实例（测速的“不跟随重定向”语义在调用点
+ * 用 newBuilder 派生，不另起炉灶）。
+ */
+object UpdateHttp {
+    val client: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .build()
+}
+
+/**
+ * 可取消的同步化请求：协程取消 → call.cancel()，响应体自动关闭。
+ * （顶级扩展——object 内声明的扩展函数同包也不自动解析，需 import 成员路径）
+ */
+private suspend fun OkHttpClient.awaitBody(request: Request): String =
+    suspendCancellableCoroutine { cont ->
+        val call = newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    val text = runCatching {
+                        if (!it.isSuccessful) error("HTTP ${it.code}")
+                        it.body?.string() ?: error("empty manifest body")
+                    }
+                    cont.resumeWith(text)
+                }
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+        })
+    }
 
 /** 更新检查结果三态 —— UI 按类型渲染，无需解析错误码。 */
 sealed interface UpdateCheckResult {

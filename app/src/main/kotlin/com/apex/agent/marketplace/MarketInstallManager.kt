@@ -8,6 +8,7 @@ import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.core.tools.mcp.McpManager
 import com.apex.agent.core.tools.mcp.McpServerConfig
 import com.apex.agent.core.tools.skill.SafeZipExtractor
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import com.apex.agent.github.GithubTokenManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -43,6 +44,7 @@ import javax.inject.Singleton
 class MarketInstallManager @Inject constructor(
     @ApplicationContext private val context: android.content.Context,
     private val skillRegistry: SkillRegistry,
+    private val skillActivation: SkillActivationStore,
     private val mcpManager: McpManager,
     private val connectorRegistry: ConnectorRegistry,
     private val httpClient: OkHttpClient,
@@ -59,10 +61,17 @@ class MarketInstallManager @Inject constructor(
         val htmlUrl: String
     )
 
-    // ═══ Skill：JSON 内容安装 ═══
+    // ═══ Skill：JSON 内容安装（全部安装路径的收口点：URL/模板/文件/魔搭/GitHub/ClawHub 都汇到这里）═══
+    // 市场热加载闭环：install → registry 落盘 + changes 广播（工具表/目录热更）
+    // → 这里再进激活集 → 下一轮系统提示词即携带新技能方法论，零重启零手动。
     suspend fun installSkillFromJson(content: String): Result<String> =
         withContext(Dispatchers.IO) {
-            skillRegistry.install(content).map { "已安装 Skill：${it.name}（${it.id}）" }
+            skillRegistry.install(content).map { manifest ->
+                // 安装即装备：用户从市场装技能的意图就是要用；不激活的话
+                // 渐进披露目录里只是多一行摘要，方法论仍是「未装载」。
+                skillActivation.activate(manifest.id)
+                "已安装并装备 Skill：${manifest.name}（${manifest.id}），下一轮对话即生效"
+            }
         }
 
     /**

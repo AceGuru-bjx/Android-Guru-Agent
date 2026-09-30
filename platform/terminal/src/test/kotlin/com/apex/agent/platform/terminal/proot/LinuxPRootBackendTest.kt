@@ -90,7 +90,7 @@ class LinuxPRootBackendTest {
     // ─── argv 契约（§5.2） ───
 
     @Test
-    fun `argv is proot -r rootfs -0 kill-on-exit binds home+workspace -w guestCwd -E env -- bash -i`() = runBlocking {
+    fun `argv is proot -r rootfs -0 kill-on-exit binds home+workspace -w guestCwd env-trampoline -- bash -i`() = runBlocking {
         val wsRoot = File(tmp.root, "ws")
         val homeRoot = File(tmp.root, "home")
         // T82 合并后修复：默认 systemBinds=STANDARD 会追加 /proc /dev /sys bind，
@@ -117,14 +117,20 @@ class LinuxPRootBackendTest {
         val wIdx = argv.indexOf("-w")
         assertTrue(wIdx > 0)
         assertEquals("/workspace", argv[wIdx + 1])
-        // 命令终结符 + bash -i
+        // 命令终结符 + env trampoline + bash -i（T88：不再有 -E）
         val sepIdx = argv.indexOf("--")
         assertTrue(sepIdx > 0)
-        assertEquals(listOf("/bin/bash", "-i"), argv.subList(sepIdx + 1, argv.size))
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, argv[sepIdx + 1])
+        assertEquals(PRootEnvTrampoline.CLEAN_ENV_FLAG, argv[sepIdx + 2])
+        assertEquals(listOf("/bin/bash", "-i"), argv.takeLast(2))
+        assertTrue(
+            "argv must not carry 5.1.107-incompatible flags: $argv",
+            PRootArgvContract.legacyIncompatibleFlags(argv).isEmpty()
+        )
     }
 
     @Test
-    fun `guest env goes through -E flags with request overrides last`() = runBlocking {
+    fun `guest env goes through env trampoline with request overrides last`() = runBlocking {
         val b = backend()
         val spec = b.prepare(
             SessionSpawnRequest(
@@ -134,15 +140,28 @@ class LinuxPRootBackendTest {
             )
         ).getOrThrow()
 
-        val eFlags = spec.argv.zipWithNext().filter { (a, _) -> a == "-E" }.map { it.second }
+        // T88：guest env 在 "--" 后的 env trampoline 段里（env -i K=V … bash -i）
+        val sepIdx = spec.argv.indexOf("--")
+        assertTrue(sepIdx > 0)
+        val guestCmd = spec.argv.subList(sepIdx + 1, spec.argv.size)
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, guestCmd[0])
+        assertEquals(PRootEnvTrampoline.CLEAN_ENV_FLAG, guestCmd[1])
+        // trampoline 段尾部是 bash -i；其余元素全是 K=V 赋值
+        val assignments = guestCmd.subList(2, guestCmd.size - 2)
+        assertTrue("trampoline 段只含 K=V 赋值: $guestCmd", assignments.all { it.contains('=') })
         // 基线六项 + 调用方两项（HOME 覆盖）
-        assertTrue("TERM via -E", eFlags.any { it == "TERM=xterm-256color" })
-        assertTrue("LANG via -E", eFlags.any { it == "LANG=C.UTF-8" })
-        assertTrue("SHELL via -E", eFlags.any { it == "SHELL=/bin/bash" })
-        assertTrue("PATH via -E", eFlags.any { it.startsWith("PATH=/usr") })
-        assertTrue("TMPDIR via -E", eFlags.any { it == "TMPDIR=/tmp" })
-        assertTrue("request override wins", eFlags.any { it == "HOME=/home/agent" })
-        assertTrue("custom request var", eFlags.any { it == "CUSTOM=42" })
+        assertTrue("TERM in trampoline", assignments.any { it == "TERM=xterm-256color" })
+        assertTrue("LANG in trampoline", assignments.any { it == "LANG=C.UTF-8" })
+        assertTrue("SHELL in trampoline", assignments.any { it == "SHELL=/bin/bash" })
+        assertTrue("PATH in trampoline", assignments.any { it.startsWith("PATH=/usr") })
+        assertTrue("TMPDIR in trampoline", assignments.any { it == "TMPDIR=/tmp" })
+        assertTrue("request override wins", assignments.any { it == "HOME=/home/agent" })
+        assertTrue("custom request var", assignments.any { it == "CUSTOM=42" })
+        // T88 回归锁：-E 永不回潮（捆绑 proot 5.1.107 会直接拒启）
+        assertTrue(
+            "no -E ever: ${spec.argv}",
+            PRootArgvContract.legacyIncompatibleFlags(spec.argv).isEmpty()
+        )
     }
 
     @Test

@@ -72,6 +72,15 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
                     sessionTotalTokens = it.sessionTotalTokens + event.totalTokens
                 )
             }
+            // v1.4.4 #6：真实 usage 落盘进用量账本（仪表盘/按天/按模型分解的数据源）。
+            // fire-and-forget：账本内部自持 IO 协程异步追加，失败不影响 UI 路径。
+            val modelId = profiles.value.firstOrNull { it.id == currentProfileId.value }?.modelId ?: ""
+            usageLedger.record(
+                sessionId = currentHistorySessionId,
+                modelId = modelId,
+                promptTokens = event.promptTokens.toLong(),
+                completionTokens = event.completionTokens.toLong()
+            )
         }
 
         // ═══ Plan模式 ═══
@@ -414,6 +423,23 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
                     contextUsedTokens = metrics.second ?: it.contextUsedTokens,
                     contextMaxTokens = metrics.third ?: it.contextMaxTokens
                 )
+            }
+            // ═══ v1.4.4 #4：任务完成通知（App 在后台时才提醒；前台静音）═══
+            // 判定顺序：设置开关 → 用户是否在场 → 通知权限；三者全过才发射。
+            // 通知是增益路径，任何一环不满足都静默跳过（绝不阻塞 Complete 收尾）。
+            runCatching {
+                val settingsSnapshot = settingsRepository.agentSettings.value
+                if (settingsSnapshot.taskCompletionNotify &&
+                    !foregroundTracker.isForeground &&
+                    notifications.canPost(context)
+                ) {
+                    val triggerText = _uiState.value.messages
+                        .lastOrNull { it is AgentUiMessage.User }
+                        ?.let { (it as AgentUiMessage.User).text?.trim()?.take(40) }
+                    val title = triggerText?.takeIf { it.isNotBlank() }
+                        ?: str(com.apex.agent.R.string.notif_task_done_fallback_title)
+                    notifications.notifyTaskDone(context, title, event.summary)
+                }
             }
         }
         is AgentEvent.Aborted -> {

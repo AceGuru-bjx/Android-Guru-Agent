@@ -6,6 +6,7 @@ import com.apex.agent.core.tools.mcp.McpException
 import com.apex.agent.core.tools.mcp.McpProcessHandle
 import com.apex.agent.core.tools.mcp.McpProcessLauncher
 import com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager
+import com.apex.agent.platform.terminal.proot.PRootEnvTrampoline
 import com.apex.agent.platform.terminal.proot.SharedStorageBridge
 import com.apex.agent.platform.terminal.proot.SystemBindProfile
 import com.apex.agent.platform.terminal.workspace.GuestUserHome
@@ -214,7 +215,13 @@ class ProotMcpProcessLauncher(
         sharedStorage.toBind()?.let { add(it.hostPath.value to it.guestPath) }
     }
 
-    /** 完整 argv：libproot + -r/-0/--kill-on-exit + binds + -w + -E 序列 + 命令。 */
+    /**
+     * 完整 argv：libproot + -r/-0/--kill-on-exit + binds + -w + env trampoline + 命令。
+     *
+     * T88 根治：guest env 不再经 proot `-E`（捆绑的 5.1.107 不支持，运行时报
+     * `proot error: unknown option '-E'`），改用 [PRootEnvTrampoline]
+     * 的 `/usr/bin/env -i K=V … cmd` 形态（Termux proot-distro 同款）。
+     */
     internal fun buildArgv(
         rootfs: File,
         command: List<String>,
@@ -232,11 +239,8 @@ class ProotMcpProcessLauncher(
         }
         argv.add("-w")
         argv.add(GUEST_CWD)
-        for ((key, value) in guestEnv(requestEnv)) {
-            argv.add("-E")
-            argv.add("$key=$value")
-        }
         argv.add("--")
+        argv.addAll(PRootEnvTrampoline.guestPrefix(guestEnv(requestEnv)))
         argv.addAll(command)
         return argv
     }
@@ -265,7 +269,7 @@ class ProotMcpProcessLauncher(
         return env
     }
 
-    /** TM6 参数注入守卫（与 PRootCommandBuilderImpl 的 -E 校验同款，键更严）。 */
+    /** TM6 参数注入守卫（与 PRootEnvTrampoline 的 key 校验同语义，键更严）。 */
     private fun validateGuestEnvEntry(key: String, value: String) {
         val badKey = key.isEmpty() || key.contains('=') ||
             key.contains('\n') || key.contains('\u0000')
@@ -275,7 +279,7 @@ class ProotMcpProcessLauncher(
             )
         }
         if (value.contains('\n') || value.contains('\u0000')) {
-            throw McpException("沙箱环境变量 $key 的值包含换行或 NUL，无法经 proot -E 传入")
+            throw McpException("沙箱环境变量 $key 的值包含换行或 NUL，无法经 env trampoline 传入")
         }
     }
 

@@ -81,6 +81,7 @@ import com.apex.agent.ui.screen.agent.QuestionCard
 import com.apex.agent.ui.screen.agent.ToolRef
 import com.apex.agent.ui.screen.agent.ToolkitChipsRow
 import com.apex.agent.ui.screen.agent.ToolkitRingButton
+import com.apex.agent.core.code.stream.StreamEntry
 import com.apex.agent.core.code.stream.StreamToolCall
 import com.apex.agent.ui.screen.agent.toolkit.OutputFormat
 import com.apex.agent.ui.screen.code.editor.CodeEditorPanel
@@ -129,8 +130,10 @@ fun CodeScreen(
 
     var showNewWorkspace by remember { mutableStateOf(false) }
     var showThinkingGuide by remember { mutableStateOf(false) }
-    // 胶囊详情弹层选中项（null = 关闭）
-    var selectedToolCall by remember { mutableStateOf<StreamToolCall?>(null) }
+    // 胶囊详情弹层选中项（存 id 不存对象：StreamToolCall 是不可变快照，
+    // 每 25ms 批次按 index 替换新实例——存对象会冻结在点击瞬间，
+    // 状态/耗时/Diff 永不更新；存 id 每次重组从活快照重查）
+    var selectedToolCallId by remember { mutableStateOf<String?>(null) }
     // 终端面板折叠态（默认展开——BASH 是 Coding 工作流主舞台）
     var terminalCollapsed by remember { mutableStateOf(false) }
 
@@ -182,7 +185,7 @@ fun CodeScreen(
             CodeStreamTimeline(
                 snapshot = state.stream,
                 isStreaming = state.isRunning,
-                onToolClick = { call -> selectedToolCall = call }
+                onToolClick = { call -> selectedToolCallId = call.id }
             )
         }
 
@@ -312,11 +315,21 @@ fun CodeScreen(
     }
 
     // 胶囊详情弹层（分族路由：BASH→终端全文 / EDIT→Diff / GREP→命中列表）
-    selectedToolCall?.let { call ->
+    // —— 从活快照按 id 重查（含折叠进轮次卡内的胶囊），状态实时翻转
+    val selectedCall: StreamToolCall? = selectedToolCallId?.let { id ->
+        state.stream.entries.asSequence().mapNotNull { e ->
+            when (e) {
+                is StreamEntry.ToolCapsuleEntry -> e.call
+                is StreamEntry.VerifyCycleEntry -> e.calls.firstOrNull { it.id == id }
+                else -> null
+            }
+        }.firstOrNull { it.id == id }
+    }
+    selectedCall?.let { call ->
         CodeToolDetailSheet(
             call = call,
             terminalFallback = viewModel.terminalLogOf(call.id),
-            onDismiss = { selectedToolCall = null }
+            onDismiss = { selectedToolCallId = null }
         )
     }
 

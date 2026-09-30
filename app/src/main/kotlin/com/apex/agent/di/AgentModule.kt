@@ -19,6 +19,7 @@ import com.apex.agent.core.llm.runtime.ModelRuntime
 import com.apex.agent.core.tools.ToolExecutor
 import com.apex.agent.core.tools.ToolRegistry
 import com.apex.agent.core.tools.catalog.ToolActivationStore
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import com.apex.agent.ui.screen.settings.SettingsRepository
 import com.apex.agent.ui.screen.settings.activeRole
@@ -178,7 +179,10 @@ object AgentModule {
         toolActivation: ToolActivationStore,
         // Issue #165：生命周期钩子派发口（SessionStart/UserPromptSubmit/Stop/
         // PreCompact/SessionEnd；null 注入零开销，此处生产性传非空）
-        hookRunner: HookRunner
+        hookRunner: HookRunner,
+        // 技能渐进披露：会话技能激活存储（目录 + 激活双层注入；与
+        // skill_activate 工具/斜杠指令/自动装备器共享同一单例）
+        skillActivation: SkillActivationStore
     ): AgentEngine {
         return ApexAgentEngine(
             llmClient = llmClient,
@@ -194,7 +198,8 @@ object AgentModule {
             connectedServicesProvider = connectedServicesProvider,
             modelRuntime = modelRuntime,
             toolActivation = toolActivation,
-            hookRunner = hookRunner
+            hookRunner = hookRunner,
+            skillActivation = skillActivation
         )
     }
 

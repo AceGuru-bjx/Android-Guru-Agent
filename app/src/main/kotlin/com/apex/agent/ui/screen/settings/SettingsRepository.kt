@@ -483,6 +483,13 @@ data class AgentSettings(
     val screenshotQuality: String = "auto",   // auto | low | medium | high
     val maxScreenshots: Int = 3,
 
+    /**
+     * v1.4.4 #4：任务完成通知（✅已接线——AgentChatEventApplier Complete 钩子）。
+     * App 在后台时任务/轮次跑完发系统通知（高优先级渠道，5 分钟自动消失，
+     * 前台静音）；关闭则永不打扰。
+     */
+    val taskCompletionNotify: Boolean = true,
+
     // ── 上下文压缩（对应 AgentConfig，重启应用/新会话后生效）──
     val maxContextTokens: Int = 128_000,
     val compressionThreshold: Float = 0.8f,   // 0.5..0.95

@@ -327,4 +327,27 @@
     <string name="html_preview_refresh">重新加载</string>
     <string name="html_preview_close">关闭预览</string>
     <string name="html_preview_load_failed">文件读取失败</string>
+
+    <!-- ═══ v1.4.4 #5：会话操作补全 —— 搜索/置顶/重命名/导出导入/分享接收 ═══ -->
+    <string name="chat_session_search_hint">搜索标题与消息内容</string>
+    <string name="chat_session_search_empty">没有匹配的会话</string>
+    <string name="chat_session_pinned_group">置顶</string>
+    <string name="chat_session_recent_group">最近会话</string>
+    <string name="chat_session_pin">置顶会话</string>
+    <string name="chat_session_unpin">取消置顶</string>
+    <string name="chat_session_more">更多操作</string>
+    <string name="chat_session_rename">重命名</string>
+    <string name="chat_session_rename_title">重命名会话</string>
+    <string name="chat_session_rename_hint">会话标题</string>
+    <string name="chat_session_rename_confirm">保存</string>
+    <string name="chat_session_renamed">已重命名为 %1$s</string>
+    <string name="chat_session_rename_failed">重命名失败（标题为空或会话不存在）</string>
+    <string name="chat_session_export">导出为 Markdown</string>
+    <string name="chat_session_export_chooser">分享会话</string>
+    <string name="chat_session_export_not_found">会话不存在或为空</string>
+    <string name="chat_session_export_failed">导出失败</string>
+    <string name="chat_session_import">导入会话</string>
+    <string name="chat_session_import_failed">导入失败（文件无效或无消息）</string>
+    <string name="chat_session_imported">会话已导入</string>
+    <string name="chat_share_received">已接收分享内容 —— 确认后再发送</string>
 </resources>

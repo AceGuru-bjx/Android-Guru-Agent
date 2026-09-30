@@ -129,6 +129,15 @@ data class UserConfigField(
     val description: String = ""
 )
 
+/** 技能目录摘要（渐进披露）：提示词里的一行式清单条目。 */
+data class SkillDigest(
+    val id: String,
+    val name: String,
+    /** 一行摘要（description 首句，超长截断）。 */
+    val summary: String,
+    val tags: List<String> = emptyList()
+)
+
 /**
  * Skill 注册表
  * 管理所有已安装的 Skill（持久化到文件系统）
@@ -433,7 +442,7 @@ class SkillRegistry(
     }
 
     /**
-     * 获取所有 Prompt 注入
+     * 获取所有 Prompt 注入（全量——旧行为，兼容未接入渐进披露的调用方）。
      */
     fun getPromptInjections(): List<String> {
         return synchronized(lock) {
@@ -464,6 +473,59 @@ class SkillRegistry(
         val all = getInstalled()
         if (scope.isNullOrBlank()) return all
         return all.filter { it.manifest.scope == "all" || it.manifest.scope == scope }
+    }
+
+    /**
+     * 渐进披露：仅返回「已激活且启用」技能的 Prompt 注入。
+     *
+     * 技能库扩到 40+ 后全量注入会撞请求体积上限；激活集外的技能只经
+     * [getSkillDigests] 目录（一行摘要）暴露，需要时由模型调 skill_activate
+     * 或 [SkillAutoActivator] 自动装备。激活 id 里已卸载/禁用的条目自然过滤。
+     *
+     * #197 双工位：[scope] 非空时在激活集上再按工位作用域过滤
+     * （"agent" | "coding"；"all" 技能两工位可见）。null = 不过滤（main 行为）。
+     */
+    fun getActivePromptInjections(activeIds: Set<String>, scope: String? = null): List<String> {
+        if (activeIds.isEmpty()) return emptyList()
+        return synchronized(lock) {
+            activeIds.asSequence()
+                .mapNotNull { installedSkills[it] }
+                .filter { it.enabled }
+                .filter { scope.isNullOrBlank() || it.manifest.scope == "all" || it.manifest.scope == scope }
+                .mapNotNull { it.manifest.promptInjection }
+                .toList()
+        }
+    }
+
+    /**
+     * 技能目录摘要（全部已安装且启用的技能，含未激活）：
+     * 提示词「Skill Catalog」段的渲染源。summary 取 description 首句并截断，
+     * 保证目录段体积与技能数量线性且每条 ≤ 一行。
+     *
+     * #197 双工位：[scope] 非空时目录同样按工位作用域过滤。
+     */
+    fun getSkillDigests(scope: String? = null): List<SkillDigest> {
+        return synchronized(lock) {
+            installedSkills.values
+                .filter { it.enabled }
+                .filter { scope.isNullOrBlank() || it.manifest.scope == "all" || it.manifest.scope == scope }
+                .map { skill ->
+                    SkillDigest(
+                        id = skill.manifest.id,
+                        name = skill.manifest.name,
+                        summary = firstSentence(skill.manifest.description),
+                        tags = skill.manifest.tags.take(4)
+                    )
+                }
+                .sortedBy { it.id }
+        }
+    }
+
+    /** description 首句（首个句号/分号前），超 72 字符截断加省略号。 */
+    private fun firstSentence(description: String): String {
+        val cut = description.indexOfFirst { it == '。' || it == '；' || it == ';' }
+        val sentence = if (cut > 0) description.substring(0, cut) else description
+        return if (sentence.length > 72) sentence.take(72) + "…" else sentence
     }
 
     /**

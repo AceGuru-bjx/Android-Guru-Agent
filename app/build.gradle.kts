@@ -35,8 +35,8 @@ android {
         // v1.4.2：双仓库发布架构升级 —— PR 合并即自动发版（release.yml push main 触发）。
         // CI 通过 -PapexVersionName / -PapexVersionCode 注入最终版本（版本号冲突时
         // 自动追加构建序号，如 1.4.2.1，并自动递增 versionCode）；本地构建走源码值。
-        versionCode = (project.findProperty("apexVersionCode") as String?)?.toInt() ?: 18
-        versionName = (project.findProperty("apexVersionName") as String?) ?: "1.4.3"
+        versionCode = (project.findProperty("apexVersionCode") as String?)?.toInt() ?: 19
+        versionName = (project.findProperty("apexVersionName") as String?) ?: "1.4.4"
 
         ndk {
             // T83: 发布 arm64 纯净包（-PapexAbi=arm64-v8a）—— 内置 rootfs 伪 .so
@@ -118,6 +118,10 @@ dependencies {
     // P83: Terminal UI 直接消费 TerminalRenderSnapshot/RenderCell（styled grid 渲染）。
     // platform:terminal 对 :terminal-emulator 是 implementation（不传递），app 需显式声明。
     implementation(project(":terminal-emulator"))
+    // T88 (2-a): Termux 级自定义 View 渲染层（Canvas 直绘 / 滚动 / 选区 / IME）。
+    // terminal-view 对 :terminal-emulator 同为 implementation（不传递），app 的
+    // 显式 terminal-emulator 依赖在上方已具备 —— 两边模型单一事实源。
+    implementation(project(":terminal-view"))
     implementation(project(":platform:cs-mem"))
     // Coding 模式（与 Agent 模式同级别）：编码工具集 / 编码引擎 / 工作区管理
     implementation(project(":core:code-tools"))

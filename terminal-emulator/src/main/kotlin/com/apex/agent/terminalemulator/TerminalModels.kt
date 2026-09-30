@@ -38,7 +38,12 @@ data class TerminalScreenSnapshot(
     val title: String?,
     val renderedText: String,
     /** T82: saved scrollback depth (main screen; 0 on alt screen). */
-    val scrollbackLineCount: Int = 0
+    val scrollbackLineCount: Int = 0,
+    /**
+     * v0.3（OSC 7 / 9;9）：guest 上报的当前工作目录（解码后路径）。
+     * null = 未上报 —— 宿主 cwd 展示 / Agent 上下文按需消费。
+     */
+    val guestCwd: String? = null
 )
 
 /**
@@ -51,13 +56,17 @@ data class TerminalScreenSnapshot(
  * @param flags [RenderCell] FLAG_* bit set (bold/dim/italic/underline/blink/hidden/strike/inverse/wide)
  * @param link  OSC 8 hyperlink id — 1-based index into the session's URI table
  *              (0 = no link). v0.2 native capability; the Kotlin fallback never sets it.
+ * @param underlineColorLong SGR 58 下划线描色 —— 0xAARRGGBB，**0 = 主题默认**（未设置）。
+ *              v0.3 新增可选字段：既有构造点（TerminalCore / NativeVtCore / 测试 fake）
+ *              全部走默认值编译不受影响；native 编组侧不读取该字段（Kotlin 渲染专用）。
  */
 data class RenderCell(
     val text: String,
     val fg: Long,
     val bg: Long,
     val flags: Int,
-    val link: Int = 0
+    val link: Int = 0,
+    val underlineColorLong: Long = 0L
 ) {
     companion object {
         const val FLAG_BOLD = 1
@@ -129,5 +138,25 @@ data class TerminalRenderSnapshot(
     /** DECKPAM（ESC = / ESC >）：小键盘应用模式（数字键 SS3 p..y）。 */
     val applicationKeypad: Boolean = false,
     /** 屏内实际出现的 OSC 8 链接 id → URI（UI 点击直查；悬空 id 不在表中）。 */
-    val linkTable: Map<Int, String> = emptyMap()
+    val linkTable: Map<Int, String> = emptyMap(),
+    /**
+     * v0.3（OSC 10）guest 动态前景色 —— 0xFFRRGGBB，**null = guest 未设置**（宿主回退主题色）。
+     * vim `set termguicolors` + `highlight Normal guifg=…` 走此通道；渲染端仅在非 null 时覆盖。
+     */
+    val dynamicForeground: Long? = null,
+    /** v0.3（OSC 11）guest 动态背景色 —— 语义同 [dynamicForeground]。 */
+    val dynamicBackground: Long? = null,
+    /** v0.3（OSC 12）guest 动态光标描色 —— 语义同 [dynamicForeground]。 */
+    val dynamicCursorColor: Long? = null,
+    /**
+     * v0.3（OSC 7 / OSC 9;9）guest 工作目录（已解码路径，如 `/root/project`）。
+     * null = guest 未上报。宿主据此显示会话 cwd / 供 Agent 上下文引用。
+     */
+    val guestCwd: String? = null,
+    /**
+     * v0.3（CSI 8;rows;cols t）guest 请求的窗口尺寸 —— **只上报，不直接改缓冲**
+     *（真实 resize 由宿主量算后回灌 [TerminalCore.resize]）。null = 无待处理请求。
+     * 消费方式：读快照（peek，不清除）或 [TerminalCore.drainResizeRequest]（消费式）。
+     */
+    val requestedResize: Pair<Int, Int>? = null
 )

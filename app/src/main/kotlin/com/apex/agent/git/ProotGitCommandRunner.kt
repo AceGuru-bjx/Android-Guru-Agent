@@ -82,7 +82,7 @@ private const val MAX_STREAM_CHARS = 1_048_576
  * ## env 三层分离（G4，与 PRootHostEnvironment 不变量一致）
  * - proot 宿主 env（[hostEnv]：PROOT_TMP_DIR / PROOT_LOADER /
  *   LD_LIBRARY_PATH / PATH 等）经 ProcessBuilder 整体替换传入；
- * - guest env 只经 argv 的 -E 传入：PATH（LinuxEnvironmentManager.GUEST_PATH
+ * - guest env 只经 env trampoline 传入：PATH（LinuxEnvironmentManager.GUEST_PATH
  *   单源）、TERM=dumb（git 无终端交互）、HOME=/root（与终端会话共享持久化
  *   home——git config --global 互通）、LANG=C.UTF-8（git 报错保持英文原文，
  *   解析 "not a git repository" 等特征串才稳定）、PWD/TMPDIR 对齐 -w；
