@@ -1,5 +1,6 @@
 package com.apex.agent.ui.screen.agent
 
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.slash.SlashCommandParser
 import com.apex.agent.slash.SlashCommandRouter
@@ -12,8 +13,13 @@ import com.apex.agent.slash.SlashRouteContext
  *
  * 解析与路由职责已下沉到 [SlashCommandParser] + [SlashCommandRouter]，
  * 本对象只负责：
- * - 把当前 GitHub 连接状态快照成 [SlashRouteContext] 传给路由器；
+ * - 把当前 GitHub 连接状态与 MCP 服务器连接快照装进 [SlashRouteContext] 传给路由器；
  * - 把路由结果（systemMessage + agentPrompt）整理成 [Result] 交给调用方。
+ *
+ * v2：补齐 mcpConnected 快照 —— 旧实现只装 GitHub 态，`/mcp:<id>` 路由时
+ * `command.id in context.mcpConnected` 恒 false，永远拿不到「用 mcp_call 调
+ * server=<id> 的工具」引导提示词，模型面对 MCP 指令只能瞎猜（用户体感
+ * 「能用的 MCP 没几个」）。现在调用方传入 McpManager.getConnectedServers() 快照。
  *
  * 本对象不触碰任何 UI 状态 / 信号流 / 引擎 —— 由调用方（AgentChatViewModel）
  * 把 [Result] 应用到 StateFlow、发射 GitHub 连接信号并执行 agentPrompt，
@@ -70,15 +76,32 @@ internal object SlashCommands {
      *
      * @param command 以 `/` 开头的原始指令文本。
      * @param githubTokenManager 用于快照当前 GitHub 连接状态。
+     * @param mcpConnected 已连接 MCP 服务器名快照（路由器据此注入 mcp_call 引导）。
+     * @param skillActivation 技能激活存储：/skill:<id> 路由时同步装备该技能
+     *   （渐进披露用户路——本轮系统提示词即携带方法论全文，而非仅一段引导词）；
+     *   null = 未接入（不装备，行为与旧版一致）。
      */
-    fun handle(command: String, githubTokenManager: GithubTokenManager): Result {
+    fun handle(
+        command: String,
+        githubTokenManager: GithubTokenManager,
+        mcpConnected: Set<String> = emptySet(),
+        skillActivation: SkillActivationStore? = null
+    ): Result {
         val parsed = SlashCommandParser.parse(command)
         val githubState = githubTokenManager.connectionState.value
         val context = SlashRouteContext(
             githubConnected = githubState.isConnected,
-            githubUsername = githubState.username
+            githubUsername = githubState.username,
+            mcpConnected = mcpConnected
         )
         val route = SlashCommandRouter.route(parsed, context)
+
+        // /skill:<id> 显式装备：路由来源为 Skill 时写入激活存储（下一轮
+        // buildSystemPrompt 即注入方法论全文）。失败静默——装备失败不阻断
+        // 指令执行，模型仍可经 skill_activate 工具自行装载。
+        if (skillActivation != null && route.routeKind == "skill" && !route.sourceName.isNullOrBlank()) {
+            runCatching { skillActivation.activate(route.sourceName!!) }
+        }
 
         // 始终携带反馈消息，让用户看到指令被识别 + 当前状态：
         // Skill/连接器/插件指令使用专用横幅（PipelineBanner），其余指令用 System 行。

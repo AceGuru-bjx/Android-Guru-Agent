@@ -29,8 +29,9 @@ import java.io.File
  *   -b <workspaceDir>:/workspace
  *   -b <userHomeDir>:/root    # T75: 持久化用户 home（跨 rootfs 版本）
  *   -w /workspace             # guest 初始 cwd（request.cwd 映射）
- *   -E TERM=… -E LANG=… -E HOME=/root -E SHELL=/bin/bash -E PATH=… -E TMPDIR=/tmp
- *   -- /bin/bash -i           # 长生命周期交互 bash
+ *   -- /usr/bin/env -i        # T88: guest env trampoline（proot 5.1.107 兼容，取代 -E）
+ *     TERM=… LANG=… HOME=/root SHELL=/bin/bash PATH=… TMPDIR=/tmp
+ *     /bin/bash -i            # 长生命周期交互 bash
  * ```
  *
  * PTY 语义（§5.2/§11.1）：forkpty 使 proot 成为 session+group leader
@@ -50,6 +51,25 @@ class LinuxPRootBackend(
     private val commandBuilder: PRootCommandBuilder = PRootCommandBuilderImpl(),
     /** proot 宿主环境（Android 生产必传；JVM 测试可传 null → env 仅含 PATH 兜底）。 */
     private val hostEnv: PRootHostEnvironment? = null,
+    /**
+     * T81 (D-6)：guest env 权威来源（单一事实源）。原 buildGuestEnv 内联 8 键
+     * 基线与 LinuxEnvironmentManager 的 11 键漂移（PWD/OLDPWD/LC_ALL 缺失）——
+     * 注释声称「必须同步」但无机制保证。现在直接派生。
+     */
+    private val environment: com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager =
+        com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager(),
+    /**
+     * T82：系统级 bind 集（/proc /dev /sys —— proot-distro 同款语义）。
+     * 默认 [SystemBindProfile.STANDARD]：procps（essential 包）在 guest 内
+     * 真实可用、/dev/urandom 供 python(ssl)/curl 使用。host 侧不存在的路径
+     * 被诚实过滤。选 [SystemBindProfile.NONE] 恢复旧裸 -r 行为。
+     */
+    private val systemBinds: SystemBindProfile = SystemBindProfile.STANDARD,
+    /**
+     * T82：共享存储桥（host /storage/emulated/0 → guest /sdcard，
+     * termux-setup-storage 等价物）。null 或目录不可用 → 不 bind（诚实降级）。
+     */
+    private val sharedStorage: SharedStorageBridge? = null,
     override val id: String = ID
 ) : ExecutionBackend {
 
@@ -110,15 +130,22 @@ class LinuxPRootBackend(
         //    "/workspace..." 直通；相对路径落 /workspace/<cwd>；其他绝对路径（/root 等）直通。
         val guestCwd = mapGuestCwd(request.cwd)
 
-        // 5. 构造 launch request（guest env 只经 -E；T75: 用户 home → /root 持久化 bind）
+        // 5. 构造 launch request（guest env 经 trampoline；T75: 用户 home → /root 持久化 bind）
         val guestEnv = buildGuestEnv(request.env)
+        // T82：home bind + 系统级 bind（/proc /dev /sys，proot-distro 语义）+
+        // 共享存储 bind（授权可用时 → guest /sdcard）。
+        val binds = buildList {
+            add(PRootBind(AbsolutePath(userHomeDir.absolutePath), GuestUserHome.GUEST_PATH))
+            addAll(systemBinds.toBinds())
+            sharedStorage?.toBind()?.let { add(it) }
+        }
         val launch = PRootLaunchRequest(
             rootfs = rootfs,
             executable = GUEST_SHELL,
             arguments = listOf("-i"),
             workingDirectory = com.apex.agent.platform.terminal.workspace.WorkspacePath(guestCwd),
             environment = guestEnv,
-            binds = listOf(PRootBind(AbsolutePath(userHomeDir.absolutePath), GuestUserHome.GUEST_PATH)),
+            binds = binds,
             terminalMode = com.apex.agent.platform.terminal.api.TerminalMode.AUTO,
             fakeRoot = true,
             killOnExit = true
@@ -149,10 +176,8 @@ class LinuxPRootBackend(
                     rootfsId = rootfs.id,
                     workspaceId = workspaceId,
                     workspaceDir = workspaceHostDir.value,
-                    binds = listOf(
-                        "${workspaceHostDir.value}:/workspace",
-                        "${userHomeDir.absolutePath}:${GuestUserHome.GUEST_PATH}"
-                    ),
+                    binds = binds.map { "${it.hostPath.value}:${it.guestPath}" } +
+                        listOf("${workspaceHostDir.value}:/workspace"),
                     guestCwd = guestCwd
                 )
             )
@@ -160,23 +185,14 @@ class LinuxPRootBackend(
     }
 
     /**
-     * guest env 基线（§8.1）—— 只经 -E 进入 rootfs，与宿主 env 无关。
+     * guest env 基线（§8.1）—— 只经 env trampoline 进入 rootfs，与宿主 env 无关。
      * request.env 的显式键最后覆盖（调用方意图优先）。
+     *
+     * T81 (D-6)：基线直接取自 LinuxEnvironmentManager（唯一权威来源）——
+     * 消除两处内联漂移（原 8 键 vs Manager 11 键：PWD/OLDPWD/LC_ALL）。
      */
-    internal fun buildGuestEnv(requestEnv: Map<String, String>): Map<String, String> {
-        val env = linkedMapOf(
-            "TERM" to "xterm-256color",
-            "LANG" to "C.UTF-8",
-            "HOME" to GuestUserHome.GUEST_PATH,
-            "USER" to "root",        // T75: fake root 视图（proot -0），部分工具需要
-            "LOGNAME" to "root",     // T75: 同上（cron/su 类工具探测）
-            "SHELL" to GUEST_SHELL,
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "TMPDIR" to "/tmp"
-        )
-        env.putAll(requestEnv)
-        return env
-    }
+    internal fun buildGuestEnv(requestEnv: Map<String, String>): Map<String, String> =
+        environment.interactiveGuestEnv(requestEnv)
 
     /**
      * request.cwd → guest cwd。"/" 或空 → /workspace。

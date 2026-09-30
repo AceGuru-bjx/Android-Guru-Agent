@@ -124,6 +124,11 @@ class JniNativePty(
         return jni.nativeSendSignal(sessionId, signal)
     }
 
+    /** T82：只信号前台作业组 —— shell 不受影响（见 NativePty 接口注释）。 */
+    override fun nativeSignalForegroundGroup(sessionId: Int, signal: Int): Boolean {
+        return jni.nativeSignalForegroundGroup(sessionId, signal)
+    }
+
     override fun nativeResize(sessionId: Int, rows: Int, cols: Int): Boolean {
         return try { jni.nativeResize(sessionId, rows, cols); true } catch (e: Exception) { false }
     }
@@ -133,6 +138,9 @@ class JniNativePty(
     override fun nativeGetPid(sessionId: Int): Int = jni.nativeGetPid(sessionId)
 
     override fun nativeGetExitCode(sessionId: Int): Int = jni.nativeGetExitCode(sessionId)
+
+    override fun nativeGetSpawnError(sessionId: Int): String? =
+        try { jni.nativeGetSpawnError(sessionId) } catch (e: Exception) { null }
 
     override fun nativeWaitExit(sessionId: Int, timeoutMs: Long): Int {
         // Poll nativeIsAlive + nativeGetExitCode (Spec §44.1 EXTEND — reliable exit).

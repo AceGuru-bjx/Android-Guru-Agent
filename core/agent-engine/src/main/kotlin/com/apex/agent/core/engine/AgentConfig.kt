@@ -42,8 +42,13 @@ enum class AgentMode(val displayName: String, val description: String) {
 }
 
 /**
- * 思考深度等级
- * 控制Agent在每次决策前的推理深度
+ * 思考深度等级（#168 起六档）
+ * 控制Agent在每次决策前的推理深度。
+ *
+ * 各档的完整执行画像（提示词 + 参数 + 迭代/验证/压缩/输出策略）见
+ * [com.apex.agent.core.engine.thinking.ThinkingProfile]；AUTO 档的逐轮
+ * 动态选档由 [com.apex.agent.core.engine.thinking.ThinkingModeController]
+ * 驱动。
  */
 enum class ThinkingLevel(val level: Int, val description: String) {
     /** 不思考，直接行动 */
@@ -59,17 +64,27 @@ enum class ThinkingLevel(val level: Int, val description: String) {
     DEEP(3, "多方案对比→风险评估→最优选择"),
     
     /** 极深思考：完整思维链+自我质疑 */
-    MAXIMUM(4, "完整推理链+自我反思+多轮验证");
+    MAXIMUM(4, "完整推理链+自我反思+多轮验证"),
+
+    /**
+     * 自动档（#168）：按任务复杂度（文本长度/多步指示词/代码含量/风险词/
+     * 错误史/迭代深水区）逐轮动态选档，委托
+     * [com.apex.agent.core.engine.thinking.AdaptiveThinkingSelector]。
+     */
+    AUTO(5, "自动：按任务复杂度动态选档");
     
     /**
      * 转换为 system prompt 中的思考指令。
      *
      * 推理框架参考自失败项目 [Apex-agent] 的 ChainOfThoughtSkill / TreeOfThoughtsSkill /
      * ReActSkill：将其中"分解-逐步推理-综合"与"多路径探索评估"的结构化骨架提炼为
-     * 思考提示词，融入本项目的思考深度控制。仅调提示词文本，不改引擎主循环。
+     * 思考提示词。#168 起该文本已迁移/增强到
+     * [com.apex.agent.core.engine.thinking.ThinkingProfile]（含执行策略差异），
+     * 本方法保留作为无画像路径的兼容回退。
      */
     fun toPromptInstruction(): String = when (this) {
         NONE -> ""
+        AUTO -> "" // AUTO 不携带静态指令：由 ThinkingModeController 选档后注入该档指令+理由
         LIGHT -> "Briefly think about what to do next in 1-2 sentences, then act."
         STANDARD -> """
             Use Chain-of-Thought before acting:
@@ -102,10 +117,34 @@ enum class ThinkingLevel(val level: Int, val description: String) {
      */
     fun toThinkingBudget(): Int? = when (this) {
         NONE -> 0
+        AUTO -> null // AUTO 不直接映射：选档后用该档画像的 budget（ThinkingProfile.forLevel）
         LIGHT -> 256
         STANDARD -> 1024
         DEEP -> 4096
         MAXIMUM -> 16384
+    }
+
+    /**
+     * T1（思考程度真实化）：映射为模型原生思考强度 [com.apex.agent.core.llm.ReasoningEffort]
+     * 的枚举名，app 层（AgentChatViewModel.setThinkingLevel）转回枚举后持久化到
+     * 默认 ModelProfile —— DynamicLlmClient 监听 profiles 即时重建，下一次请求
+     * 即真实下发 reasoning_effort / thinking.budget_tokens / enable_thinking
+     * （由 StreamingOpenAiClient 按 Provider 差异化）。
+     *
+     * 返回 null（NONE 档）= 不思考：app 层应回退 [com.apex.agent.core.llm.ReasoningEffort.NONE]
+     * （apiValue 为 null，请求体不发 reasoning 字段）。
+     *
+     * 为什么返回 String 而不是枚举：agent-engine 与 ReasoningEffort 所在的
+     * llm-adapter 已有依赖，但保持 ThinkingLevel 纯枚举层不直接硬引用，
+     * 映射关系集中在本处，便于单测与后续调档。
+     */
+    fun toReasoningEffortName(): String? = when (this) {
+        NONE -> null
+        AUTO -> "adaptive" // 哨兵值：调用方（AgentChatViewModel 等）必须特判 AUTO，不回退 ReasoningEffort.NONE
+        LIGHT -> "LOW"
+        STANDARD -> "MEDIUM"
+        DEEP -> "HIGH"
+        MAXIMUM -> "MAX"
     }
 }
 
@@ -164,13 +203,57 @@ data class AgentConfig(
     val additionalSystemContext: String = "",
 
     /**
-     * 本轮允许暴露给 LLM 的工具 id 白名单；null = 全部工具。
+     * **v4 强制函数调用**（"调用函数"菜单的强制语义）：
      *
-     * 用于"函数调用"功能：用户在输入框工具菜单中圈选可用函数子集后，
-     * 引擎只把白名单内的 [com.apex.agent.core.llm.ToolDefinition] 传给模型，
-     * system prompt 的工具清单同步收窄，避免模型幻觉调用未启用工具。
+     * 非空时本轮请求**只**暴露这些工具，且 `tool_choice = required`
+     * （单选时为具体函数）——被选中的函数**必须**被模型调用。
+     *
+     * 空 = 默认模式：CORE 工具集 + 会话激活的工具（v4 渐进披露），
+     * 无 tool_choice 强制。旧字段 `enabledToolIds`（白名单收窄）已废弃：
+     * 它是"全量发送拖垮请求 + 手动圈选才能用"这个根因问题的载体。
      */
-    val enabledToolIds: Set<String>? = null
+    val forcedToolIds: Set<String> = emptySet(),
+
+    /**
+     * **#147 子代理工具集限制**：非空时本轮请求**只**暴露这些工具（与
+     * [forcedToolIds] 同走 planForced 预算路径），但**不**附带
+     * `tool_choice = required` —— 子代理的最终轮需要能输出纯文本结论，
+     * 而 forced 语义会迫使模型每轮调用工具（严格 Provider 上将永远到不了
+     * 结论轮，跑到迭代上限后以 Error 收场）。
+     *
+     * 两者同时非空时 [forcedToolIds] 优先。空 = 不限制（默认计划）。
+     */
+    val allowedToolIds: Set<String> = emptySet(),
+
+    /**
+     * **v4 全量模式**：true 时向模型暴露注册表内全部（非 legacy）工具
+     * （仍受 [com.apex.agent.core.tools.catalog.ToolRequestBudget] 预算钳制）。
+     * 默认 false = CORE + 激活集。电源用户/调试用。
+     */
+    val exposeAllTools: Boolean = false,
+
+    // ═══ Agent 角色（人设层 · 可选，默认值 = 原有行为零变化）═══
+    // app 层「设置 → Agent 角色」激活的角色经 AgentModule（启动快照）/
+    // AgentChatViewModel（patchConfig 运行时热切换）拍平到这里 —— 引擎保持
+    // 纯字符串消费，不感知 AgentRole 数据模型（模块边界防腐）。
+
+    /** agent 自称（身份行 "You are X"）；空 = 默认 "Apex Agent"。 */
+    val agentName: String = "",
+
+    /** agent 对用户的称呼（如 "老板"/"Boss"）；空 = 不注入称呼约束。 */
+    val userTitle: String = "",
+
+    /** 角色定义（这个 agent 是谁、擅长什么、边界在哪）。 */
+    val roleDefinition: String = "",
+
+    /** 用户自定义提示词（原样拼入 Agent Role 段，最自由的一层）。 */
+    val rolePrompt: String = "",
+
+    /** 语气风格键（"" | professional | friendly | humorous | concise）。 */
+    val roleStyle: String = "",
+
+    /** 回复语言约束（"" 跟随用户输入 | "zh" | "en"）。 */
+    val roleLanguage: String = ""
 ) {
     companion object {
         /** 快速模式：Build + 无思考 */

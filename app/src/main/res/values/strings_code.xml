@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Coding 模式（Code 屏）字符串（英文默认）。中文在 values-zh/strings_code.xml。 -->
+<resources>
+    <!-- 抽屉目的地 -->
+    <string name="drawer_code">Code</string>
+
+    <!-- 工作区条 -->
+    <string name="code_no_workspace">No workspace</string>
+    <string name="code_switch_workspace">Switch workspace</string>
+    <string name="code_delete_workspace">Delete workspace</string>
+    <string name="code_new_workspace">New workspace…</string>
+    <string name="code_clear_chat">New chat</string>
+
+    <!-- Todo 面板 -->
+    <string name="code_todo_progress">Tasks %1$d/%2$d</string>
+
+    <!-- 消息流 / 输入 -->
+    <string name="code_working">Working…</string>
+    <string name="code_input_hint">Describe a coding task…</string>
+    <string name="code_send">Send</string>
+    <string name="code_stop">Stop</string>
+    <string name="code_dismiss">Dismiss</string>
+
+    <!-- ask_user 对话框 -->
+    <string name="code_question_title">Agent needs your input</string>
+    <string name="code_question_hint">Type your answer…</string>
+    <string name="code_question_default_yes">yes</string>
+    <string name="code_question_submit">Answer</string>
+
+    <!-- 新建工作区对话框 -->
+    <string name="code_new_workspace_title">New coding workspace</string>
+    <string name="code_workspace_name_hint">Workspace name (e.g. my-app)</string>
+    <string name="code_create">Create</string>
+    <string name="code_cancel">Cancel</string>
+
+    <!-- 编辑器面板（v1.0 #154） -->
+    <string name="code_editor_close">Close editor</string>
+    <string name="code_editor_loading">Loading…</string>
+    <string name="code_editor_binary">Binary file — preview not supported</string>
+    <string name="code_editor_empty">Empty file</string>
+    <string name="code_editor_lines_fmt">%1$d lines</string>
+    <string name="code_editor_truncated_fmt">Showing first %1$d of %2$d lines</string>
+
+    <!-- 工具权限（v1.0 #155） -->
+    <string name="code_perm_section_title">Tool permissions</string>
+    <string name="code_perm_section_subtitle">opencode-style permission mode and rules</string>
+    <string name="code_perm_mode_label">Permission mode</string>
+    <string name="code_perm_mode_bypass">Bypass</string>
+    <string name="code_perm_mode_default">Default</string>
+    <string name="code_perm_mode_accept_edits">Accept Edits</string>
+    <string name="code_perm_mode_plan">Plan</string>
+    <string name="code_perm_mode_bypass_desc">All tools run without asking (use with care)</string>
+    <string name="code_perm_mode_default_desc">Read-only tools are allowed; everything else asks first</string>
+    <string name="code_perm_mode_accept_edits_desc">File edits and git commits are allowed; everything else asks first</string>
+    <string name="code_perm_mode_plan_desc">Read-only planning: any tool that mutates the environment is denied</string>
+    <string name="code_perm_rules_title">Tool permission rules (first match wins)</string>
+    <string name="code_perm_rules_empty">No rules yet. Rules can override the mode for matching tools — allow, ask, or deny.</string>
+    <string name="code_perm_rule_add">Add rule</string>
+    <string name="code_perm_dialog_title">Add permission rule</string>
+    <string name="code_perm_rule_pattern_label">Tool id pattern</string>
+    <string name="code_perm_rule_pattern_hint">Exact id, or prefix with a trailing star (e.g. code_git_ + star, mcp__ + star). A single star matches everything.</string>
+    <string name="code_perm_effect_label">On match</string>
+    <string name="code_perm_effect_allow">Allow</string>
+    <string name="code_perm_effect_ask">Ask</string>
+    <string name="code_perm_effect_deny">Deny</string>
+    <string name="code_perm_rule_delete">Delete rule</string>
+    <string name="code_perm_save">Save</string>
+    <string name="code_perm_cancel">Cancel</string>
+
+    <!-- 行为规则（v1.1 #164） -->
+    <string name="code_rules_section_title">Behavioral rules</string>
+    <string name="code_rules_section_subtitle">Global rules and AGENTS.md project rules</string>
+    <string name="code_rules_global_label">Global rules</string>
+    <string name="code_rules_global_hint">Apply to every workspace and both modes. Content beyond 32768 characters is truncated on injection.</string>
+    <string name="code_rules_global_count_fmt">%1$d / %2$d chars</string>
+    <string name="code_rules_project_title">Project rules (AGENTS.md)</string>
+    <string name="code_rules_project_status_loaded_fmt">Loaded: %1$s</string>
+    <string name="code_rules_project_status_missing">Not created (place AGENTS.md / CLAUDE.md / .cursorrules at the workspace root to activate)</string>
+    <string name="code_rules_project_status_no_workspace">No workspace — create or select one on the Code screen first</string>
+    <string name="code_rules_project_create">Create template</string>
+    <string name="code_rules_section_note">Priority: project rules (AGENTS.md) &gt; global rules &gt; general preferences; all sit below safety and permission constraints</string>
+
+    <!-- ═══ v1.2 七档思考系统（coding 模式专属文案；ULTRACODE/APEXCODE 与聊天页共享键） ═══ -->
+    <string name="code_thinking_selector_title">Thinking depth (7 tiers + Auto)</string>
+    <string name="code_thinking_none_desc">Act directly: skip reasoning, fast in-and-out (iterations x0.8)</string>
+    <string name="code_thinking_light_desc">Glance-edit: read the spot, patch, glance the result — token-light</string>
+    <string name="code_thinking_standard_desc">Standard coding loop: read → edit → verify → re-read, minimal diff</string>
+    <string name="code_thinking_deep_desc">Changeset mindset: list every change before acting, tie each to its verification</string>
+    <string name="code_thinking_maximum_desc">Invariant guarding: identify invariants &amp; ripple effects, re-check the whole chain after edits</string>
+    <string name="code_thinking_ultracode_desc">Coding deep-reasoning loop: dependency map → candidate edits → risk-ranking → minimal change → immediate verification; iterations x2.0</string>
+    <string name="code_thinking_apexcode_desc">Architecture-level exhaustive reasoning + adversarial self-review + full verification matrix; iterations x3.0, manual-only</string>
+    <string name="code_thinking_auto_desc">Adaptive: pre-check picks the tier before each send, and deep-water failures escalate mid-run (never auto-picks APEXCODE)</string>
+
+    <!-- v1.2 思考档位指南（CodeThinkingGuideSheet） -->
+    <string name="code_thinking_guide_title">Thinking tier guide</string>
+    <string name="code_thinking_guide_subtitle">7 depth tiers (NONE up to APEXCODE) plus an AUTO meta tier that re-picks per turn; switching a tier changes the prompt, model params and execution policy together</string>
+    <string name="code_thinking_guide_table_title">Tier ladder</string>
+    <string name="code_thinking_guide_col_level">Tier</string>
+    <string name="code_thinking_guide_col_budget">Budget</string>
+    <string name="code_thinking_guide_col_effort">Effort</string>
+    <string name="code_thinking_guide_col_iters">Iters</string>
+    <string name="code_thinking_guide_col_output">Output</string>
+    <string name="code_thinking_guide_auto_row">adaptive</string>
+    <string name="code_thinking_guide_tap_hint">Tap any tier card to switch right here</string>
+    <string name="code_thinking_guide_current_badge">current</string>
+    <string name="code_thinking_guide_coding_view">Coding view</string>
+    <string name="code_thinking_guide_footer_linkage">A tier drives more than the prompt: iteration cap, compression threshold and tool-output budget all scale with it (see the ladder above).</string>
+    <string name="code_thinking_guide_footer_apex">APEXCODE is manual-only: the adaptive selector never picks it, and its token cost sits at the top of the whole ladder.</string>
+
+    <!-- ═══ v1.2 长任务中心 ═══ -->
+    <string name="code_longtask_open">Long-task center</string>
+    <string name="code_longtask_sheet_title">Long Tasks</string>
+    <string name="code_longtask_tab_tasks">Task records</string>
+    <string name="code_longtask_tab_templates">Templates</string>
+    <string name="code_longtask_empty">No long-task records yet</string>
+    <string name="code_longtask_empty_hint">Coding runs beyond a threshold (iterations / tools / duration / files) are archived automatically</string>
+    <string name="code_longtask_status_completed">Completed</string>
+    <string name="code_longtask_status_failed">Failed</string>
+    <string name="code_longtask_status_aborted">Aborted</string>
+    <string name="code_longtask_status_running">Running</string>
+    <string name="code_longtask_copies_fmt">copied x%1$d</string>
+    <string name="code_longtask_stats_fmt">%1$d iters · %2$d tools · %3$s · %4$d files</string>
+    <string name="code_longtask_goal_label">Goal</string>
+    <string name="code_longtask_files_header">Files touched (%1$d)</string>
+    <string name="code_longtask_todos_header">Todo snapshot</string>
+    <string name="code_longtask_checkpoints_fmt">Checkpoints x%1$d (every 5 iters / 60s)</string>
+    <string name="code_longtask_error_label">Error: </string>
+    <string name="code_longtask_copy">Copy task</string>
+    <string name="code_longtask_relaunch">Rerun</string>
+    <string name="code_longtask_compare">Diff vs last</string>
+    <string name="code_longtask_delete">Delete</string>
+    <string name="code_longtask_delete_confirm_fmt">Delete task record \"%1$s\"? This cannot be undone.</string>
+    <string name="code_longtask_confirm">Confirm</string>
+    <string name="code_longtask_cancel">Cancel</string>
+    <string name="code_longtask_copy_dialog_title">Copy-task options</string>
+    <string name="code_longtask_option_conversation">Carry last run context</string>
+    <string name="code_longtask_option_todos">Carry todo snapshot</string>
+    <string name="code_longtask_option_files">Carry files list</string>
+    <string name="code_longtask_option_relaunch">Rerun immediately after copying</string>
+    <string name="code_longtask_option_title">New title (optional)</string>
+    <string name="code_longtask_thinking_current_fmt">Thinking tier: %1$s</string>
+    <string name="code_longtask_thinking_follow">Follow source tier</string>
+    <string name="code_longtask_template_start">Start</string>
+    <string name="code_longtask_template_level_fmt">Recommended tier: %1$s</string>
+    <string name="code_longtask_tab_stats">Tier stats</string>
+    <string name="code_longtask_filter_all">All</string>
+    <string name="code_longtask_resume">Resume</string>
+    <string name="code_longtask_resume_latest">Resume from last checkpoint</string>
+    <string name="code_longtask_resume_at_fmt">Resume from iteration %1$d</string>
+    <string name="code_longtask_resume_fallback">No checkpoint — rerun with context</string>
+    <string name="code_longtask_stats_empty">No tier stats yet</string>
+    <string name="code_longtask_stats_empty_hint">Stats aggregate automatically from archived long tasks per tier</string>
+    <string name="code_longtask_stats_runs_fmt">%1$d runs</string>
+    <string name="code_longtask_stats_row_fmt">success %1$d%% · avg %2$d iters · %3$d tools · %4$s</string>
+
+    <!-- v1.2 检查点时间线（CodeLongTaskSheet 展开区） -->
+    <string name="code_longtask_cp_round_fmt">Round %1$d</string>
+    <string name="code_longtask_cp_counts_fmt">%1$d tools · %2$d files</string>
+    <string name="code_longtask_cp_todos_fmt">☑%1$d ☐%2$d</string>
+    <string name="code_thinking_guide_open">View tier guide</string>
+    <!-- ═══ 胶囊流式输出（Coding 工作流时间轴）═══ -->
+    <string name="code_stream_group_more_fmt">%1$d tool capsules collapsed</string>
+    <string name="code_stream_group_expand">Expand</string>
+    <string name="code_stream_diff_unnamed">(file)</string>
+    <string name="code_stream_diff_stat_fmt">+%1$d −%2$d</string>
+    <string name="code_stream_diff_truncated">Diff truncated — open the file for the full change</string>
+    <string name="code_stream_terminal_idle">terminal</string>
+    <string name="code_stream_terminal_toggle">Toggle terminal panel</string>
+    <string name="code_stream_terminal_empty">(no output yet)</string>
+    <string name="code_stream_thinking_running">Thinking…</string>
+    <string name="code_stream_thinking_done">Thought chain · tap to expand</string>
+    <string name="code_stream_verify_round_fmt">Verify round %1$d</string>
+    <string name="code_stream_verify_passed">passed</string>
+    <string name="code_stream_verify_failed">failed</string>
+    <string name="code_stream_verify_unknown">in progress</string>
+    <string name="code_stream_verify_counts_fmt">%1$d edit · %2$d verify</string>
+    <string name="code_stream_verify_details_gone">Details not replayable after restore</string>
+    <string name="code_stream_error_recoverable">Recoverable error</string>
+    <string name="code_stream_error_fatal">Fatal error</string>
+    <string name="code_stream_files_touched">%1$d files touched</string>
+    <string name="code_stream_fab_bottom">Latest</string>
+    <string name="code_stream_status_waiting">waiting</string>
+    <string name="code_stream_status_running">running</string>
+    <string name="code_stream_status_success">success</string>
+    <string name="code_stream_status_failed">failed</string>
+    <string name="code_stream_status_applied">applied</string>
+    <string name="code_stream_status_partial">interrupted</string>
+    <string name="code_stream_exit_code_fmt">exit %1$d</string>
+    <string name="code_stream_files_more_fmt">+%1$d more</string>
+    <string name="code_stream_detail_diff_title">File diff</string>
+    <string name="code_stream_detail_diff_missing">No diff payload captured for this call</string>
+    <string name="code_stream_detail_grep_title">Search hits</string>
+    <string name="code_stream_detail_grep_empty">No hits captured</string>
+    <string name="code_stream_detail_terminal_title">Terminal output</string>
+    <string name="code_stream_detail_output_title">Tool output</string>
+    <string name="code_stream_run_streaming">Running · capsule timeline</string>
+    <string name="code_stream_run_idle">Describe a coding task to start the capsule timeline</string>
+</resources>

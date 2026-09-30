@@ -65,38 +65,32 @@ class ProotExecutorProotSmokeTest {
                 .redirectErrorStream(true)
             pb.environment()["PROOT_NO_SECCOMP"] = "1"
             val proc = pb.start()
-            proc.inputStream.bufferedReader().readText()
-            proc.waitFor() == 0
+            // 有界等待（30s）：与 UbuntuRootfsEndToEndIntegrationTest.prootWorks 同一防御 ——
+            // 无限期 waitFor 在 ptrace 受限环境下挂住整个测试任务（CI 症状：无任何
+            // 测试事件直至任务超时）。超时即判 proot 不可用，冒烟组诚实跳过。
+            val exited = proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+            if (!exited) {
+                runCatching { proc.destroyForcibly() }
+                return false
+            }
+            proc.exitValue() == 0
         } catch (e: Exception) {
             false
         }
     }
 
     /**
-     * T72: host proot 5.4 与 Termux proot 5.1.107（生产目标）的两处语法差异：
-     * (a) upstream 无 `-E K=V`（Termux 私有扩展）→ 放进 ProcessBuilder env
-     *     （upstream 继承 env，语义等价）
-     * (b) upstream 5.4 不认 `--` 分隔符 → 去掉（options 后直接跟 command）
-     * 原始 argv 契约（含 -E/--）由真机 androidTest（Termux proot）锁定。
+     * T88：host proot 5.x 与 Termux proot 5.1.107（生产目标）仅剩两处语法差异：
+     * (a) upstream 不认 `--` 分隔符 → 去掉（options 后直接跟 command）
+     * (b) upstream 旧版（5.1.0）不认 `--kill-on-exit` → 去掉（一次性 exec 不需要）
+     * **guest env 不再适配**（旧注释声称 upstream 无 -E 需搬进宿主 env —— 事实是
+     * -E 在任何 proot 版本都不存在，那是自造的 argv 形状，设备上直接拒启）。
+     * 现在 env trampoline 原样直通：guest 真实拿到 `env -i` 清洁环境，
+     * 测试与生产 argv 形状一致，语义比旧“偷搬宿主 env”更严。
      */
     private fun adaptForHostProot(argv: List<String>): Pair<List<String>, Map<String, String>> {
         val env = mutableMapOf<String, String>("PROOT_NO_SECCOMP" to "1")
-        val out = mutableListOf<String>()
-        var i = 0
-        while (i < argv.size) {
-            when (argv[i]) {
-                "--" -> { /* upstream: no separator */ }
-                "--kill-on-exit" -> { /* Termux/5.2+ extension; one-shot exec tests don't need it */ }
-                "-E" -> {
-                    val kv = argv[i + 1]
-                    val eq = kv.indexOf('=')
-                    if (eq > 0) env[kv.substring(0, eq)] = kv.substring(eq + 1)
-                    i++
-                }
-                else -> out.add(argv[i])
-            }
-            i++
-        }
+        val out = argv.filter { it != "--" && it != "--kill-on-exit" }
         return out to env
     }
 
@@ -142,7 +136,7 @@ class ProotExecutorProotSmokeTest {
     }
 
     @Test
-    fun `proot echoes through rootfs with -E env visible in guest`() {
+    fun `proot echoes through rootfs with env trampoline visible in guest`() {
         val bin = prootBinary()
         assumeTrue("proot must be installed", bin != null)
         assumeTrue("proot must be runnable (ptrace)", prootCanRun())

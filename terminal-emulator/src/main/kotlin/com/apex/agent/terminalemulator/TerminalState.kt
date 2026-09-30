@@ -13,8 +13,26 @@ data class TerminalModes(
     var insertMode: Boolean = false,        // IRM (4)
     var bracketedPaste: Boolean = false,    // (2004)
     var reverseVideo: Boolean = false,      // DECSCNM (5)
-    var alternateScreen: Boolean = false    // (1049/47/1047)
+    var alternateScreen: Boolean = false,   // (1049/47/1047)
+    /** DECKPAM（ESC =）/ DECKPNM（ESC >）：应用小键盘 —— 数字键 SS3 p..y。 */
+    var applicationKeypad: Boolean = false,
+    // T82 bug fix: ANSI modes (CSI h/l WITHOUT '?' prefix) were entirely ignored —
+    // CSI 4 h (IRM insert mode) and CSI 20 h (LNM newline mode) never took effect.
+    var newlineMode: Boolean = false        // LNM (ANSI 20): LF also returns carriage
 )
+
+/**
+ * T85：光标形状（DECSCUSR，`CSI Ps SP q`）。vim/nano 等据形状区分插入/普通模式。
+ * 闪烁由宿主 UI 自行实现（宿主可在键入时重置闪烁相位）；此处只保留形状语义。
+ */
+enum class CursorStyle {
+    /** 块状（xterm 默认；DECSCUSR 1/2）。 */
+    BLOCK,
+    /** 下划线（DECSCUSR 3/4）。 */
+    UNDERLINE,
+    /** 竖杠/梁式（DECSCUSR 5/6）——本项目交互 UI 的默认形状。 */
+    BAR
+}
 
 /**
  * Cursor state (Spec §12 PR #53).
@@ -67,12 +85,28 @@ class TabStops(initialCols: Int) {
     fun clear(col: Int) { if (col in 0 until cols) stops[col] = false }
     fun clearAll() { stops.fill(false) }
 
+    /** T85：恢复默认 8 列制表位（RIS 全量复位用；clearAll 只清不建）。 */
+    fun resetToDefaults() {
+        stops = BooleanArray(cols) { it % 8 == 0 && it > 0 }
+    }
+
     fun resize(newCols: Int) {
         // Recreate with default 8-col stops, preserving existing stops within overlap
         val newStops = BooleanArray(newCols) { it % 8 == 0 && it > 0 }
         for (i in 0 until minOf(cols, newCols)) newStops[i] = stops[i]
         stops = newStops
         cols = newCols
+    }
+
+    /**
+     * v0.3（session 序列化）：当前制表位快照（HTS/TBC 定制过的状态原样带出）。
+     * 返回数组长度 == 当前列数；restore 时长度不符则被忽略（防错位）。
+     */
+    internal fun stopsSnapshot(): BooleanArray = stops.copyOf()
+
+    /** v0.3（session 反序列化）：整体恢复制表位（[stops] 长度必须等于当前列数）。 */
+    internal fun restoreStops(stops: BooleanArray) {
+        if (stops.size == cols) this.stops = stops.copyOf()
     }
 }
 

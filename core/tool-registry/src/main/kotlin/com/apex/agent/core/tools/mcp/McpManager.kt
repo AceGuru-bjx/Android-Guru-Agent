@@ -29,9 +29,41 @@ import java.io.File
  * - `enabled=false` 的服务器：不出现在 `/` 斜杠菜单、不会被 Agent 工具看到（[getEnabledConfigs]）；
  *   禁用时主动断开其活跃连接。
  * - 修复旧实现 `enabled` 字段"只写不读"的空转状态。
+ *
+ * ## 内置服务器（BUILTIN 传输）
+ * - core 不依赖 app 层实现：宿主（app 的 McpModule）在构造时把
+ *   `服务器名 → transport 工厂` 注入 [builtinTransports]，connect 时按名取出传给
+ *   [McpClient]。core 内部默认构造（空 map）行为不变，向后兼容。
+ * - App 预置的内置服务器条目用 [ensureBuiltinServer] 幂等写入：同名用户自建
+ *   条目（HTTP/SSE/STDIO）绝不被动持；用户对 `enabled` 的偏好跨升级保留。
+ *
+ * ## 沙箱 stdio（Issue #149）
+ * - 宿主可注入 [sandboxProcessLauncher]（app 层 PRoot Ubuntu 沙箱实现）；
+ *   配置项 `runInSandbox=true` 的 STDIO 服务器在连接时改走沙箱 launcher，
+ *   在内嵌 rootfs 里解析执行 npx/python 等命令。未注入或配置未开启时，
+ *   行为与旧版完全一致（宿主直接 fork），core 内部默认构造零变化。
+ *
+ * ## 沙箱预置（Issue #163）
+ * - `runInSandbox=true` 打通了三入口启用路径：市场页添加对话框的沙箱开关、
+ *   `mcp_connect` 工具的 `run_in_sandbox` 参数、配置导入的 `runInSandbox`
+ *   字段 —— 该字段不再处于「存在但无任何启用路径」的空转状态。
+ * - App 预置的沙箱 STDIO 条目（官方 reference servers，见
+ *   [SANDBOX_PRESET_SERVERS]）用 [ensureSandboxServer] 幂等写入：同名用户
+ *   自建的宿主条目（runInSandbox=false）绝不被动持；用户对 `enabled` 的
+ *   偏好跨升级保留；默认 enabled=false，只预置不连接。
+ * - 沙箱连接的握手/请求超时按 [requestTimeoutFor] 放宽：npx 首次冷启动
+ *   要下载包，60s 会在 initialize 就误判超时，放宽到 180s 兑底。
  */
 class McpManager(
-    private val configDir: File
+    private val configDir: File,
+    /** 内置 MCP 服务器注册表：服务器名 → transport 工厂（每次连接新实例）。 */
+    private val builtinTransports: Map<String, () -> McpTransportHandle> = emptyMap(),
+    /**
+     * PRoot 沙箱进程启动器（Issue #149）：`runInSandbox=true` 的 STDIO
+     * 服务器连接时注入 [McpClient]。null = 不支持沙箱（此类配置按旧版
+     * 宿主直接 fork 处理，通常随后在握手时报「命令不存在」）。
+     */
+    private val sandboxProcessLauncher: McpProcessLauncher? = null
 ) {
     private val clients = LinkedHashMap<String, McpClient>()
     private val configs = LinkedHashMap<String, McpServerConfig>()
@@ -41,6 +73,42 @@ class McpManager(
     /** 配置/连接状态变更通知（市场页、斜杠菜单订阅后自动刷新，无需手动轮询）。 */
     private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     val changes: SharedFlow<Unit> = _changes.asSharedFlow()
+
+    /**
+     * 会话生命周期监听（v4：MCP 工具一键注册进 ToolRegistry）。
+     *
+     * 连接成功 → [onServerConnected]；断开/移除/禁用 → [onServerDisconnected]。
+     * [McpToolRegistrar] 订阅后，远程工具自动变成 first-class AgentTool。
+     */
+    interface SessionListener {
+        fun onServerConnected(serverName: String)
+        fun onServerDisconnected(serverName: String)
+    }
+
+    private val sessionListeners = mutableListOf<SessionListener>()
+
+    /** 订阅会话生命周期（幂等；重复注册同一监听器会被忽略）。 */
+    fun addSessionListener(listener: SessionListener) {
+        synchronized(lock) {
+            if (listener !in sessionListeners) sessionListeners += listener
+        }
+    }
+
+    fun removeSessionListener(listener: SessionListener) {
+        synchronized(lock) { sessionListeners -= listener }
+    }
+
+    private fun fireConnected(serverName: String) {
+        synchronized(lock) { sessionListeners.toList() }.forEach {
+            runCatching { it.onServerConnected(serverName) }
+        }
+    }
+
+    private fun fireDisconnected(serverName: String) {
+        synchronized(lock) { sessionListeners.toList() }.forEach {
+            runCatching { it.onServerDisconnected(serverName) }
+        }
+    }
 
     init {
         runCatching { configDir.mkdirs() }
@@ -74,7 +142,10 @@ class McpManager(
                 saveConfigsLocked()
             }.exceptionOrNull()
         }
-        staleClient?.let { runCatching { it.shutdown() } }
+        staleClient?.let {
+            runCatching { it.shutdown() }
+            fireDisconnected(name)
+        }
         if (error != null) return Result.failure(error)
         notifyChanged()
         return Result.success(Unit)
@@ -90,7 +161,16 @@ class McpManager(
         // 先关闭旧连接，避免旧实现「直接覆盖导致连接泄漏」的问题
         synchronized(lock) { clients.remove(name) }?.let { runCatching { it.shutdown() } }
 
-        val client = McpClient(config)
+        // BUILTIN 传输按名取注入的工厂；HTTP/SSE/STDIO 传 null（工厂参数不参与）。
+        // Issue #149：runInSandbox=true 的 STDIO 配置改走宿主注入的沙箱 launcher
+        // （app 层 PRoot Ubuntu 实现）；其余情况传 null → McpClient 回退 JvmProcessLauncher。
+        // Issue #163：沙箱连接同时放宽 STDIO 请求超时（npx 冷启动要下载包）。
+        val client = McpClient(
+            config,
+            builtinTransportFactory = builtinTransports[name],
+            processLauncher = if (config.runInSandbox) sandboxProcessLauncher else null,
+            stdioRequestTimeoutMs = requestTimeoutFor(config)
+        )
         val initResult = client.initialize()
 
         if (initResult.isSuccess) {
@@ -98,6 +178,10 @@ class McpManager(
             val loser = synchronized(lock) { clients.put(name, client) }
             loser?.let { runCatching { it.shutdown() } }
             notifyChanged()
+            fireConnected(name)
+        } else {
+            // STDIO 服务器在构造阶段就已 fork 出子进程；握手失败若不收尾就是进程泄漏
+            runCatching { client.shutdown() }
         }
         return initResult
     }
@@ -117,6 +201,16 @@ class McpManager(
     }
 
     /**
+     * 列出单台服务器的工具（v4：[McpToolRegistrar] 逐台注册 first-class 工具用）。
+     * 服务器未连接时返回空列表——调用方据此跳过注册。
+     */
+    suspend fun listServerTools(serverName: String): List<McpToolDef> {
+        val client = synchronized(lock) { clients[serverName] } ?: return emptyList()
+        return runCatching { client.listTools().getOrDefault(emptyList()) }
+            .getOrDefault(emptyList())
+    }
+
+    /**
      * 调用MCP工具
      */
     suspend fun callTool(serverName: String, toolName: String, arguments: String): Result<McpToolResult> {
@@ -130,21 +224,25 @@ class McpManager(
      */
     suspend fun disconnect(name: String) {
         val client = synchronized(lock) { clients.remove(name) }
-        client?.let { runCatching { it.shutdown() } }
-        notifyChanged()
+        client?.let {
+            runCatching { it.shutdown() }
+            notifyChanged()
+            fireDisconnected(name)
+        }
     }
 
     /**
      * 断开所有
      */
     suspend fun disconnectAll() {
-        val snapshot = synchronized(lock) {
-            val all = clients.values.toList()
+        val removed = synchronized(lock) {
+            val all = clients.entries.associate { it.key to it.value }
             clients.clear()
             all
         }
-        snapshot.forEach { runCatching { it.shutdown() } }
+        removed.values.forEach { runCatching { it.shutdown() } }
         notifyChanged()
+        removed.keys.forEach { fireDisconnected(it) }
     }
 
     /**
@@ -164,16 +262,77 @@ class McpManager(
         synchronized(lock) { configs.values.filter { it.enabled } }
 
     /**
+     * 幂等预置一台内置 MCP 服务器（App 启动时调用，如内置 GitHub）。
+     *
+     * - 无同名条目 → 写入 [config]；
+     * - 同名条目已是 BUILTIN → 按传入定义刷新，但**保留用户 enabled 偏好**
+     *   （升级后新增字段/默认值得以下发，用户手动禁用的不会被重新打开）；
+     * - 同名条目是用户自建（HTTP/SSE/STDIO）→ 不动它（绝不劫持用户配置）。
+     */
+    suspend fun ensureBuiltinServer(config: McpServerConfig): Result<Unit> {
+        val error = synchronized(lock) {
+            val existing = configs[config.name]
+            if (existing != null && existing.transport != McpTransport.BUILTIN) {
+                return Result.failure(
+                    Exception("服务器 '${config.name}' 已被用户自建为 ${existing.transport}，不覆盖用户配置")
+                )
+            }
+            val merged = existing?.let { config.copy(enabled = it.enabled) } ?: config
+            runCatching {
+                configs[config.name] = merged
+                saveConfigsLocked()
+            }.exceptionOrNull()
+        }
+        if (error != null) return Result.failure(error)
+        notifyChanged()
+        return Result.success(Unit)
+    }
+
+    /**
      * 删除配置（同时断开活跃连接）。
      */
     suspend fun removeServer(name: String) {
         val client = synchronized(lock) { clients.remove(name) }
-        client?.let { runCatching { it.shutdown() } }
+        client?.let {
+            runCatching { it.shutdown() }
+            fireDisconnected(name)
+        }
         synchronized(lock) {
             configs.remove(name)
             runCatching { saveConfigsLocked() }
         }
         notifyChanged()
+    }
+
+    /**
+     * 幂等预置一台**沙箱** STDIO MCP 服务器（Issue #163，App 启动时调用，
+     * 预置清单见 [SANDBOX_PRESET_SERVERS]）。
+     *
+     * 语义仿 [ensureBuiltinServer]，但面向 `runInSandbox=true` 的 STDIO 条目
+     * （BUILTIN 校验会拒绝沙箱配置，所以另开方法）：
+     * - 无同名条目 → 写入 [config]（预置默认 enabled=false，只预置不连接）；
+     * - 同名条目已是沙箱条目 → 按传入定义刷新 command/args，但**保留用户
+     *   enabled 偏好**（用户手动启用的不会被重新关掉，反之亦然）；
+     * - 同名条目是用户自建（runInSandbox=false 的宿主 STDIO/远端条目）→
+     *   不动它并返回 failure（防劫持：绝不把用户配置悄悄改写成沙箱形态）。
+     */
+    suspend fun ensureSandboxServer(config: McpServerConfig): Result<Unit> {
+        val error = synchronized(lock) {
+            val existing = configs[config.name]
+            if (existing != null && !existing.runInSandbox) {
+                return Result.failure(
+                    Exception("服务器 '${config.name}' 已被用户自建为非沙箱条目（runInSandbox=false），不覆盖用户配置")
+                )
+            }
+            val merged = existing?.let { config.copy(enabled = it.enabled) } ?: config
+            runCatching {
+                configs[config.name] = merged
+                saveConfigsLocked()
+            }.exceptionOrNull()
+        }
+        if (error != null) return Result.failure(error)
+        notifyChanged()
+        return Result.success(Unit)
     }
 
     private fun saveConfigsLocked() {
@@ -209,5 +368,70 @@ class McpManager(
 
     private fun notifyChanged() {
         _changes.tryEmit(Unit)
+    }
+
+    companion object {
+        /**
+         * 沙箱 STDIO 连接的握手/请求超时（Issue #163）。
+         *
+         * npx 首次冷启动要下载包（-y 时先拉 tarball 再装依赖再起进程），
+         * 移动网络下 60s 走不完 —— 与其让用户在 initialize 阶段就撞超时，
+         * 不如给沙箱连接单独放宽到 180s；仅作用于 runInSandbox=true 的
+         * STDIO 配置，宿主 fork 与 HTTP/SSE 行为不变。
+         */
+        const val SANDBOX_REQUEST_TIMEOUT_MS = 180_000L
+
+        /**
+         * 按配置选择 STDIO 请求超时（纯函数，Issue #163 抽出便于单测）：
+         * 沙箱 STDIO → [SANDBOX_REQUEST_TIMEOUT_MS]；其余（含 HTTP/SSE ——
+         * 它们不走 STDIO 超时参数）→ [McpClient.HOST_STDIO_REQUEST_TIMEOUT_MS]。
+         */
+        fun requestTimeoutFor(config: McpServerConfig): Long =
+            if (config.runInSandbox && config.transport == McpTransport.STDIO) {
+                SANDBOX_REQUEST_TIMEOUT_MS
+            } else {
+                McpClient.HOST_STDIO_REQUEST_TIMEOUT_MS
+            }
+
+        /**
+         * 沙箱预置清单（Issue #163）—— 官方 reference servers，node 纯 JS
+         * 实现，arm64 兼容（无原生模块，npx 在 PRoot Ubuntu 内直接可跑）。
+         *
+         * - `fs-sandbox`：沙箱内文件系统读写（/workspace 作用域）；
+         * - `memory-sandbox`：知识图谱记忆（原定 git-sandbox —— 但
+         *   `@modelcontextprotocol/server-git` 已从 npm 下架（registry 返回
+         *   Not Found），换成同厂官方 server-memory）；
+         * - `everything-sandbox`：官方测试服务器（覆盖全部 MCP 能力面：
+         *   工具/资源/提示词/采样，验证沙箱链路用）。
+         *
+         * 全部 enabled=false：只预置不连接 —— rootfs 未就绪也先写入，连接
+         * 失败发生在用户主动启用时，ProotMcpProcessLauncher 已有引导性报错。
+         */
+        val SANDBOX_PRESET_SERVERS: List<McpServerConfig> = listOf(
+            McpServerConfig(
+                name = "fs-sandbox",
+                transport = McpTransport.STDIO,
+                command = "npx",
+                args = listOf("-y", "@modelcontextprotocol/server-filesystem", "/workspace"),
+                runInSandbox = true,
+                enabled = false
+            ),
+            McpServerConfig(
+                name = "memory-sandbox",
+                transport = McpTransport.STDIO,
+                command = "npx",
+                args = listOf("-y", "@modelcontextprotocol/server-memory"),
+                runInSandbox = true,
+                enabled = false
+            ),
+            McpServerConfig(
+                name = "everything-sandbox",
+                transport = McpTransport.STDIO,
+                command = "npx",
+                args = listOf("-y", "@modelcontextprotocol/server-everything"),
+                runInSandbox = true,
+                enabled = false
+            )
+        )
     }
 }

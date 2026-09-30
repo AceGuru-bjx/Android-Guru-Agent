@@ -7,16 +7,20 @@ import com.apex.agent.core.engine.AgentMode
 import com.apex.agent.core.engine.ConfirmationSink
 import com.apex.agent.core.engine.ConversationMemory
 import com.apex.agent.core.engine.ExecutionMemoryObserver
+import com.apex.agent.core.engine.MediaMarkdown
 import com.apex.agent.core.engine.PrivilegeInfoProvider
 import com.apex.agent.core.engine.StreamingToolCallAccumulator
 import com.apex.agent.core.engine.ThinkingLevel
 import com.apex.agent.core.engine.UserInput
+import com.apex.agent.core.engine.task.DanglingToolCallRepair
 import com.apex.agent.core.engine.compression.ContextCompressor
 import com.apex.agent.core.engine.compression.TokenEstimator
 import com.apex.agent.core.engine.compression.ToolOutputTruncator
 import com.apex.agent.core.llm.LlmClient
 import com.apex.agent.core.llm.LlmMessage
 import com.apex.agent.core.llm.LlmStreamChunk
+import com.apex.agent.core.llm.ToolCall
+import com.apex.agent.core.llm.ToolChoiceSpec
 import com.apex.agent.core.llm.runtime.LlmRequestContext
 import com.apex.agent.core.llm.runtime.ModelRuntime
 import com.apex.agent.core.llm.runtime.ModelRuntimeException
@@ -24,6 +28,8 @@ import com.apex.agent.core.llm.runtime.SingleClientModelRuntime
 import com.apex.agent.core.logging.LogLevel
 import com.apex.agent.core.tools.ToolExecutor
 import com.apex.agent.core.tools.ToolRegistry
+import com.apex.agent.core.tools.catalog.ToolActivationStore
+import com.apex.agent.core.tools.catalog.ToolRequestBudget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -170,7 +176,12 @@ class DefaultTaskOrchestrator(
      * 此前仅 AgentEngine 有压缩链路，通过编排器执行的长任务上下文会无界增长
      * （工具输出直接入历史），最终撞上模型窗口上限。这里补齐同一能力。
      */
-    private val contextCompressor: ContextCompressor? = null
+    private val contextCompressor: ContextCompressor? = null,
+    /**
+     * Tool System v4 — 共享会话激活存储（与 AgentEngine 同一实例）。
+     * 为空时编排器自建（独立激活域；测试兼容）。
+     */
+    private val toolActivation: ToolActivationStore = ToolActivationStore()
 ) : TaskOrchestrator {
 
     /** 实际执行 LLM 调用的运行时（多模型或单 client 回退）。 */
@@ -380,6 +391,21 @@ class DefaultTaskOrchestrator(
             // Persist memory (BUILD mode only — delegate owns its own memory)
             if (memory != null && agentConfig.mode == AgentMode.BUILD) {
                 try {
+                    // P2-7 修复：异常/超时/取消中断批执行后，历史尾部可能留下没有
+                    // 配对 ToolResult 的 Assistant.toolCalls（悬空 toolCall）——直接
+                    // 持久化会让下次 LLM 请求 400（OpenAI 要求 tool_calls 必须紧跟
+                    // tool 消息），且被 memory.save 固化后每轮都炸。保存前先跑
+                    // DanglingToolCallRepair 修补（TaskRuntime 恢复路径同款逻辑）。
+                    val repairReport = DanglingToolCallRepair.repair(conversationHistory)
+                    if (repairReport.hasRepairs) {
+                        OrchestratorLog.log(
+                            LogLevel.WARN,
+                            "repaired ${repairReport.repairedCallIds.size} dangling toolCalls " +
+                                "before memory.save: ${repairReport.repairedCallIds.joinToString(",")}"
+                        )
+                        conversationHistory.clear()
+                        conversationHistory.addAll(repairReport.repairedHistory)
+                    }
                     memory.save(conversationHistory.toList())
                 } catch (e: Throwable) {
                     OrchestratorLog.log(LogLevel.WARN, "Failed to save conversation memory: ${e.message}")
@@ -396,6 +422,9 @@ class DefaultTaskOrchestrator(
             }
 
             // Always emit Complete (matches ApexAgentEngine contract).
+            // S-c（5a）：此处 summary 保留 taskGoal —— 编排器事件面向后台任务
+            // 历史（TaskState.Finished 需要 goal 摘要），不进聊天流（聊天流走
+            // ApexAgentEngine，其 Complete.summary 已改为空串，不再报"任务完成"）。
             val elapsed = System.currentTimeMillis() - stateMachine.taskStartTimeMs
             val totalToolCalls = effectiveTotalToolCalls()
             if (stateMachine.currentState !is TaskState.Finished) {
@@ -573,13 +602,19 @@ class DefaultTaskOrchestrator(
             val contentBuilder = StringBuilder()
             val reasoningBuilder = StringBuilder()
             val toolCallAccumulators = LinkedHashMap<String, StreamingToolCallAccumulator>()
-            // 「函数调用」白名单：仅向模型暴露用户圈选的工具子集（null = 全部），
-            // 与 AgentEngine 保持同一过滤语义，避免模型幻觉调用未启用工具。
-            val tools = toolRegistry.getToolDefinitions().let { defs ->
-                agentConfig.enabledToolIds?.let { whitelist ->
-                    defs.filter { it.name in whitelist }
-                } ?: defs
+            // ═══ Tool System v4：工具计划（与 AgentEngine 同一预算/命名/强制语义）═══
+            // provider 安全名 + 预算钳制 + legacy 别名剔除；强制圈选时仅暴露选中集。
+            val plan = if (agentConfig.forcedToolIds.isNotEmpty()) {
+                ToolRequestBudget.planForced(toolRegistry, agentConfig.forcedToolIds)
+            } else {
+                ToolRequestBudget.planDefault(
+                    registry = toolRegistry,
+                    activation = toolActivation,
+                    exposeAll = agentConfig.exposeAllTools
+                )
             }
+            val tools = plan.tools
+            val nameToId = plan.providerNameToId
             // T72 §九 / §十一：含图片时路由到 VISION 角色（要求 vision+imageInput），
             // 路由器做能力校验与降级；全链无视觉模型时抛 ModelCapabilityMismatch。
             val reactContext = if (conversationHistory.any { it is LlmMessage.User && it.images.isNotEmpty() }) {
@@ -588,11 +623,18 @@ class DefaultTaskOrchestrator(
                 LlmRequestContext.primary("orchestrator_react_loop")
             }
             try {
+                // B1：不显式传 temperature —— 哨兵回退到 Profile 值（与 AgentEngine
+                // 同一语义），设置页改参数对下一次请求真实生效。
                 runtime.chatStream(
                     context = reactContext,
                     messages = conversationHistory.toList(),
                     tools = tools,
-                    temperature = agentConfig.temperature
+                    temperature = -1f,
+                    maxTokens = -1,
+                    toolChoice = if (agentConfig.forcedToolIds.isNotEmpty() && tools.isNotEmpty()) {
+                        if (tools.size == 1) ToolChoiceSpec.Function(tools.first().name)
+                        else ToolChoiceSpec.Required
+                    } else null
                 ).collect { chunk: LlmStreamChunk ->
                     // 正文内容：逐段流式转发为 ResponseChunk（与 AgentEngine 一致，
                     // 此前编排器把正文误当 ThinkingChunk 整段缓存，UI 无法逐字渲染）。
@@ -601,6 +643,12 @@ class DefaultTaskOrchestrator(
                             contentBuilder.append(text)
                             send(AgentEvent.ResponseChunk(text))
                         }
+                    }
+                    // 多模态输出：图片/视频模型生成的媒体转 markdown 注入回复流
+                    // （与 AgentEngine 的 MediaMarkdown 策略一致，复用 ResponseChunk 管线）。
+                    MediaMarkdown.from(chunk.images, chunk.videos)?.let { mediaMd ->
+                        contentBuilder.append(mediaMd)
+                        send(AgentEvent.ResponseChunk(mediaMd))
                     }
                     // 原生思考内容（DeepSeek-R1 / Qwen3-thinking / o-series）：
                     // 透传为 ThinkingChunk，让 UI 显示思维链（与 AgentEngine 一致）。
@@ -640,6 +688,11 @@ class DefaultTaskOrchestrator(
             val fullThought = contentBuilder.toString()
 
             val toolCalls = toolCallAccumulators.values.map { it.build() }
+                // v4：模型回显 provider 名 → 注册表 id（BatchExecutionEngine/截断策略
+                // 按 registry id 路由）；无映射时原样（registry id 直查兼容旧会话）。
+                .map { tc ->
+                    ToolCall(id = tc.id, name = nameToId[tc.name] ?: tc.name, arguments = tc.arguments)
+                }
 
             // ── Branch: tool calls vs final response vs empty ──
             if (toolCalls.isNotEmpty()) {

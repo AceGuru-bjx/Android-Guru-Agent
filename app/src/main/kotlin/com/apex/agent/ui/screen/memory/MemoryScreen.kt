@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,14 +16,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
@@ -44,9 +50,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.apex.agent.R
 import com.apex.agent.platform.csmem.model.SemanticNode
 import com.apex.agent.platform.csmem.store.EpisodeSummary
 import com.apex.agent.platform.csmem.store.FSMMacro
@@ -65,6 +73,8 @@ fun MemoryScreen(
     val query by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
     val message by viewModel.lastMessage.collectAsStateWithLifecycle()
+    val quarantinedCount by viewModel.quarantinedCount.collectAsStateWithLifecycle()
+    val dreamRunning by viewModel.dreamRunning.collectAsStateWithLifecycle()
 
     var showSearch by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<EpisodeSummary?>(null) }
@@ -74,13 +84,21 @@ fun MemoryScreen(
         if (message != null) showToast = true
     }
 
+    // P2-12（6-c）：VM 为 Activity 级单例，其他页面产生的记忆变更不会自动同步到本页 ——
+    // 每次进入本屏强制刷新快照（原仅 VM init 刷新一次；照 SkillScreen 同款模式）。
+    LaunchedEffect(Unit) { viewModel.refresh(); viewModel.refreshQuarantineCount() }
+
     Scaffold(
+        // 内层 Scaffold 置零 insets：状态栏已由根 Scaffold 顶栏承担，避免双重叠加
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
-                title = { Text("记忆") },
+                // 顶栏置零 windowInsets，避免与根 Scaffold 状态栏双重叠加
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                title = { Text(stringResource(R.string.memory_title)) },
                 actions = {
                     IconButton(onClick = { showSearch = !showSearch }) {
-                        Icon(Icons.Default.Search, contentDescription = "搜索节点")
+                        Icon(Icons.Default.Search, contentDescription = stringResource(R.string.memory_search_nodes))
                     }
                 }
             )
@@ -92,7 +110,7 @@ fun MemoryScreen(
                     modifier = Modifier.padding(16.dp),
                     action = {
                         TextButton(onClick = { showToast = false; viewModel.clearMessage() }) {
-                            Text("知道了")
+                            Text(stringResource(R.string.memory_got_it))
                         }
                     }
                 ) { Text(msg) }
@@ -112,16 +130,24 @@ fun MemoryScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 StatCard("Episode", "${stats.episodeCount}", Modifier.weight(1f))
-                StatCard("节点", "${stats.nodeCount}", Modifier.weight(1f))
-                StatCard("宏技能", "${stats.macroCount}", Modifier.weight(1f))
+                StatCard(stringResource(R.string.memory_nodes), "${stats.nodeCount}", Modifier.weight(1f))
+                StatCard(stringResource(R.string.memory_macros), "${stats.macroCount}", Modifier.weight(1f))
             }
+
+            // 记忆健康（梦境巩固 + 免疫隔离区 —— T76 补齐入口）
+            MemoryHealthCard(
+                quarantinedCount = quarantinedCount,
+                dreamRunning = dreamRunning,
+                onDreamNow = viewModel::dreamNow,
+                onClearQuarantine = viewModel::clearQuarantine
+            )
 
             // 搜索区
             if (showSearch) {
                 OutlinedTextField(
                     value = query,
                     onValueChange = viewModel::onSearch,
-                    label = { Text("搜索节点（文本 / 关键词）") },
+                    label = { Text(stringResource(R.string.memory_search_label)) },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -132,7 +158,7 @@ fun MemoryScreen(
             if (showSearch && query.isNotBlank()) {
                 // 搜索结果
                 if (searchResults.isEmpty()) {
-                    EmptyHint("没有匹配 \"$query\" 的记忆节点")
+                    EmptyHint(stringResource(R.string.memory_no_match, query))
                 } else {
                     LazyColumn(
                         modifier = Modifier.padding(horizontal = 12.dp),
@@ -145,9 +171,9 @@ fun MemoryScreen(
                 }
             } else {
                 // 近期 Episode
-                SectionTitle("近期会话")
+                SectionTitle(stringResource(R.string.memory_recent_episodes))
                 if (episodes.isEmpty()) {
-                    EmptyHint("还没有任何记忆会话\nAgent 执行任务后这里会沉淀 Episode")
+                    EmptyHint(stringResource(R.string.memory_empty_episodes))
                 } else {
                     LazyColumn(
                         modifier = Modifier
@@ -166,9 +192,9 @@ fun MemoryScreen(
                 }
 
                 // 高频宏
-                SectionTitle("高频宏技能")
+                SectionTitle(stringResource(R.string.memory_frequent_macros))
                 if (macros.isEmpty()) {
-                    EmptyHint("还没有蒸馏出的宏技能\n任务成功后 Agent 会沉淀可复用 FSM 宏")
+                    EmptyHint(stringResource(R.string.memory_empty_macros))
                 } else {
                     LazyColumn(
                         modifier = Modifier
@@ -190,16 +216,16 @@ fun MemoryScreen(
     pendingDelete?.let { ep ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除记忆会话") },
-            text = { Text("确定删除 \"${ep.goal}\" 吗？关联的边会一并清除（节点为共享字典，不随删硬删）。") },
+            title = { Text(stringResource(R.string.memory_delete_episode_title)) },
+            text = { Text(stringResource(R.string.memory_delete_episode_text, ep.goal)) },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteEpisode(ep.episodeId)
                     pendingDelete = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { Text(stringResource(R.string.memory_delete), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+                TextButton(onClick = { pendingDelete = null }) { Text(stringResource(R.string.memory_cancel)) }
             }
         )
     }
@@ -276,17 +302,22 @@ private fun EpisodeCard(episode: EpisodeSummary, onDelete: () -> Unit) {
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "${episode.status} · ${formatTime(episode.startedAt)} · ${episode.totalActions} 动作",
+                    stringResource(
+                        R.string.memory_episode_meta,
+                        episode.status,
+                        formatTime(episode.startedAt),
+                        episode.totalActions
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (episode.isDistilled) {
-                    Text("已蒸馏为宏", style = MaterialTheme.typography.labelSmall,
+                    Text(stringResource(R.string.memory_distilled), style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary)
                 }
             }
             IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "删除",
+                Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.memory_delete),
                     tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f), modifier = Modifier.size(20.dp))
             }
         }
@@ -302,7 +333,7 @@ private fun NodeCard(node: SemanticNode) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    node.textHint ?: "(无文本)",
+                    node.textHint ?: stringResource(R.string.memory_no_text),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
@@ -328,17 +359,113 @@ private fun MacroCard(macro: FSMMacro) {
                 Text(macro.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "${macro.appPackage ?: "通用"} · 成功 ${macro.successCount} / 失败 ${macro.failureCount}",
+                    stringResource(
+                        R.string.memory_macro_stats,
+                        macro.appPackage ?: stringResource(R.string.memory_generic),
+                        macro.successCount,
+                        macro.failureCount
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (macro.isCrystallized) {
-                    Text("已晶化", style = MaterialTheme.typography.labelSmall,
+                    Text(stringResource(R.string.memory_crystallized), style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary)
                 }
             }
-            Text("${macro.transitions.size} 步", style = MaterialTheme.typography.labelMedium,
+            Text(stringResource(R.string.memory_steps, macro.transitions.size), style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+// ═══ 记忆健康卡：梦境巩固 + 免疫隔离区（T76 审计补齐入口）═══
+
+/**
+ * cs-mem 卖点的用户侧入口：
+ *  - 「梦境整理」→ DreamRenderer.dreamNow()（能量衰减/修剪/宏优化，周期任务亦可手动触发）
+ *  - 「免疫隔离区」→ MemoryImmuneSystem 可疑 UI 指纹计数/清除（0 = 未触发隔离，正常态）
+ *
+ * 修复：旧实现把两行内容直接平铺在 Surface 里 —— Material3 Surface 内容包在 Box
+ * 中，两个 Row 互相堆叠绘制，「梦境整理」与「免疫隔离区」的文字重叠在一起。
+ * 现显式包一层 Column 纵向排布，行间加细分隔线。
+ */
+@Composable
+private fun MemoryHealthCard(
+    quarantinedCount: Int,
+    dreamRunning: Boolean,
+    onDreamNow: () -> Unit,
+    onClearQuarantine: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 梦境整理
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(
+                            Icons.Default.Bedtime, contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(stringResource(R.string.memory_dream_title), style = MaterialTheme.typography.labelMedium)
+                    }
+                    Text(
+                        if (dreamRunning) stringResource(R.string.memory_dream_running)
+                        else stringResource(R.string.memory_dream_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedButton(onClick = onDreamNow, enabled = !dreamRunning) {
+                    if (dreamRunning) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text(stringResource(R.string.memory_dream_now))
+                    }
+                }
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 14.dp),
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+            )
+
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 免疫隔离区
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(
+                            Icons.Default.HealthAndSafety, contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (quarantinedCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(stringResource(R.string.memory_quarantine_title), style = MaterialTheme.typography.labelMedium)
+                    }
+                    Text(
+                        if (quarantinedCount > 0) stringResource(R.string.memory_quarantined, quarantinedCount)
+                        else stringResource(R.string.memory_quarantine_clear),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (quarantinedCount > 0) {
+                    OutlinedButton(onClick = onClearQuarantine) {
+                        Text(stringResource(R.string.memory_clear), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
         }
     }
 }

@@ -73,23 +73,29 @@ class LinuxPRootBackendTest {
         binaryProvider: PRootBinaryProvider = FakeBinaryProvider(),
         rootfsProvider: RootfsProvider = FakeRootfsProvider(),
         workspaceRoot: File = File(tmp.root, "workspaces"),
-        homeRoot: File = File(tmp.root, "home")
+        homeRoot: File = File(tmp.root, "home"),
+        // T82 后默认 STANDARD（/proc /dev /sys 系统 bind）； argv 契约测试显式传 NONE
+        // 以保持「仅 home+workspace」的确定性断言 —— 系统 bind 另有专项测试。
+        systemBinds: SystemBindProfile = SystemBindProfile.STANDARD
     ) = LinuxPRootBackend(
         binaryProvider = binaryProvider,
         rootfsProvider = rootfsProvider,
         workspaces = LinuxWorkspaceManager(workspaceRoot),
         userHome = GuestUserHome(homeRoot),
         commandBuilder = PRootCommandBuilderImpl(),
+        systemBinds = systemBinds,
         hostEnv = null // JVM: 无 PRootHostEnvironment → 最小 env
     )
 
     // ─── argv 契约（§5.2） ───
 
     @Test
-    fun `argv is proot -r rootfs -0 kill-on-exit binds home+workspace -w guestCwd -E env -- bash -i`() = runBlocking {
+    fun `argv is proot -r rootfs -0 kill-on-exit binds home+workspace -w guestCwd env-trampoline -- bash -i`() = runBlocking {
         val wsRoot = File(tmp.root, "ws")
         val homeRoot = File(tmp.root, "home")
-        val b = backend(workspaceRoot = wsRoot, homeRoot = homeRoot)
+        // T82 合并后修复：默认 systemBinds=STANDARD 会追加 /proc /dev /sys bind，
+        // 本契约测试只验证 T75 的 home+workspace 路由 —— 显式 NONE 隔离。
+        val b = backend(workspaceRoot = wsRoot, homeRoot = homeRoot, systemBinds = SystemBindProfile.NONE)
         val spec = b.prepare(SessionSpawnRequest(cwd = "", rows = 24, cols = 80, env = emptyMap())).getOrThrow()
 
         val argv = spec.argv
@@ -97,7 +103,11 @@ class LinuxPRootBackendTest {
         assertEquals("-r", argv[1]); assertEquals("/fake/rootfs", argv[2])
         assertEquals("-0", argv[3])
         assertEquals("--kill-on-exit", argv[4])
-        // T75: binds —— home:/root（request.binds，先）+ workspace:/workspace（builder 追加）
+        // T75: binds —— home:/root（request.binds，先）+ workspace:/workspace（builder 追加）。
+        // NONE 隔离下仅此两项；STANDARD 的 /proc /dev /sys 三连由下方专项测试覆盖
+        //（合并考古：审计分支曾把本断言改写成含系统三连的 5 项期望，与本测试
+        // 显式 SystemBindProfile.NONE 的隔离前提自相矛盾 —— 远端 main CI 即红。
+        // 取 06ed71c 的 NONE 一致版本，期望与注入 profile 严格对齐。）
         val bindArgs = argv.zipWithNext().filter { (a, _) -> a == "-b" }.map { it.second }
         assertEquals(
             listOf("${homeRoot.absolutePath}:/root", "${File(wsRoot, "default").absolutePath}:/workspace"),
@@ -107,14 +117,20 @@ class LinuxPRootBackendTest {
         val wIdx = argv.indexOf("-w")
         assertTrue(wIdx > 0)
         assertEquals("/workspace", argv[wIdx + 1])
-        // 命令终结符 + bash -i
+        // 命令终结符 + env trampoline + bash -i（T88：不再有 -E）
         val sepIdx = argv.indexOf("--")
         assertTrue(sepIdx > 0)
-        assertEquals(listOf("/bin/bash", "-i"), argv.subList(sepIdx + 1, argv.size))
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, argv[sepIdx + 1])
+        assertEquals(PRootEnvTrampoline.CLEAN_ENV_FLAG, argv[sepIdx + 2])
+        assertEquals(listOf("/bin/bash", "-i"), argv.takeLast(2))
+        assertTrue(
+            "argv must not carry 5.1.107-incompatible flags: $argv",
+            PRootArgvContract.legacyIncompatibleFlags(argv).isEmpty()
+        )
     }
 
     @Test
-    fun `guest env goes through -E flags with request overrides last`() = runBlocking {
+    fun `guest env goes through env trampoline with request overrides last`() = runBlocking {
         val b = backend()
         val spec = b.prepare(
             SessionSpawnRequest(
@@ -124,15 +140,28 @@ class LinuxPRootBackendTest {
             )
         ).getOrThrow()
 
-        val eFlags = spec.argv.zipWithNext().filter { (a, _) -> a == "-E" }.map { it.second }
+        // T88：guest env 在 "--" 后的 env trampoline 段里（env -i K=V … bash -i）
+        val sepIdx = spec.argv.indexOf("--")
+        assertTrue(sepIdx > 0)
+        val guestCmd = spec.argv.subList(sepIdx + 1, spec.argv.size)
+        assertEquals(PRootEnvTrampoline.ENV_EXECUTABLE, guestCmd[0])
+        assertEquals(PRootEnvTrampoline.CLEAN_ENV_FLAG, guestCmd[1])
+        // trampoline 段尾部是 bash -i；其余元素全是 K=V 赋值
+        val assignments = guestCmd.subList(2, guestCmd.size - 2)
+        assertTrue("trampoline 段只含 K=V 赋值: $guestCmd", assignments.all { it.contains('=') })
         // 基线六项 + 调用方两项（HOME 覆盖）
-        assertTrue("TERM via -E", eFlags.any { it == "TERM=xterm-256color" })
-        assertTrue("LANG via -E", eFlags.any { it == "LANG=C.UTF-8" })
-        assertTrue("SHELL via -E", eFlags.any { it == "SHELL=/bin/bash" })
-        assertTrue("PATH via -E", eFlags.any { it.startsWith("PATH=/usr") })
-        assertTrue("TMPDIR via -E", eFlags.any { it == "TMPDIR=/tmp" })
-        assertTrue("request override wins", eFlags.any { it == "HOME=/home/agent" })
-        assertTrue("custom request var", eFlags.any { it == "CUSTOM=42" })
+        assertTrue("TERM in trampoline", assignments.any { it == "TERM=xterm-256color" })
+        assertTrue("LANG in trampoline", assignments.any { it == "LANG=C.UTF-8" })
+        assertTrue("SHELL in trampoline", assignments.any { it == "SHELL=/bin/bash" })
+        assertTrue("PATH in trampoline", assignments.any { it.startsWith("PATH=/usr") })
+        assertTrue("TMPDIR in trampoline", assignments.any { it == "TMPDIR=/tmp" })
+        assertTrue("request override wins", assignments.any { it == "HOME=/home/agent" })
+        assertTrue("custom request var", assignments.any { it == "CUSTOM=42" })
+        // T88 回归锁：-E 永不回潮（捆绑 proot 5.1.107 会直接拒启）
+        assertTrue(
+            "no -E ever: ${spec.argv}",
+            PRootArgvContract.legacyIncompatibleFlags(spec.argv).isEmpty()
+        )
     }
 
     @Test
@@ -166,7 +195,8 @@ class LinuxPRootBackendTest {
     fun `workspaceId routes to per-workspace bind dir and metadata`() = runBlocking {
         val wsRoot = File(tmp.root, "ws")
         val homeRoot = File(tmp.root, "home")
-        val b = backend(workspaceRoot = wsRoot, homeRoot = homeRoot)
+        // T82 合并后修复：同上 —— NONE 隔离使 zipWithNext 找 workspace bind 的断言稳定。
+        val b = backend(workspaceRoot = wsRoot, homeRoot = homeRoot, systemBinds = SystemBindProfile.NONE)
         val spec = b.prepare(
             SessionSpawnRequest(cwd = "", rows = 24, cols = 80, workspaceId = "task-42")
         ).getOrThrow()
@@ -175,11 +205,13 @@ class LinuxPRootBackendTest {
         val wsBind = spec.argv.zipWithNext().first { p -> p.first == "-b" && p.second.endsWith(":/workspace") }.second
         assertEquals("${File(wsRoot, "task-42").absolutePath}:/workspace", wsBind)
         assertTrue(File(wsRoot, "task-42").isDirectory)
-        // 元数据携带 workspaceId + 双 bind
+        // 元数据携带 workspaceId + 双 bind（NONE 隔离：home + workspace 两项；
+        // STANDARD 的 5 项全量断言见 T82 专项测试）
         assertEquals("task-42", spec.metadata.workspaceId)
         assertEquals(File(wsRoot, "task-42").absolutePath, spec.metadata.workspaceDir)
         assertEquals(2, spec.metadata.binds.size)
         assertTrue(spec.metadata.binds.any { it.endsWith(":/root") })
+        assertTrue(spec.metadata.binds.any { it.endsWith(":/workspace") })
     }
 
     @Test
@@ -380,5 +412,41 @@ class LinuxPRootBackendTest {
         val located = runBlocking { provider.locate().getOrThrow() }
         // JVM 测试（无设备 ABI 列表）→ 不做 ABI 门禁
         assertTrue(runBlocking { provider.verify(located) }.isSuccess)
+    }
+
+    // ─── T82: 系统级 bind（/proc /dev /sys，proot-distro 语义）───
+
+    @Test
+    fun `T82 STANDARD system binds append proc dev sys after home bind`() = runBlocking {
+        // 本测试跑在真实 JVM/Linux 文件系统上 —— /proc /dev /sys 恒存在，
+        // filterExisting 不会丢弃任何条目（诚实过滤语义另有边界验证方式）。
+        val b = backend(systemBinds = SystemBindProfile.STANDARD)
+        val spec = b.prepare(SessionSpawnRequest(cwd = "", rows = 24, cols = 80, env = emptyMap())).getOrThrow()
+        val bindArgs = spec.argv.zipWithNext().filter { (a, _) -> a == "-b" }.map { it.second }
+        // 顺序契约：home 先（T75），系统 bind 中间（T82），workspace 最后（builder 追加）
+        assertEquals(
+            listOf(
+                "${File(tmp.root, "home").absolutePath}:/root",
+                "/proc:/proc",
+                "/dev:/dev",
+                "/sys:/sys",
+                "${File(File(tmp.root, "workspaces"), "default").absolutePath}:/workspace"
+            ),
+            bindArgs
+        )
+    }
+
+    @Test
+    fun `T82 NONE system binds keep legacy argv bare`() = runBlocking {
+        val b = backend(systemBinds = SystemBindProfile.NONE)
+        val spec = b.prepare(SessionSpawnRequest(cwd = "", rows = 24, cols = 80, env = emptyMap())).getOrThrow()
+        val bindArgs = spec.argv.zipWithNext().filter { (a, _) -> a == "-b" }.map { it.second }
+        assertEquals(
+            listOf(
+                "${File(tmp.root, "home").absolutePath}:/root",
+                "${File(File(tmp.root, "workspaces"), "default").absolutePath}:/workspace"
+            ),
+            bindArgs
+        )
     }
 }

@@ -6,6 +6,7 @@ import com.apex.agent.core.llm.LlmResponse
 import com.apex.agent.core.llm.LlmStreamChunk
 import com.apex.agent.core.llm.ModelCapabilities
 import com.apex.agent.core.llm.ModelRole
+import com.apex.agent.core.llm.ToolChoiceSpec
 import com.apex.agent.core.llm.ToolDefinition
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -28,13 +29,22 @@ import kotlinx.coroutines.flow.flow
  */
 interface ModelRuntime {
 
-    /** 非流式请求。可能抛 [ModelRuntimeException]（含降级耗尽 / 能力不匹配等）。 */
+    /**
+     * 非流式请求。可能抛 [ModelRuntimeException]（含降级耗尽 / 能力不匹配等）。
+     *
+     * 采样参数哨兵回退制（B1/B2 修复）：[temperature] / [maxTokens] 默认为
+     * 哨兵（< 0 = 未指定），透传给 [LlmClient] 后由实现层回退到 Profile
+     * （LlmConfig）值——引擎不再显式传 AgentConfig 快照，设置页改参数对
+     * 下一次请求真实生效；需要强制覆盖的场景（摘要压缩低温）传显式值。
+     */
     suspend fun chat(
         context: LlmRequestContext,
         messages: List<LlmMessage>,
         tools: List<ToolDefinition> = emptyList(),
-        temperature: Float = 0.7f,
-        maxTokens: Int = 4096
+        /** < 0（默认 -1）= 未指定 → 用 Profile 值；>= 0 = 显式覆盖。 */
+        temperature: Float = -1f,
+        /** < 0（默认 -1）= 未指定 → 用 Profile 值（皆未设置时回退 4096）。 */
+        maxTokens: Int = -1
     ): LlmResponse
 
     /** 流式请求。Flow 内可能抛 [ModelRuntimeException]。 */
@@ -42,9 +52,32 @@ interface ModelRuntime {
         context: LlmRequestContext,
         messages: List<LlmMessage>,
         tools: List<ToolDefinition> = emptyList(),
-        temperature: Float = 0.7f,
-        maxTokens: Int = 4096
+        /** < 0（默认 -1）= 未指定 → 用 Profile 值；>= 0 = 显式覆盖。 */
+        temperature: Float = -1f,
+        /** < 0（默认 -1）= 未指定 → 用 Profile 值（皆未设置时回退 4096）。 */
+        maxTokens: Int = -1
     ): Flow<LlmStreamChunk>
+
+    // ═══ Tool System v4 — per-request tool choice overloads ═══
+    // 默认实现透传 legacy 路径（无 tool_choice 覆盖）。
+
+    suspend fun chat(
+        context: LlmRequestContext,
+        messages: List<LlmMessage>,
+        tools: List<ToolDefinition>,
+        temperature: Float,
+        maxTokens: Int,
+        toolChoice: ToolChoiceSpec?
+    ): LlmResponse = chat(context, messages, tools, temperature, maxTokens)
+
+    fun chatStream(
+        context: LlmRequestContext,
+        messages: List<LlmMessage>,
+        tools: List<ToolDefinition>,
+        temperature: Float,
+        maxTokens: Int,
+        toolChoice: ToolChoiceSpec?
+    ): Flow<LlmStreamChunk> = chatStream(context, messages, tools, temperature, maxTokens)
 
     /** 当前全部 Profile 的运行时快照（§十五），不含 API Key。 */
     fun snapshot(): List<ModelRuntimeDiagnostics.ModelRuntimeSnapshot>
@@ -89,6 +122,27 @@ class SingleClientModelRuntime(
         temperature: Float,
         maxTokens: Int
     ): Flow<LlmStreamChunk> = client.chatStream(messages, tools, temperature, maxTokens)
+
+    // v4：强制函数调用透传（否则 legacy 单 client 路径会丢失 tool_choice）。
+
+    override suspend fun chat(
+        context: LlmRequestContext,
+        messages: List<LlmMessage>,
+        tools: List<ToolDefinition>,
+        temperature: Float,
+        maxTokens: Int,
+        toolChoice: ToolChoiceSpec?
+    ): LlmResponse = client.chat(messages, tools, temperature, maxTokens, toolChoice)
+
+    override fun chatStream(
+        context: LlmRequestContext,
+        messages: List<LlmMessage>,
+        tools: List<ToolDefinition>,
+        temperature: Float,
+        maxTokens: Int,
+        toolChoice: ToolChoiceSpec?
+    ): Flow<LlmStreamChunk> =
+        client.chatStream(messages, tools, temperature, maxTokens, toolChoice)
 
     override fun snapshot(): List<ModelRuntimeDiagnostics.ModelRuntimeSnapshot> = emptyList()
 

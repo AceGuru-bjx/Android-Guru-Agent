@@ -220,6 +220,14 @@ Java_com_apex_agent_platform_terminal_NativePty_nativeSendSignal(
     return PtyEngine::instance().sendSignal(sessionId, signal);
 }
 
+// T82：只向控制终端前台进程组（tcgetpgrp）发信号 —— shell 自身组不受影响。
+// 无前台作业（fg == shell pid）/ 会话不存在 → false（调用方退化到 session 级信号）。
+JNIEXPORT jboolean JNICALL
+Java_com_apex_agent_platform_terminal_NativePty_nativeSignalForegroundGroup(
+    JNIEnv*, jobject, jint sessionId, jint signal) {
+    return PtyEngine::instance().signalForeground(sessionId, signal);
+}
+
 JNIEXPORT void JNICALL
 Java_com_apex_agent_platform_terminal_NativePty_nativeResize(
     JNIEnv*, jobject, jint sessionId, jint rows, jint cols) {
@@ -242,6 +250,18 @@ JNIEXPORT jint JNICALL
 Java_com_apex_agent_platform_terminal_NativePty_nativeGetExitCode(
     JNIEnv*, jobject, jint sessionId) {
     return PtyEngine::instance().getExitCode(sessionId);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// T87：exec 失败原因查询 —— createSessionArgv 后立即调用；空串 = exec 成功。
+// 「创建成功但进程即死」的会话（如 proot ENOENT/ELIBBAD）由此获得确切根因，
+// 不再让用户对着后续每次写入的「输入失败」猜谜。
+// ─────────────────────────────────────────────────────────────────────────
+JNIEXPORT jstring JNICALL
+Java_com_apex_agent_platform_terminal_NativePty_nativeGetSpawnError(
+    JNIEnv* env, jobject, jint sessionId) {
+    std::string err = PtyEngine::instance().spawnError(sessionId);
+    return env->NewStringUTF(err.c_str());
 }
 
 JNIEXPORT void JNICALL

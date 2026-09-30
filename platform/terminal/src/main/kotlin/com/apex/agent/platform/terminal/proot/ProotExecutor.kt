@@ -13,7 +13,7 @@ package com.apex.agent.platform.terminal.proot
  *    信号/快照/日志才能对上真实进程。
  *  - G4 host/guest env 分离：[hostEnv] 只含 proot 自身需要的变量
  *    （PROOT_TMP_DIR/PROOT_LOADER/LD_LIBRARY_PATH/PATH）；guest 环境变量只经
- *    argv 的 -E 传入，两套 env 永不混合。
+ *    argv 的 env trampoline（T88：/usr/bin/env -i K=V…）传入，两套 env 永不混合。
  */
 class ProotExecutor(
     /** proot 进程的宿主 env（来自 PRootHostEnvironment.hostEnv()；测试可注入任意 map）。 */
@@ -37,7 +37,10 @@ class ProotExecutor(
      * @param timeoutMs 超时强杀（destroyForcibly）并以 timedOut=true 返回。
      */
     fun execute(command: PRootCommand, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Execution {
-        return executeBounded(command, timeoutMs, maxOutputBytes = Long.MAX_VALUE).let {
+        // T81 (U-9)：默认有界 —— 原实现 Long.MAX_VALUE 把 BoundedOutputCapture 的
+        // halfBudget 压到 Int.MAX_VALUE，head StringBuilder 可积 ~1GB（OOM 风险）。
+        // 需要更大预算的调用方显式传 executeBounded(maxOutputBytes=…)。
+        return executeBounded(command, timeoutMs, maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES).let {
             Execution(
                 pid = it.pid,
                 exitCode = it.exitCode,

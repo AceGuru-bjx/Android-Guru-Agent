@@ -19,6 +19,10 @@ data class ModelCapabilities(
     val jsonMode: Boolean = false,
     val imageInput: Boolean = false,
     val longContext: Boolean = false,
+    /** 图片生成（多模态输出）：chat 内生图（OpenRouter image 模型 / Gemini 图像输出 / CogView-chat 等）。 */
+    val imageGeneration: Boolean = false,
+    /** 视频生成（多模态输出）：chat 内生视频（video_url part / message.video_url）。 */
+    val videoGeneration: Boolean = false,
 ) {
     fun summary(): String = buildList {
         if (text) add("Text")
@@ -26,6 +30,8 @@ data class ModelCapabilities(
         if (toolCalling) add("Tools")
         if (structuredOutput) add("JSON")
         if (reasoning) add("Reason")
+        if (imageGeneration) add("ImageGen")
+        if (videoGeneration) add("VideoGen")
         if (longContext) add("LongCtx")
     }.joinToString(" · ")
 }
@@ -138,6 +144,18 @@ data class ModelProfile(
     val toolTimeoutSeconds: Int = 30,
     val maxToolResultTokens: Int = 4096,
 
+    /**
+     * 模型原生联网搜索（Provider-native web search）。
+     * OFF = 默认不发送任何搜索参数（兼容所有端点）；
+     * AUTO = 按端点自动启用（baseUrl/providerId 推断，未知端点回退 OFF）。
+     * 详见 [WebSearchMode]。
+     *
+     * 必须带默认值：本类被 [com.apex.agent.ui.screen.settings.SettingsRepository]
+     * JSON 序列化持久化，旧版本落盘的 Profile 无此字段，缺省回退 OFF 才能反序列化不炸。
+     * 运行时经 [LlmConfig.Companion.fromProfile] 透传到 [LlmConfig.webSearch]。
+     */
+    val webSearch: WebSearchMode = WebSearchMode.OFF,
+
     // ── Structured Output ─────────────────────────────────────
     val structuredOutputMode: StructuredOutputMode = StructuredOutputMode.TEXT,
     val structuredOutputStrict: Boolean = false,
@@ -229,27 +247,54 @@ object ModelProfileDefaults {
             ModelCapabilities(text = true, toolCalling = true, streaming = true, reasoning = true)),
         provider("openrouter", "OpenRouter", "https://openrouter.ai/api/v1",
             ModelCapabilities(text = true, vision = true, toolCalling = true, structuredOutput = true, streaming = true, reasoning = true, longContext = true)),
-        provider("ollama", "Ollama", "http://localhost:11434/v1",
+        provider("ollama", "Ollama（本机 / 局域网）", "http://localhost:11434/v1",
             ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true)),
         provider("lmstudio", "LM Studio", "http://localhost:1234/v1",
             ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true)),
         provider("vllm", "vLLM", "http://localhost:8000/v1",
             ModelCapabilities(text = true, toolCalling = true, streaming = true)),
-        provider("custom_openai", "Custom OpenAI Compatible", "https://",
+
+        // ── 国内 / 海外常用 OpenAI 兼容中转（URL 均为官方公开的兼容端点）──────────
+        provider("siliconflow", "硅基流动 SiliconFlow", "https://api.siliconflow.cn/v1",
+            ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true, reasoning = true, longContext = true)),
+        provider("zhipu", "智谱 GLM", "https://open.bigmodel.cn/api/paas/v4",
+            ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true, reasoning = true)),
+        provider("moonshot", "Moonshot Kimi", "https://api.moonshot.cn/v1",
+            ModelCapabilities(text = true, toolCalling = true, streaming = true)),
+        provider("dashscope", "阿里百炼 DashScope", "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true, reasoning = true, longContext = true)),
+        provider("volcark", "火山方舟 Ark", "https://ark.cn-beijing.volces.com/api/v3",
+            ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true, reasoning = true)),
+        provider("hunyuan", "腾讯混元", "https://api.hunyuan.cloud.tencent.com/v1",
+            ModelCapabilities(text = true, toolCalling = true, streaming = true, reasoning = true)),
+        provider("xai", "xAI Grok", "https://api.x.ai/v1",
+            ModelCapabilities(text = true, vision = true, toolCalling = true, streaming = true, reasoning = true)),
+        provider("groq", "Groq", "https://api.groq.com/openai/v1",
+            ModelCapabilities(text = true, toolCalling = true, structuredOutput = true, streaming = true, reasoning = true)),
+
+        // 自定义端点：URL 留空，让用户自己填（任何 OpenAI 兼容中转都可）
+        provider("custom_openai", "自定义 OpenAI 兼容端点", "",
             ModelCapabilities(text = true, toolCalling = true, streaming = true)),
     )
 
+    /**
+     * 默认档案种子。
+     *
+     * **默认档案 = 「自定义 OpenAI 兼容端点」**（用户需求：不要预设厂商倾向、
+     * 不要默认 GPT）—— Base URL 与模型 ID 均留空，首次配置由用户填自己的
+     * 端点 / Key / 模型 ID，任何 OpenAI 兼容中转或自建服务都从这一档开始。
+     * 另附 DeepSeek / Ollama 两个**非默认**入门档案供快速试跑。
+     */
     fun defaultProfiles(providers: List<ProviderConfig>): List<ModelProfile> {
-        val openai = providers.firstOrNull { it.id == "openai" }
+        val custom = providers.firstOrNull { it.id == "custom_openai" }
         val deepseek = providers.firstOrNull { it.id == "deepseek" }
         val ollama = providers.firstOrNull { it.id == "ollama" }
         val list = mutableListOf<ModelProfile>()
-        openai?.let {
+        custom?.let {
             list += ModelProfile(
-                id = "default-gpt", name = "GPT (Default)", providerId = it.id,
-                modelId = "gpt-4o-mini", isDefault = true,
-                capabilities = ModelCapabilities(text = true, vision = true, toolCalling = true,
-                    structuredOutput = true, streaming = true, jsonMode = true, longContext = true),
+                id = "default-custom", name = "自定义模型", providerId = it.id,
+                modelId = "", isDefault = true,
+                capabilities = ModelCapabilities(text = true, toolCalling = true, streaming = true),
             )
         }
         deepseek?.let {

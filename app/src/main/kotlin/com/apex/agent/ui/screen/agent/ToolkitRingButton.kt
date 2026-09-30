@@ -54,20 +54,34 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.apex.agent.R
 import com.apex.agent.ui.screen.agent.toolkit.ChatRule
 import com.apex.agent.ui.screen.agent.toolkit.OutputFormat
+import com.apex.agent.core.tools.ToolCategory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** 工具菜单中展示用的工具引用（id + 显示名）。 */
-data class ToolRef(val id: String, val name: String)
+/** 工具菜单中展示用的工具引用（id + 显示名 + v2 元数据：类别/风险）。 */
+data class ToolRef(
+    val id: String,
+    val name: String,
+    /** 工具类别（v2 元数据）；null → 归入「其他」分组。 */
+    val category: ToolCategory? = null,
+    /** 高风险工具：菜单加 ⚠ 徽标，首次执行需用户确认。 */
+    val highRisk: Boolean = false
+)
 
 /**
  * 输入框"迷你小圆环"工具菜单入口。
@@ -85,9 +99,11 @@ fun ToolkitRingButton(
     outputFormat: OutputFormat,
     customSchema: String,
     rules: List<ChatRule>,
+    exposeAllTools: Boolean = false,
     onToggleWebSearch: (Boolean) -> Unit,
     onToggleTime: (Boolean) -> Unit,
     onToggleFunction: (String) -> Unit,
+    onToggleExposeAllTools: (Boolean) -> Unit = {},
     onSelectFormat: (OutputFormat) -> Unit,
     onSetCustomSchema: (String) -> Unit,
     onUpsertRule: (ChatRule) -> Unit,
@@ -112,14 +128,14 @@ fun ToolkitRingButton(
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(32.dp)
+                .size(40.dp) // 对齐修复：与 Attach/Github/Send 统一 40dp（原 32dp，输入行图标行高低不齐）
                 .clip(CircleShape)
                 .border(width = 1.5.dp, color = ringColor, shape = CircleShape)
                 .clickable { menuOpen = !menuOpen }
         ) {
             Icon(
                 Icons.Default.Extension,
-                contentDescription = "工具菜单",
+                contentDescription = stringResource(R.string.chat_cd_toolkit),
                 tint = ringColor,
                 modifier = Modifier.size(16.dp)
             )
@@ -138,22 +154,22 @@ fun ToolkitRingButton(
                 // 1. 网络搜索
                 ToolkitToggleItem(
                     icon = Icons.Default.Search,
-                    label = "网络搜索",
+                    label = stringResource(R.string.chat_web_search),
                     checked = webSearchEnabled,
                     onClick = { onToggleWebSearch(!webSearchEnabled) }
                 )
                 // 2. 时间
                 ToolkitToggleItem(
                     icon = Icons.Default.Schedule,
-                    label = "时间",
+                    label = stringResource(R.string.chat_time),
                     checked = timeEnabled,
                     onClick = { onToggleTime(!timeEnabled) }
                 )
-                // 3. 函数调用（二级：工具多选）
+                // 3. 函数调用（v4：强制语义 + 全量开关；二级：工具多选）
                 ToolkitExpandableItem(
                     icon = Icons.Default.Extension,
-                    label = if (selectedFunctionIds.isEmpty()) "函数调用"
-                    else "函数调用 (${selectedFunctionIds.size})",
+                    label = if (selectedFunctionIds.isEmpty()) stringResource(R.string.chat_function_forced)
+                    else stringResource(R.string.chat_function_forced_n, selectedFunctionIds.size),
                     expanded = functionsExpanded,
                     onClick = { functionsExpanded = !functionsExpanded }
                 )
@@ -164,27 +180,52 @@ fun ToolkitRingButton(
                 ) {
                     Column(
                         modifier = Modifier
-                            .heightIn(max = 220.dp)
+                            .heightIn(max = 260.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
-                        availableTools.forEach { tool ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onToggleFunction(tool.id) }
-                                    .padding(start = 36.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
-                            ) {
-                                Checkbox(
+                        // v4 语义提示：勾选=强制调用；不选=默认 CORE 集+目录。
+                        Text(
+                            text = stringResource(R.string.chat_function_forced_hint),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+                        // v4：全量工具模式（电源用户）
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.chat_expose_all_tools),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = exposeAllTools,
+                                onCheckedChange = onToggleExposeAllTools
+                            )
+                        }
+                        // v2：按类别分组展示（类别标题行 + 工具行），
+                        // 高风险工具带 ⚠ 徽标 —— 40+ 扁平列表找不到工具，
+                        // 分组让用户按任务类型快速定位。
+                        val grouped = availableTools
+                            .groupBy { it.category }
+                            .toSortedMap(compareBy { it?.order ?: Int.MAX_VALUE })
+                        grouped.forEach { (category, tools) ->
+                            Text(
+                                text = category?.label ?: stringResource(R.string.chat_category_other),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 36.dp, top = 8.dp, bottom = 2.dp)
+                            )
+                            tools.sortedBy { it.id }.forEach { tool ->
+                                ToolCheckboxRow(
+                                    tool = tool,
                                     checked = tool.id in selectedFunctionIds,
-                                    onCheckedChange = { onToggleFunction(tool.id) },
-                                    modifier = Modifier.size(32.dp)
-                                )
-                                Text(
-                                    "${tool.name}  ·  ${tool.id}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    onToggle = { onToggleFunction(tool.id) }
                                 )
                             }
                         }
@@ -193,8 +234,8 @@ fun ToolkitRingButton(
                 // 4. 结构化输出（二级：格式选择）
                 ToolkitExpandableItem(
                     icon = Icons.Default.DataObject,
-                    label = if (outputFormat == OutputFormat.NONE) "结构化输出"
-                    else "结构化输出: ${outputFormat.label}",
+                    label = if (outputFormat == OutputFormat.NONE) stringResource(R.string.chat_structured_output)
+                    else stringResource(R.string.chat_structured_output_fmt, outputFormatLabel(outputFormat)),
                     expanded = formatExpanded,
                     onClick = { formatExpanded = !formatExpanded }
                 )
@@ -220,7 +261,7 @@ fun ToolkitRingButton(
                                     .padding(start = 36.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
                             ) {
                                 Text(
-                                    fmt.label,
+                                    outputFormatLabel(fmt),
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -241,7 +282,8 @@ fun ToolkitRingButton(
                     icon = Icons.Default.MenuBook,
                     label = run {
                         val n = rules.count { it.enabled }
-                        if (n > 0) "规则 ($n)" else "规则"
+                        if (n > 0) stringResource(R.string.chat_rules_n, n)
+                        else stringResource(R.string.chat_rules)
                     },
                     onClick = {
                         menuOpen = false
@@ -276,6 +318,58 @@ fun ToolkitRingButton(
 
 // ═══ 菜单项基础组件 ═══
 
+/**
+ * 结构化输出格式显示名（UI 层本地化；OutputFormat.label 为 core 侧文案，
+ * JSON/XML 等格式名本身即通用词，仅本地化 NONE/CUSTOM 两个带语义的词）。
+ */
+@Composable
+private fun outputFormatLabel(fmt: OutputFormat): String = when (fmt) {
+    OutputFormat.NONE -> stringResource(R.string.chat_format_none)
+    OutputFormat.CUSTOM -> stringResource(R.string.chat_format_custom)
+    else -> fmt.label
+}
+
+/**
+ * 函数调用二级菜单的单个工具行（Checkbox + 名称 + id + 风险徽标）。
+ * 高风险工具的 ⚠ 徽标提示：勾选后首次执行仍会弹用户确认（v2 风险门）。
+ */
+@Composable
+private fun ToolCheckboxRow(
+    tool: ToolRef,
+    checked: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(start = 36.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = { onToggle() },
+            modifier = Modifier.size(32.dp)
+        )
+        Text(
+            "${tool.name}  ·  ${tool.id}",
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false)
+        )
+        if (tool.highRisk) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                "⚠",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
 @Composable
 private fun ToolkitToggleItem(
     icon: ImageVector,
@@ -294,7 +388,7 @@ private fun ToolkitToggleItem(
         Spacer(modifier = Modifier.width(10.dp))
         Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         if (checked) {
-            Icon(Icons.Default.Check, contentDescription = "已开启", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+            Icon(Icons.Default.Check, contentDescription = stringResource(R.string.chat_cd_enabled), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -362,6 +456,9 @@ private fun RuleManagerDialog(
     var editId by remember { mutableStateOf<String?>(null) }
     var editTitle by remember { mutableStateOf("") }
     var editContent by remember { mutableStateOf("") }
+    // i18n：launcher/onClick 回调非组合上下文，默认名在组合内预取
+    val importedRuleName = stringResource(R.string.chat_import_rule_default)
+    val unnamedRuleName = stringResource(R.string.chat_unnamed_rule)
 
     fun startCreate() {
         editId = null
@@ -371,14 +468,22 @@ private fun RuleManagerDialog(
     }
 
     // 导入 .md：系统文件选择器，读取文本后落地为一条新规则
+    // P2-7（6-c）：contentResolver 文件读取原在主线程（ANR 风险），照 SkillScreen
+    // 导入的模式下沉到 IO 线程；规则落地（onUpsert）回到协程主上下文执行。
+    val importScope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
-        runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { text ->
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "导入规则"
+        importScope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull()
+            }
+            if (text.isNullOrBlank()) return@launch
+            val name = uri.lastPathSegment?.substringAfterLast('/')
+                ?: importedRuleName
             onUpsert(
                 ChatRule(
                     id = "rule_${System.currentTimeMillis()}",
@@ -392,14 +497,14 @@ private fun RuleManagerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("规则管理") },
+        title = { Text(stringResource(R.string.chat_rule_manager_title)) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (editing) {
                     OutlinedTextField(
                         value = editTitle,
                         onValueChange = { editTitle = it },
-                        label = { Text("规则名称") },
+                        label = { Text(stringResource(R.string.chat_rule_name_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -407,20 +512,20 @@ private fun RuleManagerDialog(
                     OutlinedTextField(
                         value = editContent,
                         onValueChange = { editContent = it },
-                        label = { Text("规则内容（支持 Markdown）") },
+                        label = { Text(stringResource(R.string.chat_rule_content_label)) },
                         minLines = 4,
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editing = false }) { Text("取消") }
+                        TextButton(onClick = { editing = false }) { Text(stringResource(R.string.chat_cancel)) }
                         TextButton(
                             onClick = {
                                 if (editContent.isNotBlank()) {
                                     onUpsert(
                                         ChatRule(
                                             id = editId ?: "rule_${System.currentTimeMillis()}",
-                                            title = editTitle.ifBlank { "未命名规则" },
+                                            title = editTitle.ifBlank { unnamedRuleName },
                                             content = editContent.trim(),
                                             enabled = true
                                         )
@@ -428,7 +533,7 @@ private fun RuleManagerDialog(
                                     editing = false
                                 }
                             }
-                        ) { Text("保存") }
+                        ) { Text(stringResource(R.string.chat_save)) }
                     }
                 } else {
                     Column(
@@ -439,7 +544,7 @@ private fun RuleManagerDialog(
                     ) {
                         if (rules.isEmpty()) {
                             Text(
-                                "暂无规则。新建或导入 .md 文件添加。",
+                                stringResource(R.string.chat_no_rules_hint),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -472,7 +577,7 @@ private fun RuleManagerDialog(
                                     onCheckedChange = { onToggle(rule.id, it) }
                                 )
                                 IconButton(onClick = { onDelete(rule.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.chat_cd_delete), tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
                                 }
                             }
                             HorizontalDivider()
@@ -483,19 +588,19 @@ private fun RuleManagerDialog(
                         TextButton(onClick = { startCreate() }) {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("新建规则")
+                            Text(stringResource(R.string.chat_new_rule))
                         }
                         TextButton(onClick = { importLauncher.launch(arrayOf("text/markdown", "text/plain", "text/*", "application/octet-stream")) }) {
                             Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("导入 MD")
+                            Text(stringResource(R.string.chat_import_md))
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_done)) }
         }
     )
 }
@@ -510,21 +615,21 @@ private fun SchemaEditorDialog(
     var schema by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("自定义输出 Schema") },
+        title = { Text(stringResource(R.string.chat_schema_dialog_title)) },
         text = {
             OutlinedTextField(
                 value = schema,
                 onValueChange = { schema = it },
-                label = { Text("Schema 定义（如 JSON Schema）") },
+                label = { Text(stringResource(R.string.chat_schema_hint)) },
                 minLines = 6,
                 modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {
-            TextButton(onClick = { if (schema.isNotBlank()) onSave(schema.trim()) }) { Text("保存并启用") }
+            TextButton(onClick = { if (schema.isNotBlank()) onSave(schema.trim()) }) { Text(stringResource(R.string.chat_save_enable)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
         }
     )
 }
@@ -561,19 +666,19 @@ fun ToolkitChipsRow(
             .horizontalScroll(rememberScrollState())
     ) {
         if (webSearchEnabled) {
-            ToolkitChip(Icons.Default.Search, "网络搜索已开启", onCloseWebSearch)
+            ToolkitChip(Icons.Default.Search, stringResource(R.string.chat_web_search_on), onCloseWebSearch)
         }
         if (timeEnabled) {
-            ToolkitChip(Icons.Default.Schedule, "时间感知已开启", onCloseTime)
+            ToolkitChip(Icons.Default.Schedule, stringResource(R.string.chat_time_aware_on), onCloseTime)
         }
         selectedFunctionIds.forEach { id ->
             ToolkitChip(Icons.Default.Extension, toolNameOf(id)) { onRemoveFunction(id) }
         }
         if (outputFormat != OutputFormat.NONE) {
-            ToolkitChip(Icons.Default.DataObject, "结构化输出: ${outputFormat.label}", onCloseFormat)
+            ToolkitChip(Icons.Default.DataObject, stringResource(R.string.chat_structured_output_fmt, outputFormatLabel(outputFormat)), onCloseFormat)
         }
         if (enabledRulesCount > 0) {
-            ToolkitChip(Icons.Default.MenuBook, "已加载 $enabledRulesCount 条规则", onDisableAllRules)
+            ToolkitChip(Icons.Default.MenuBook, stringResource(R.string.chat_rules_loaded, enabledRulesCount), onDisableAllRules)
         }
     }
 }
@@ -601,7 +706,7 @@ private fun ToolkitChip(
             ) {
                 Icon(
                     Icons.Default.Close,
-                    contentDescription = "关闭",
+                    contentDescription = stringResource(R.string.chat_cd_close),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(13.dp)
                 )

@@ -3,9 +3,12 @@ package com.apex.agent.marketplace
 import com.apex.agent.core.tools.builtin.SkillInstallTool
 import com.apex.agent.core.tools.connector.ConnectorDef
 import com.apex.agent.core.tools.connector.ConnectorRegistry
+import com.apex.agent.core.tools.marketplace.ClawHubSource
 import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.core.tools.mcp.McpManager
 import com.apex.agent.core.tools.mcp.McpServerConfig
+import com.apex.agent.core.tools.skill.SafeZipExtractor
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import com.apex.agent.github.GithubTokenManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -26,7 +29,7 @@ import javax.inject.Singleton
 /**
  * 市场统一安装管道
  *
- * 把来自不同来源（内置模板 / URL / JSON 内容 / 魔搭 / GitHub）的安装请求
+ * 把来自不同来源（内置模板 / URL / JSON 内容 / 魔搭 / GitHub / ClawHub）的安装请求
  * 分发到对应的注册表：
  * - Skill      → [SkillRegistry]（`<id>.json` manifest + `<id>/` 资源目录）
  * - MCP        → [McpManager]（mcp_servers.json）
@@ -41,10 +44,12 @@ import javax.inject.Singleton
 class MarketInstallManager @Inject constructor(
     @ApplicationContext private val context: android.content.Context,
     private val skillRegistry: SkillRegistry,
+    private val skillActivation: SkillActivationStore,
     private val mcpManager: McpManager,
     private val connectorRegistry: ConnectorRegistry,
     private val httpClient: OkHttpClient,
     private val modelScopeSource: ModelScopeSource,
+    private val clawHubSource: ClawHubSource,
     private val githubTokenManager: GithubTokenManager
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -56,11 +61,76 @@ class MarketInstallManager @Inject constructor(
         val htmlUrl: String
     )
 
-    // ═══ Skill：JSON 内容安装 ═══
+    // ═══ Skill：JSON 内容安装（全部安装路径的收口点：URL/模板/文件/魔搭/GitHub/ClawHub 都汇到这里）═══
+    // 市场热加载闭环：install → registry 落盘 + changes 广播（工具表/目录热更）
+    // → 这里再进激活集 → 下一轮系统提示词即携带新技能方法论，零重启零手动。
     suspend fun installSkillFromJson(content: String): Result<String> =
         withContext(Dispatchers.IO) {
-            skillRegistry.install(content).map { "已安装 Skill：${it.name}（${it.id}）" }
+            skillRegistry.install(content).map { manifest ->
+                // 安装即装备：用户从市场装技能的意图就是要用；不激活的话
+                // 渐进披露目录里只是多一行摘要，方法论仍是「未装载」。
+                skillActivation.activate(manifest.id)
+                "已安装并装备 Skill：${manifest.name}（${manifest.id}），下一轮对话即生效"
+            }
         }
+
+    /**
+     * 干运行安装：解析 manifest 但不写入磁盘。供市场详情页「安装前预览」使用。
+     *
+     * 返回 [ManifestPreview]：解析后的 manifest 摘要 + 缺失依赖 + 工具数 + 权限要求。
+     * 不修改任何状态，可安全反复调用。
+     */
+    suspend fun dryRunInstall(content: String): Result<ManifestPreview> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val manifest = json.decodeFromString<
+                    com.apex.agent.core.tools.skill.SkillManifest
+                >(content)
+                val installedIds = skillRegistry.getInstalled().map { it.manifest.id }.toSet()
+                val missing = com.apex.agent.core.tools.skill.SkillDependencyResolver
+                    .validateDependencies(manifest, installedIds)
+                ManifestPreview(
+                    id = manifest.id,
+                    name = manifest.name,
+                    version = manifest.version,
+                    description = manifest.description,
+                    author = manifest.author,
+                    license = manifest.license,
+                    category = manifest.category,
+                    tags = manifest.tags,
+                    trustLevel = manifest.trustLevel,
+                    toolCount = manifest.tools.size,
+                    hasPromptInjection = manifest.promptInjection != null,
+                    missingDependencies = missing,
+                    requirements = manifest.requirements.permissions +
+                        manifest.requirements.toolsRequired,
+                    privilegeLevel = manifest.requirements.privilegeLevel,
+                    isInstalled = manifest.id in installedIds
+                )
+            }
+        }
+
+    /** 干运行预览结果。 */
+    data class ManifestPreview(
+        val id: String,
+        val name: String,
+        val version: String,
+        val description: String,
+        val author: String,
+        val license: String,
+        val category: String?,
+        val tags: List<String>,
+        val trustLevel: String,
+        val toolCount: Int,
+        val hasPromptInjection: Boolean,
+        val missingDependencies: List<String>,
+        val requirements: List<String>,
+        val privilegeLevel: String,
+        val isInstalled: Boolean
+    ) {
+        /** 是否可安全安装（无缺失依赖）。 */
+        val canInstall: Boolean get() = missingDependencies.isEmpty()
+    }
 
     // ═══ Skill：URL 安装（IO 线程 + 2MB 上限）═══
     suspend fun installSkillFromUrl(url: String): Result<String> =
@@ -97,69 +167,412 @@ class MarketInstallManager @Inject constructor(
         return installSkillFromJson(manifestJson)
     }
 
-    // ═══ Skill：魔搭 SKILL.md → apex-skill-v1（prompt 型）═══
-    suspend fun installModelScopeSkill(skill: ModelScopeSource.ModelScopeSkill): Result<String> {
-        val markdown = modelScopeSource.fetchSkillMarkdown(skill).getOrElse {
-            return Result.failure(Exception("SKILL.md 下载失败：${it.message}"))
+    // ═══ Skill：本地文件导入（SAF Uri → .zip / .json 自动识别）═══
+    //
+    // 用户反馈"Skills 不能自己导入"：此前市场页只有 GitHub / URL / 粘贴 JSON 三个
+    // 联网或手工入口，本地 skill 包（zip 打包或单个 manifest.json）无处安放。
+    // 识别策略不依赖 SAF 的 mime（不同文件管理器对 zip/json 上报极不可靠）：
+    // 读入字节流后按 ZIP 魔数 PK\x03\x04 分流，其余一律按 JSON 文本处理。
+    suspend fun installSkillFromFile(uri: android.net.Uri): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.readBytesLimited(MAX_LOCAL_FILE_BYTES)
+                } ?: throw Exception("无法读取所选文件（uri=$uri）")
+                if (bytes == null) throw Exception("文件过大（>${MAX_LOCAL_FILE_BYTES / 1024 / 1024}MB）")
+
+                val isZip = bytes.size >= 4 &&
+                    bytes[0] == 'P'.code.toByte() &&
+                    bytes[1] == 'K'.code.toByte() &&
+                    bytes[2] == 3.toByte() &&
+                    bytes[3] == 4.toByte()
+
+                if (isZip) {
+                    // 复制到 cacheDir 临时文件后走 SafeZipExtractor 管道（路径穿越/zip bomb 防御）
+                    val tmp = File(context.cacheDir, "import-skill-${System.nanoTime()}.zip")
+                    try {
+                        tmp.writeBytes(bytes)
+                        skillRegistry.installFromZip(tmp).fold(
+                            onSuccess = { "已安装 Skill：${it.name}（${it.id}，来自本地 ZIP）" },
+                            onFailure = { throw it }
+                        )
+                    } finally {
+                        runCatching { tmp.delete() }
+                    }
+                } else {
+                    val content = String(bytes, Charsets.UTF_8)
+                    skillRegistry.install(content).fold(
+                        onSuccess = { "已安装 Skill：${it.name}（${it.id}，来自本地 JSON）" },
+                        onFailure = { throw it }
+                    )
+                }
+            }.fold(
+                onSuccess = { Result.success(it) },
+                onFailure = { Result.failure(Exception("本地导入失败：${it.message}", it)) }
+            )
         }
 
-        // 资源文件（references/scripts 等）下载到 skillsDir/<id>/ 资源目录
-        val resourceFiles = skill.files.filter { it != skill.path && !it.endsWith("/") }
-        val skillHome = File(skillHomeDir(), "ms-${skill.id}").apply { mkdirs() }
-        var resourceFailed = false
-        for (filePath in resourceFiles) {
-            val content = modelScopeSource.fetchSkillResource(skill, filePath).getOrNull()
-            if (content != null) {
-                val rel = filePath.removePrefix("skills/${skill.id}/")
-                if (rel.isBlank() || rel.contains("..")) continue
-                val target = File(skillHome, rel)
-                // 路径穿越防御：目标必须仍在资源目录内
-                if (!target.canonicalPath.startsWith(skillHome.canonicalPath + File.separator)) continue
-                target.parentFile?.mkdirs()
-                target.writeText(content)
-            } else {
-                resourceFailed = true
+    /** 读取本地文本文件（MCP 配置导入用，2MB 上限）。 */
+    suspend fun readTextFile(uri: android.net.Uri): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.readBytesLimited(MAX_DOWNLOAD_BYTES)
+                } ?: throw Exception("无法读取所选文件（uri=$uri）")
+                if (bytes == null) throw Exception("文件过大（>${MAX_DOWNLOAD_BYTES / 1024 / 1024}MB）")
+                String(bytes, Charsets.UTF_8)
             }
         }
 
-        // 构建 prompt 型 manifest：promptInjection = SKILL.md 全文
-        val manifest = buildString {
-            append("{\n")
-            append("\"schema\":\"apex-skill-v1\",\n")
-            append("\"id\":\"ms-${escapeJson(skill.id)}\",\n")
-            append("\"name\":\"${escapeJson(skill.name)}\",\n")
-            append("\"version\":\"1.0.0\",\n")
-            append("\"description\":\"${escapeJson(skill.description)}\",\n")
-            append("\"author\":\"modelscope\",\n")
-            append("\"promptInjection\":\"${escapeJson(markdown)}\",\n")
-            append("\"tools\":[],\n")
-            append("\"configuration\":{\"autoSetup\":[]}\n")
-            append("}")
+    // ═══ Skill：魔搭 SKILL.md → apex-skill-v1（prompt 型）═══
+    suspend fun installModelScopeSkill(skill: ModelScopeSource.ModelScopeSkill): Result<String> =
+        withContext(Dispatchers.IO) {
+            val markdown = modelScopeSource.fetchSkillMarkdown(skill).getOrElse {
+                return@withContext Result.failure(Exception("SKILL.md 下载失败：${it.message}"))
+            }
+
+            // 资源文件（references/scripts 等）下载到 skillsDir/<id>/ 资源目录
+            val resourceFiles = skill.files.filter { it != skill.path && !it.endsWith("/") }
+            val skillHome = File(skillHomeDir(), "ms-${skill.id}").apply { mkdirs() }
+            var resourceFailed = false
+            try {
+                for (filePath in resourceFiles) {
+                    val content = modelScopeSource.fetchSkillResource(skill, filePath).getOrNull()
+                    if (content != null) {
+                        val rel = filePath.removePrefix("skills/${skill.id}/")
+                        if (rel.isBlank() || rel.contains("..")) continue
+                        val target = File(skillHome, rel)
+                        // 路径穿越防御：目标必须仍在资源目录内
+                        if (!target.canonicalPath.startsWith(skillHome.canonicalPath + File.separator)) continue
+                        target.parentFile?.mkdirs()
+                        target.writeText(content)
+                    } else {
+                        resourceFailed = true
+                    }
+                }
+
+                // 构建 prompt 型 manifest：promptInjection = SKILL.md 全文
+                val manifest = buildString {
+                    append("{\n")
+                    append("\"schema\":\"apex-skill-v1\",\n")
+                    append("\"id\":\"ms-${escapeJson(skill.id)}\",\n")
+                    append("\"name\":\"${escapeJson(skill.name)}\",\n")
+                    append("\"version\":\"1.0.0\",\n")
+                    append("\"description\":\"${escapeJson(skill.description)}\",\n")
+                    append("\"author\":\"modelscope\",\n")
+                    append("\"promptInjection\":\"${escapeJson(markdown)}\",\n")
+                    append("\"tools\":[],\n")
+                    append("\"configuration\":{\"autoSetup\":[]}\n")
+                    append("}")
+                }
+
+                // P2（对齐 ClawHub 模式）：登记失败/中途取消时回收资源目录 ——
+                // 旧实现无回滚，ms-<id>/ 成永久孤儿（未登记 → uninstall 也清不到它）。
+                installSkillFromJson(manifest).also { result ->
+                    if (result.isFailure) runCatching { skillHome.deleteRecursively() }
+                }.map { msg ->
+                    if (resourceFailed) "$msg（部分资源文件下载失败）" else msg
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 取消不吞（结构化并发语义）；已落盘的半成品资源一并回收
+                runCatching { skillHome.deleteRecursively() }
+                throw e
+            } catch (e: Exception) {
+                // 磁盘 IO 等意外异常统一转友好失败；回收半成品资源目录
+                runCatching { skillHome.deleteRecursively() }
+                Result.failure(Exception("魔搭技能安装失败：${e.message}"))
+            }
         }
 
-        return installSkillFromJson(manifest).map { msg ->
-            if (resourceFailed) "$msg（部分资源文件下载失败）" else msg
+    // ═══ Skill：ClawHub 仓库 ZIP → apex-skill-v1（prompt 型）═══
+
+    /**
+     * 从 ClawHub（clawhub.ai）安装技能。
+     *
+     * 流程（参照 [installModelScopeSkill] 的「源负责网络、本类负责编排」分层）：
+     * 1. 下载技能 ZIP（[ClawHubSource.downloadSkillZip]，20MB 上限）；
+     * 2. SafeZipExtractor 解压到临时目录（路径穿越 / zip bomb 防御）；
+     * 3. 解析 SKILL.md frontmatter（name / description / license）；
+     * 4. references/scripts 等资源复制到 skillsDir/ch-<id>/ 资源目录
+     *    （SkillRegistry.uninstall 会连该目录一并清理）；
+     * 5. 构建 prompt 型 manifest（promptInjection = SKILL.md 全文）并安装。
+     */
+    suspend fun installClawHubSkill(entry: ClawHubSource.ClawHubSkillEntry): Result<String> =
+        withContext(Dispatchers.IO) {
+            val installId = ClawHubSource.installIdFor(entry.slug)
+
+            // 重复安装友好拦截（SkillRegistry.install 会静默覆盖，不能依赖它报错）
+            val alreadyInstalled = skillRegistry.getInstalled().any { it.manifest.id == installId }
+            if (alreadyInstalled) {
+                return@withContext Result.failure(
+                    Exception("该技能已安装（$installId）；如需重新安装，请先在「已安装管理」中卸载")
+                )
+            }
+
+            // 1. 下载 ZIP
+            val zipBytes = clawHubSource.downloadSkillZip(entry).getOrElse {
+                return@withContext Result.failure(Exception("ClawHub 安装包下载失败：${it.message}"))
+            }
+
+            // 2. 解压到临时目录
+            val tmpZip = File(context.cacheDir, "clawhub-${System.nanoTime()}.zip")
+            val extractDir = File(context.cacheDir, "clawhub-extract-${System.nanoTime()}")
+            try {
+                tmpZip.writeBytes(zipBytes)
+                try {
+                    SafeZipExtractor.extract(tmpZip, extractDir)
+                } catch (e: Exception) {
+                    return@withContext Result.failure(Exception("安装包解压失败：${e.message}"))
+                }
+
+                // 3. 定位 SKILL.md（ZIP 内通常嵌套在 <slug>/ 顶层目录下，多候选时取最浅层）
+                val skillMd = extractDir.walkTopDown()
+                    .filter { it.isFile && it.name.equals("SKILL.md", ignoreCase = true) }
+                    .minByOrNull { it.canonicalPath.count { c -> c == File.separatorChar } }
+                    ?: return@withContext Result.failure(
+                        Exception("安装包中未找到 SKILL.md（该技能可能不符合 Agent Skills 格式）")
+                    )
+                val markdown = try {
+                    skillMd.readText(Charsets.UTF_8)
+                } catch (e: Exception) {
+                    return@withContext Result.failure(Exception("SKILL.md 读取失败：${e.message}"))
+                }
+                val frontmatter = parseSkillFrontmatter(markdown)
+
+                // 4. 资源落盘：SKILL.md 所在目录视为技能根，其余文件保持相对路径复制
+                val skillRoot = skillMd.parentFile ?: extractDir
+                val rootPrefix = skillRoot.canonicalPath + File.separator
+                val skillHome = File(skillHomeDir(), installId).apply { mkdirs() }
+                val skillMdCanonical = skillMd.canonicalPath
+                extractDir.walkTopDown()
+                    .filter { it.isFile && it.canonicalPath != skillMdCanonical }
+                    .forEach { file ->
+                        val canonical = file.canonicalPath
+                        if (!canonical.startsWith(rootPrefix)) return@forEach
+                        val rel = canonical.removePrefix(rootPrefix)
+                        if (rel.isBlank()) return@forEach
+                        val target = File(skillHome, rel)
+                        // 路径穿越防御：目标必须仍在资源目录内
+                        if (!target.canonicalPath.startsWith(skillHome.canonicalPath + File.separator)) return@forEach
+                        target.parentFile?.mkdirs()
+                        runCatching { file.copyTo(target, overwrite = true) }
+                    }
+
+                // 5. prompt 型 manifest（SKILL.md 全文注入）
+                val manifest = promptManifest(
+                    id = installId,
+                    name = entry.displayName.ifBlank { frontmatter.first ?: entry.slug },
+                    description = entry.summary.ifBlank { frontmatter.second.orEmpty() }
+                        .ifBlank { "ClawHub 技能 ${entry.slug}（来自 clawhub.ai）" },
+                    author = "clawhub:${entry.owner}",
+                    markdown = markdown,
+                    homepage = entry.homepage,
+                    license = frontmatter.third,
+                    trustLevel = if (entry.official) "verified" else "community",
+                    tags = entry.categories
+                )
+
+                // 6. 安装；失败时回收资源目录，避免孤儿文件
+                installSkillFromJson(manifest).also { result ->
+                    if (result.isFailure) runCatching { skillHome.deleteRecursively() }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 取消不吞（结构化并发语义）
+                throw e
+            } catch (e: Exception) {
+                // 磁盘 IO 等意外异常统一转友好失败，不向调用协程抛出
+                Result.failure(Exception("ClawHub 安装失败：${e.message}"))
+            } finally {
+                runCatching { tmpZip.delete() }
+                runCatching { extractDir.deleteRecursively() }
+            }
+        }
+
+    // ═══ Skill：GitHub 仓库安装（真实联网，多用形态兜底）═══
+
+    /**
+     * GitHub 仓库安装。
+     *
+     * 旧实现只试 `main` 分支下的 5 个候选路径，绝大多数第三方仓库打不到 ——
+     * 按钮点了永远是「仓库中未找到可安装的 manifest」，与市场期望不符（摆设）。
+     * 现在的策略：
+     *  1. 先查 GitHub API 拿到**真实默认分支**（有的仓库只有 master）；
+     *  2. manifest 候选路径扩到常见约定（含 `.apex/` 子目录）；
+     *  3. 找不到 `apex-skill-v1` manifest 时，退化为读取 `SKILL.md` →
+     *     转成 prompt 型技能安装（社区仓库最普遍的技能形态）。
+     */
+    suspend fun installSkillFromGitHubRepo(owner: String, repo: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            val branches = listOfNotNull(resolveDefaultBranch(owner, repo), "main", "master").distinct()
+            val manifestPaths = listOf(
+                "manifest.json", "skill.json", "apex-skill.json", "apex_skill.json",
+                "$repo.json", "skills/$repo.json", ".apex/skill.json", "skill/manifest.json"
+            )
+            val markdownPaths = listOf("SKILL.md", "skill.md", "README.md")
+
+            for (branch in branches) {
+                for (path in manifestPaths) {
+                    val content = tryDownload(
+                        "https://raw.githubusercontent.com/$owner/$repo/$branch/$path"
+                    ) ?: continue
+                    if (looksLikeApexManifest(content)) {
+                        return@withContext installSkillFromJson(content)
+                    }
+                }
+                for (path in markdownPaths) {
+                    val markdown = tryDownload(
+                        "https://raw.githubusercontent.com/$owner/$repo/$branch/$path"
+                    ) ?: continue
+                    if (markdown.isBlank()) continue
+                    val (name, description) = parseMarkdownHeading(markdown, fallbackName = repo)
+                    return@withContext installSkillFromJson(
+                        promptManifest(
+                            id = "gh-${owner.lowercase()}-${repo.lowercase()}",
+                            name = name,
+                            description = description,
+                            author = "github:$owner",
+                            markdown = markdown
+                        )
+                    )
+                }
+            }
+            Result.failure(
+                Exception("仓库 $owner/$repo 中未找到可安装内容（已试 ${branches.size} 个分支的 manifest 与 SKILL.md）")
+            )
+        }
+
+    /**
+     * 从任意形式的 GitHub 输入安装：`owner/repo` / 完整 https 链接 / git@ SSH 链接。
+     */
+    suspend fun installSkillFromRepoInput(input: String): Result<String> {
+        val raw = input.trim().trimEnd('/')
+        if (raw.isBlank()) return Result.failure(Exception("请输入 owner/repo 或 GitHub 链接"))
+        val (owner, repo) = parseRepoSpec(raw)
+            ?: return Result.failure(Exception("无法解析仓库地址：$input"))
+        return installSkillFromGitHubRepo(owner, repo)
+    }
+
+    /** 解析仓库归属：支持 owner/repo、https://github.com/owner/repo[.git]、git@github.com:owner/repo.git。 */
+    private fun parseRepoSpec(input: String): Pair<String, String>? {
+        val cleaned = input
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .removePrefix("git@github.com:")
+            .removePrefix("github.com/")
+            .removeSuffix(".git")
+        val parts = cleaned.split('/').filter { it.isNotBlank() }
+        if (parts.size < 2) return null
+        val owner = parts[0]
+        val repo = parts[1]
+        if (!owner.matches(Regex("[A-Za-z0-9._-]+")) || !repo.matches(Regex("[A-Za-z0-9._-]+"))) return null
+        return owner to repo
+    }
+
+    /** 查询仓库真实默认分支；失败返回 null（由调用方回退到 main/master）。 */
+    private fun resolveDefaultBranch(owner: String, repo: String): String? = runCatching {
+        val request = Request.Builder()
+            .url("https://api.github.com/repos/$owner/$repo")
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "ApexAgent/1.0")
+            .apply { githubTokenManager.getToken()?.let { header("Authorization", "Bearer $it") } }
+            .build()
+        httpClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) return@use null
+            json.parseToJsonElement(resp.body?.string() ?: return@use null)
+                .jsonObject["default_branch"]?.jsonPrimitive?.contentOrNull
+        }
+    }.getOrNull()
+
+    /**
+     * 解析 SKILL.md 的 YAML frontmatter（name / description / license）。
+     *
+     * 只做简单键值行解析（与 ModelScopeSource.fetchFrontmatter 同风格），
+     * 只匹配顶格键（列 0）——避免误抓 metadata 等嵌套块内的同名字段；
+     * 值两侧的成对引号（"…" / '…'）会被剥掉。
+     */
+    private fun parseSkillFrontmatter(markdown: String): Triple<String?, String?, String?> {
+        val lines = markdown.lines()
+        if (lines.isEmpty() || lines.first().trim() != "---") {
+            return Triple(null, null, null)
+        }
+        val end = lines.drop(1).indexOfFirst { it.trim() == "---" }
+        val front = if (end >= 0) lines.subList(1, 1 + end) else lines.drop(1)
+        var name: String? = null
+        var description: String? = null
+        var license: String? = null
+        for (line in front) {
+            when {
+                name == null && line.startsWith("name:") ->
+                    name = stripQuotes(line.removePrefix("name:"))
+                description == null && line.startsWith("description:") ->
+                    description = stripQuotes(line.removePrefix("description:"))
+                license == null && line.startsWith("license:") ->
+                    license = stripQuotes(line.removePrefix("license:"))
+            }
+        }
+        return Triple(name, description, license)
+    }
+
+    /** 剥掉值两侧的成对引号。 */
+    private fun stripQuotes(value: String): String {
+        val t = value.trim()
+        return when {
+            t.length >= 2 && t.startsWith("\"") && t.endsWith("\"") -> t.substring(1, t.length - 1)
+            t.length >= 2 && t.startsWith("'") && t.endsWith("'") -> t.substring(1, t.length - 1)
+            else -> t
         }
     }
 
-    // ═══ Skill：GitHub 仓库安装（尝试常见 manifest 路径）═══
-    suspend fun installSkillFromGitHubRepo(owner: String, repo: String): Result<String> =
-        withContext(Dispatchers.IO) {
-            val candidates = listOf(
-                "manifest.json", "skill.json", "apex-skill.json", "$repo.json", "skills/$repo.json"
-            )
-            var lastError = "仓库中未找到可安装的 manifest"
-            for (candidate in candidates) {
-                val url = "https://raw.githubusercontent.com/$owner/$repo/main/$candidate"
-                val content = tryDownload(url) ?: continue
-                // 必须是合法的 apex-skill-v1 manifest 才接受
-                if (looksLikeApexManifest(content)) {
-                    return@withContext installSkillFromJson(content)
-                }
-                lastError = "找到文件但不是有效的 apex-skill-v1 manifest"
-            }
-            Result.failure(Exception(lastError))
+    /** 从 markdown 里取首个一级标题当名字，紧跟的第一段非空文字当描述。 */
+    private fun parseMarkdownHeading(markdown: String, fallbackName: String): Pair<String, String> {
+        val lines = markdown.lineSequence().map { it.trim() }.toList()
+        val heading = lines.firstOrNull { it.startsWith("# ") }
+            ?.removePrefix("# ")?.trim()?.takeIf { it.isNotBlank() }
+            ?: fallbackName
+        val headingIdx = lines.indexOfFirst { it.startsWith("# ") }
+        val description = if (headingIdx >= 0) {
+            lines.drop(headingIdx + 1)
+                .firstOrNull { it.isNotBlank() && !it.startsWith("#") && !it.startsWith("---") }
+                ?.take(120)
+                .orEmpty()
+        } else {
+            lines.firstOrNull { it.isNotBlank() && !it.startsWith("---") }?.take(120).orEmpty()
         }
+        return heading to description.ifBlank { "$fallbackName（GitHub 仓库转换）" }
+    }
+
+    /** 构造 prompt 型 apex-skill-v1 manifest（SKILL.md 全量注入；可选市场元数据）。 */
+    private fun promptManifest(
+        id: String,
+        name: String,
+        description: String,
+        author: String,
+        markdown: String,
+        homepage: String? = null,
+        license: String? = null,
+        trustLevel: String? = null,
+        tags: List<String> = emptyList()
+    ): String = buildString {
+        append("{\n")
+        append("\"schema\":\"apex-skill-v1\",\n")
+        append("\"id\":\"${escapeJson(id)}\",\n")
+        append("\"name\":\"${escapeJson(name)}\",\n")
+        append("\"version\":\"1.0.0\",\n")
+        append("\"description\":\"${escapeJson(description)}\",\n")
+        append("\"author\":\"${escapeJson(author)}\",\n")
+        if (license != null) append("\"license\":\"${escapeJson(license)}\",\n")
+        if (homepage != null) append("\"homepage\":\"${escapeJson(homepage)}\",\n")
+        if (trustLevel != null) append("\"trustLevel\":\"${escapeJson(trustLevel)}\",\n")
+        if (tags.isNotEmpty()) {
+            append("\"tags\":[")
+            append(tags.joinToString(",") { "\"${escapeJson(it)}\"" })
+            append("],\n")
+        }
+        append("\"promptInjection\":\"${escapeJson(markdown)}\",\n")
+        append("\"tools\":[],\n")
+        append("\"configuration\":{\"autoSetup\":[]}\n")
+        append("}")
+    }
 
     // ═══ GitHub 仓库搜索（市场"集成"页）═══
     suspend fun searchGitHubSkills(query: String): Result<List<GitHubRepoHit>> =
@@ -253,5 +666,8 @@ class MarketInstallManager @Inject constructor(
 
     companion object {
         private const val MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
+
+        /** 本地 skill 包上限：ZIP 可能携带 scripts/references 资源，放宽到 20MB。 */
+        private const val MAX_LOCAL_FILE_BYTES = 20 * 1024 * 1024
     }
 }

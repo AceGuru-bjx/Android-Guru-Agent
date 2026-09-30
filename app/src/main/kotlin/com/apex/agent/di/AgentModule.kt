@@ -18,8 +18,11 @@ import com.apex.agent.core.llm.LlmClient
 import com.apex.agent.core.llm.runtime.ModelRuntime
 import com.apex.agent.core.tools.ToolExecutor
 import com.apex.agent.core.tools.ToolRegistry
+import com.apex.agent.core.tools.catalog.ToolActivationStore
+import com.apex.agent.core.tools.skill.SkillActivationStore
 import com.apex.agent.core.tools.skill.SkillRegistry
 import com.apex.agent.ui.screen.settings.SettingsRepository
+import com.apex.agent.ui.screen.settings.activeRole
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -35,6 +38,18 @@ object AgentModule {
     @Singleton
     fun providePrivilegeInfoProvider(): PrivilegeInfoProvider {
         return AndroidPrivilegeInfoProvider()
+    }
+
+    /**
+     * Tool System v3：环境能力信息提供者（ToolEnvironmentState 快照 →
+     * system prompt Live Environment 段，与环境门同源）。
+     */
+    @Provides
+    @Singleton
+    fun provideEnvironmentInfoProvider(
+        environmentState: com.apex.agent.core.tools.ToolEnvironmentState
+    ): EnvironmentInfoProvider {
+        return AndroidEnvironmentInfoProvider(environmentState)
     }
 
     /**
@@ -57,17 +72,28 @@ object AgentModule {
             "chat" -> AgentMode.REFLECTION   // 旧值兼容：chat 偏重质量评审
             else -> AgentMode.BUILD          // "auto" 及未知旧值走自主构建
         }
-        // 思考深度（全档位映射）
+        // 思考深度（六档纯净态；#168 新增 auto → AUTO 自适应选档。
+        // coding 深水两档 ULTRACODE/APEXCODE 已迁回 Coding 模式——
+        // CodeThinkingLevel 自有阶梯，Agent 聊天页不再出现编码档）
         val thinkingLevel = when (agent.thinkLevel) {
+            "auto" -> ThinkingLevel.AUTO
             "minimal" -> ThinkingLevel.NONE
             "light" -> ThinkingLevel.LIGHT
             "deep" -> ThinkingLevel.DEEP
             "maximum" -> ThinkingLevel.MAXIMUM
             else -> ThinkingLevel.STANDARD
         }
+        // 双级思考控制第二级（强制深度思考）：开启时启动快照即钉 MAXIMUM ——
+        // 不必等聊天页 ViewModel 的 patchConfig（后台服务/其它入口也生效）。
+        val effectiveThinkingLevel =
+            if (agent.forceDeepThinking) ThinkingLevel.MAXIMUM else thinkingLevel
+        // ═══ Agent 角色（人设层）：激活角色拍平进引擎配置 ═══
+        // 启动快照（本方法 @Singleton 一次性）；运行时切换由 AgentChatViewModel
+        // 监听 agentSettings 热更新（patchConfig），两条路径字段一一对应。
+        val activeRole = agent.activeRole()
         return AgentConfig(
             mode = mode,
-            thinkingLevel = thinkingLevel,
+            thinkingLevel = effectiveThinkingLevel,
             maxIterations = agent.maxIterations,
             // 上下文压缩（对应 AgentSettings 同名字段，重启应用/新会话后生效）
             maxContextTokens = agent.maxContextTokens,
@@ -77,6 +103,17 @@ object AgentModule {
             streaming = profile.streaming,
             temperature = profile.temperature,
             reflectionRounds = if (agent.reflection) agent.reflectionRounds.coerceIn(0, 5) else 0,
+            // #168 CUSTOM 模式预设：选中预设指令拍平进 customInstruction（启动快照；
+            // 运行时热切换由 AgentChatViewModel 的 agentSettings collector 处理，
+            // 选中预设优先，未选回退旧单串 custom_mode_instruction）。
+            customInstruction = repo.effectiveCustomInstruction().ifBlank { null },
+            // Agent 角色字段（全部空 = 内置全能角色 = 历史行为零变化）
+            agentName = if (activeRole.isBuiltIn) "" else activeRole.name,
+            userTitle = activeRole.userTitle,
+            roleDefinition = activeRole.roleDefinition,
+            rolePrompt = activeRole.systemPrompt,
+            roleStyle = activeRole.style,
+            roleLanguage = activeRole.replyLanguage,
         )
     }
 
@@ -125,10 +162,22 @@ object AgentModule {
         memory: ConversationMemory,
         contextCompressor: ContextCompressor,
         privilegeInfoProvider: PrivilegeInfoProvider,
+        environmentInfoProvider: EnvironmentInfoProvider,
         skillRegistry: SkillRegistry,
         memoryObserver: ExecutionMemoryObserver,
+        // 根因修复：已连接服务（GitHub/连接器）注入系统提示词，模型才知道
+        // github_* / connector_* 工具已就绪可主动使用
+        connectedServicesProvider: AndroidConnectedServicesProvider,
         // T72：注入多模型运行时，按角色路由 PRIMARY/VISION/REASONING/SUMMARY
-        modelRuntime: ModelRuntime
+        modelRuntime: ModelRuntime,
+        // v4：会话激活存储（与目录工具/编排器共享同一实例）
+        toolActivation: ToolActivationStore,
+        // Issue #165：生命周期钩子派发口（SessionStart/UserPromptSubmit/Stop/
+        // PreCompact/SessionEnd；null 注入零开销，此处生产性传非空）
+        hookRunner: HookRunner,
+        // 技能渐进披露：会话技能激活存储（目录 + 激活双层注入；与
+        // skill_activate 工具/斜杠指令/自动装备器共享同一单例）
+        skillActivation: SkillActivationStore
     ): AgentEngine {
         return ApexAgentEngine(
             llmClient = llmClient,
@@ -139,8 +188,13 @@ object AgentModule {
             contextCompressor = contextCompressor,
             skillRegistry = skillRegistry,
             privilegeInfoProvider = privilegeInfoProvider,
+            environmentInfoProvider = environmentInfoProvider,
             memoryObserver = memoryObserver,
-            modelRuntime = modelRuntime
+            connectedServicesProvider = connectedServicesProvider,
+            modelRuntime = modelRuntime,
+            toolActivation = toolActivation,
+            hookRunner = hookRunner,
+            skillActivation = skillActivation
         )
     }
 
@@ -214,9 +268,9 @@ object AgentModule {
                     maxToolOutputLength = cfg.maxToolOutputLength,
                     temperature = cfg.temperature,
                     reflectionRounds = cfg.reflectionRounds,
-                    // AgentConfig.enabledToolIds is Set<String>? while the snapshot
-                    // expects List<String>; convert explicitly to satisfy the type.
-                    enabledToolIds = cfg.enabledToolIds?.toList() ?: emptyList()
+                    // v4：强制函数圈选（旧 enabledToolIds 白名单已废弃）。
+                    forcedToolIds = cfg.forcedToolIds.toList(),
+                    exposeAllTools = cfg.exposeAllTools
                 )
             },
             contextInjector = { content -> apex?.injectSystemContext(content) },
@@ -237,7 +291,9 @@ object AgentModule {
         privilegeInfoProvider: PrivilegeInfoProvider,
         contextCompressor: ContextCompressor,
         // T72：注入多模型运行时，BUILD 循环按角色路由
-        modelRuntime: ModelRuntime
+        modelRuntime: ModelRuntime,
+        // v4：与 AgentEngine 共享会话激活存储（tool_open 激活对两条执行路径同时生效）
+        toolActivation: ToolActivationStore
     ): TaskOrchestrator {
         return DefaultTaskOrchestrator(
             llmClient = llmClient,
@@ -255,7 +311,8 @@ object AgentModule {
             // P7：编排器与 AgentEngine 共享同一上下文压缩链路（HybridCompressor），
             // 使经编排器执行的长任务同样具备三级压缩（截断/滑窗/LLM摘要），
             // 修复"编排器路径工具输出无界增长"的上下文窗口风险。
-            contextCompressor = contextCompressor
+            contextCompressor = contextCompressor,
+            toolActivation = toolActivation
         )
     }
 }

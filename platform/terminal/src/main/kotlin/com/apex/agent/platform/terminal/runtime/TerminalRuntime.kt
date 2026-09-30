@@ -117,7 +117,12 @@ interface TerminalRuntime {
         mode: ObserveMode = ObserveMode.SEMANTIC,
         afterCursor: Long = 0,
         maxBytes: Int = 12000,
-        maxEvents: Int = 200
+        maxEvents: Int = 200,
+        /**
+         * T82：SCREEN 模式下附带 scrollback 尾部行数（0 = 不带 —— 历史行为）。
+         * VT 主屏保存最近 1000 行（Termux 基线 §1.5），此前无任何 API 能读到。
+         */
+        scrollbackLines: Int = 0
     ): RuntimeResult<ObserveResult>
 
     enum class ObserveMode { SEMANTIC, EVENT, SCREEN, RAW }
@@ -134,7 +139,9 @@ interface TerminalRuntime {
         val semantic: TerminalSemanticState? = null,   // mode=SEMANTIC
         val events: List<TerminalEvent>? = null,        // mode=EVENT
         val screen: TerminalScreenState? = null,        // mode=SCREEN
-        val raw: String? = null                          // mode=RAW (utf-8 or base64)
+        val raw: String? = null,                        // mode=RAW (utf-8 or base64)
+        /** T82：SCREEN + scrollbackLines>0 —— VT 主屏 scrollback 尾部（oldest→newest）。 */
+        val scrollbackTail: List<String>? = null        // mode=SCREEN
     )
 
     // ───────── wait ─────────
@@ -147,15 +154,20 @@ interface TerminalRuntime {
 
     // ───────── write ─────────
     // Spec §34.5 — owner injected by Runtime.
+    //
+    // T85：新增 [bytes] 直通通道 —— 粘贴/按键转义序列等 UTF-8 字节载荷不再经
+    // String↔charset 往返（旧 UI 路径 ISO-8859-1 双重编码导致非 ASCII 粘贴乱码）。
+    // bytes 与 text 二选一：bytes 优先。
     suspend fun write(
         sessionId: Long,
         owner: InputOwner,         // injected by Runtime
         kind: WriteKind = WriteKind.LINE,
         text: String? = null,
-        key: TerminalKey? = null
+        key: TerminalKey? = null,
+        bytes: ByteArray? = null
     ): RuntimeResult<WriteResult>
 
-    enum class WriteKind { RAW, LINE, KEY }
+    enum class WriteKind { RAW, LINE, KEY, PASTE }
 
     data class WriteResult(
         val written: Boolean,
@@ -176,8 +188,24 @@ interface TerminalRuntime {
     data class SignalResult(
         val sent: Boolean,
         val signal: UnixSignal,
-        val targetJobId: Long?
+        val targetJobId: Long?,
+        /** T82：scope=JOB 时的前台送达结果 —— NO_FOREGROUND_JOB = shell 自身在前台（空闲）。 */
+        val foregroundDelivered: Boolean? = null
     )
+
+    /**
+     * T82：只向控制终端前台作业组发信号 —— shell 不受影响（Ctrl-C 语义：打断当前
+     * 命令，session 存活）。与 [signal]（session 级 —— kill(-PGID) 含 shell）互补。
+     *
+     * @return foregroundDelivered=false 表示无前台作业（空闲 prompt）—— 未发送任何
+     * 信号（调用方决定是否退化到 session 级）。
+     */
+    suspend fun signalForeground(
+        sessionId: Long,
+        signal: UnixSignal,
+        owner: InputOwner,
+        jobId: Long? = null
+    ): RuntimeResult<SignalResult>
 
     // ───────── cancel (Spec PR #51 §5) ─────────
     /** Cancel a job: graceful SIGTERM → grace period → SIGKILL. Agent doesn't manage signals manually. */
@@ -246,6 +274,13 @@ interface TerminalRuntime {
     /** Push-based semantic state for a session. Emits on every state change. Null if session not found. */
     fun semanticStateFlow(sessionId: Long): Flow<com.apex.agent.platform.terminal.state.TerminalSemanticState>?
 
+    /**
+     * P83: push-based STYLED render state for a session (colors / cursor / scrollback),
+     * for the terminal UI grid renderer. Emits only while collected (the styled
+     * projection is computed on demand — see ObservationEngine). Null if session not found.
+     */
+    fun styledScreenFlow(sessionId: Long): Flow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?>?
+
     // ───────── recover ─────────
     // Spec §39 — crash recovery. Call once on startup. Returns recovered session ids.
     // Dead PTY sessions appear as EXITED/BROKEN (never faked alive).
@@ -253,6 +288,18 @@ interface TerminalRuntime {
 
     /** Read-only SemanticState for a recovered session (from persisted metadata). */
     suspend fun recoveredSnapshot(sessionId: Long): com.apex.agent.platform.terminal.state.TerminalSemanticState?
+
+    // ───────── shutdown (T81 §15) ─────────
+    // 停止新会话/新 job → cancel 全部 job（三级序列）→ 停 pump → close 全部
+    // session（HUP→TERM→KILL 收敛 + bus/log drop）→ 停协程域 → nativeCloseAll
+    // 兕底 → 持久化 flush。幂等：重复调用直接返回上次结果。
+    suspend fun shutdown(): Result<ShutdownResult>
+
+    data class ShutdownResult(
+        val sessionsClosed: Int,
+        val jobsCancelled: Int,
+        val clean: Boolean          // 全部 session 正常关闭（无 BROKEN/LOST）
+    )
 }
 
 /** Convenience: wrap a TerminalError into a kotlin.Result failure. */

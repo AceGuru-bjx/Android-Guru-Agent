@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.apex.agent.attachment.AttachmentCleanupManager
 import com.apex.agent.attachment.ImageAttachmentConverter
 import com.apex.agent.attachment.PredictiveAttachmentPreprocessor
 import com.apex.agent.core.engine.*
@@ -12,11 +13,28 @@ import com.apex.agent.core.llm.ImageContent
 import com.apex.agent.core.llm.ModelProfile
 import com.apex.agent.core.llm.ProviderConfig
 import com.apex.agent.core.llm.ReasoningEffort
+import com.apex.agent.core.engine.modes.ModePreset
+import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.tools.ToolRegistry
+import com.apex.agent.core.tools.skill.SkillActivationStore
+import com.apex.agent.core.tools.skill.SkillAutoActivator
 import com.apex.agent.platform.csmem.session.CsMemSessionManager
 import com.apex.agent.github.GithubTokenManager
+import com.apex.agent.net.NetworkMonitor
+import com.apex.agent.notify.ApexNotifications
+import com.apex.agent.notify.ForegroundTracker
+import com.apex.agent.share.SharedIntake
+import com.apex.agent.usage.UsageLedger
 import com.apex.agent.ui.screen.agent.toolkit.ChatToolkitStore
+import com.apex.agent.ui.screen.settings.AgentSettings
 import com.apex.agent.ui.screen.settings.SettingsRepository
+import com.apex.agent.ui.screen.settings.activeModePreset
+import com.apex.agent.ui.screen.settings.activeRole
+import com.apex.agent.ui.screen.settings.allRoles
+import com.apex.agent.ui.screen.settings.withRoleActivated
+import com.apex.agent.ui.language.LanguageManager
+import com.apex.agent.R
+import androidx.annotation.StringRes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -33,32 +51,199 @@ import javax.inject.Inject
 
 @HiltViewModel
 class AgentChatViewModel @Inject constructor(
-    private val agentEngine: AgentEngine,
+    internal val agentEngine: AgentEngine,
     private val memory: ConversationMemory,
     private val csMemSessionManager: CsMemSessionManager,
     val githubTokenManager: GithubTokenManager,
     private val savedStateHandle: SavedStateHandle,
     private val preprocessor: PredictiveAttachmentPreprocessor,
     internal val userQuestionBridge: UserQuestionBridge,
-    private val settingsRepository: SettingsRepository,
+    // v1.4.4 #4：internal —— EventApplier 读 taskCompletionNotify 设置
+    internal val settingsRepository: SettingsRepository,
     private val chatToolkit: ChatToolkitStore,
-    private val toolRegistry: ToolRegistry,
-    @ApplicationContext private val context: Context,
+    // God-file 预算拆分：AgentChatEventApplier 扩展需读工具元数据（classifyTool 路由徽章）
+    internal val toolRegistry: ToolRegistry,
+    // v1.4.4 #4/#6/#7：internal —— ChatSessionOps/EventApplier 扩展共用；
+    // 亦供 AgentChatHtmlPreview.kt 扩展（God-file 预算拆分）。
+    @ApplicationContext internal val context: Context,
     // T76：任务运行时控制器（execute/abort 经此获得 checkpoint/恢复能力）
-    private val taskController: AgentTaskStatusController
+    private val taskController: AgentTaskStatusController,
+    // 历史对话仓库（归档/恢复/删除；逻辑主体在 AgentChatHistoryController.kt）
+    internal val chatHistory: ChatHistoryManager,
+    // 工作区根解析（HTML 预览路径用）：code_* 工具写的 HTML 按此根解析相对路径；
+    // default 工作区即 Agent 沙箱根（终端会话 guest /workspace 同源）。
+    // internal —— AgentChatHtmlPreview.kt 扩展共用（God-file 预算拆分）。
+    internal val workspaceRoots: CodeWorkspaceRoots,
+    // i18n：用户可见 toast / 系统行 / 工具步骤文案按当前语言取词（组合外场景）
+    private val languageManager: LanguageManager,
+    // v2：斜杠路由需要 MCP 连接快照（/mcp:<id> 引导提示词据此生成）
+    private val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
+    // P2：删除/清空历史会话时同步清理附件文件（AgentChatHistoryController 扩展使用）
+    internal val attachmentCleanup: AttachmentCleanupManager,
+    // 技能渐进披露：自动装备（消息命中 tags 零成本预激活）+ 斜杠装备写入。
+    private val skillAutoActivator: SkillAutoActivator,
+    internal val skillActivation: SkillActivationStore,
+    // ═══ v1.4.4 新增（全部 internal —— 扩展文件共用）═══
+    /** #6 用量账本：每轮 LLM 真实 usage 落盘（EventApplier UsageUpdated 钩子）。 */
+    internal val usageLedger: UsageLedger,
+    /** #7 分享接收：外部 ACTION_SEND 入站的待处理载荷（init 订阅消费）。 */
+    internal val sharedIntake: SharedIntake,
+    /** #4 前台跟踪：任务完成通知的静音判定（用户正看屏幕时不打批）。 */
+    internal val foregroundTracker: ForegroundTracker,
+    /** #4 通知中心：任务完成通知发射器。 */
+    internal val notifications: ApexNotifications,
+    /** #6 网络监测：离线状态源（Screen 顶部横幅消费）。 */
+    val networkMonitor: NetworkMonitor
 ) : ViewModel() {
+
+    /** i18n：按当前语言取无参文案（internal —— AgentChatEventApplier 扩展共用）。 */
+    internal fun str(@StringRes resId: Int): String = languageManager.getString(resId)
+
+    /** i18n：带占位符文案（%1$s/%1$d）在组合外格式化。 */
+    internal fun strFmt(@StringRes resId: Int, vararg args: Any): String =
+        String.format(languageManager.getString(resId), *args)
 
     // v2：memory.count() 在主线程 = 全量 JSON 反序列化（旧实现在构造器调用，
     // 几千条历史时进聊天页卡顿），改为 IO 线程异步回填（见下方 init）；
     // 同时保留 internal 可见性（供抽出的 AgentChatQuestionHandler.kt 扩展访问）。
     internal val _uiState = MutableStateFlow(AgentChatUiState())
+
+    // ═══ 历史对话（ChatHistory）：逻辑主体在 AgentChatHistoryController.kt ═══
+    // （God-file 预算拆分，模式同 AgentChatQuestionHandler.kt：归档/flush/恢复/删除均为 internal 扩展）
+    internal val _chatSessions = MutableStateFlow<List<ChatSessionSummary>>(emptyList())
+    val chatSessions: StateFlow<List<ChatSessionSummary>> = _chatSessions.asStateFlow()
+    /** 当前会话在历史库的 id（null=新会话）/ 创建时间 / 防抖归档在途任务。 */
+    internal var currentHistorySessionId: String? = null
+    internal var currentHistorySessionCreatedAt: Long? = null
+    internal var historyPersistJob: Job? = null
     val uiState: StateFlow<AgentChatUiState> = _uiState.asStateFlow()
-    init { viewModelScope.launch { _uiState.update { it.copy(historyDepth = withContext(Dispatchers.IO) { runCatching { memory.count() }.getOrDefault(0) }) } } }
 
     /**
-     * 附件管理器：附件状态流 + 追加/移除/沙箱拷贝的唯一负责人
-     * （从本类抽出的单一职责协作类，逻辑逐行等价；scope 即 viewModelScope）。
+     * 抽屉徽标窄化流（P1 重组风暴修复）：抽屉只消费 mode/thinkingLevel/
+     * historyDepth 三个字段——直接 collectAsState uiState 会让流式输出期间
+     * 每个 token 的 copy() 新实例都把整个抽屉（含 13 个玻璃导航项）重组
+     * 一遍；结构去重后流式期间抽屉零重组。
      */
+    val drawerBadges: StateFlow<DrawerBadges> = _uiState
+        .map { DrawerBadges(it.mode, it.thinkingLevel, it.historyDepth) }
+        .distinctUntilChanged()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            DrawerBadges(AgentMode.BUILD, ThinkingLevel.STANDARD, 0)
+        )
+
+    /** 抽屉徽标快照（窄字段 + distinctUntilChanged，天然结构去重）。 */
+    data class DrawerBadges(
+        val mode: AgentMode,
+        val thinkingLevel: ThinkingLevel,
+        val historyDepth: Int
+    )
+
+    /** #168 AUTO 档：最近一次自适应选档理由（引擎 IterationStart 后由 EventApplier 拉取刷新）。 */
+    internal val _lastAdaptiveDecision = MutableStateFlow<String?>(null)
+    val lastAdaptiveDecision: StateFlow<String?> = _lastAdaptiveDecision.asStateFlow()
+    init {
+        viewModelScope.launch { _uiState.update { it.copy(historyDepth = withContext(Dispatchers.IO) { runCatching { memory.count() }.getOrDefault(0) }) } }
+        // P2-8/P3（6-c）：reasoningEffort chip 初始跟随默认 Profile；contextMaxTokens 回填引擎真实值（原恒 1 → 仪表盘 0%/上限1）。
+        settingsRepository.profiles.value.firstOrNull { it.isDefault }?.let { p -> _uiState.update { it.copy(reasoningEffort = p.reasoningEffort) } }
+        // 双级思考控制第二级：恢复强制深度思考开关（优先读新字段 forceDeepThinking；
+        // 旧版本仅存 thinkingLevelOverride —— deep/maximum 视为强制开；旧档位
+        // （如 auto 自适应）按原档回放，行为零回归）。
+        val agentSettingsSnapshot = settingsRepository.agentSettings.value
+        val savedOverrideLevel = agentSettingsSnapshot.thinkingLevelOverride
+            .takeIf { it.isNotBlank() }
+            ?.let { thinkingLevelFromOverride(it) }
+        val forcedDeep = agentSettingsSnapshot.forceDeepThinking ||
+            savedOverrideLevel == ThinkingLevel.DEEP || savedOverrideLevel == ThinkingLevel.MAXIMUM
+        when {
+            forcedDeep -> applyThinkingLevel(ThinkingLevel.MAXIMUM)
+            savedOverrideLevel != null -> applyThinkingLevel(savedOverrideLevel)
+            else -> Unit // 未覆盖：跟随启动默认档位（AgentModule 快照）
+        }
+        (agentEngine as? ApexAgentEngine)?.let { e -> _uiState.update { it.copy(contextMaxTokens = e.maxContextTokens()) } }
+        // 历史对话：会话列表初始加载 + 消息流防抖自动归档
+        installChatHistoryAutoPersist()
+        // ═══ Agent 角色：监听激活角色变化 → 引擎配置热更新 ═══
+        // 设置页/聊天顶栏切换角色（持久化到 agentSettings）→ 此 collector
+        // patchConfig 拍平后的 6 个人设字段 —— 无需重启、下一轮请求即生效
+        // （与 setMode/setThinkingLevel 同款运行时通道，P1-1 语义：只改人设
+        // 字段，绝不重置其余引擎配置）。
+        viewModelScope.launch {
+            settingsRepository.agentSettings
+                .map { it.activeRole() }
+                .distinctUntilChanged()
+                .collect { role -> applyRoleToEngine(role) }
+        }
+
+        // ═══ Issue #164：全局规则 → 引擎热更新 ═══
+        // 设置页 RulesSettingsSection 编辑后无需重启：EnginePrompts 的
+        // "## Global Rules" 段在下一轮 buildSystemPrompt 即生效（coding
+        // 模式走 CodeAgentEngine.rulesProvider 通道，两通道互斥防双注）。
+        viewModelScope.launch {
+            settingsRepository.agentSettings
+                .map { it.globalRules }
+                .distinctUntilChanged()
+                .collect { rules -> (agentEngine as? ApexAgentEngine)?.updateGlobalRules(rules) }
+        }
+
+        // ═══ #168 CUSTOM 模式预设：选中预设/指令变化 → 引擎热更新 ═══
+        // 选中预设持久化在 agentSettings（设置页/聊天页均可改）；此处把
+        // 「当前生效指令」（选中预设优先，回退旧单串）拍平进引擎
+        // customInstruction——下一轮请求生效，无需重启。无预设无旧串时
+        // 置 null（CUSTOM 模式不注入额外指令，语义合法）。
+        viewModelScope.launch {
+            settingsRepository.agentSettings
+                .map { settingsRepository.effectiveCustomInstruction() }
+                .distinctUntilChanged()
+                .collect { instruction ->
+                    (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
+                        cfg.copy(customInstruction = instruction.ifBlank { null })
+                    }
+                }
+        }
+    }
+
+    /** 全量角色列表（内置在前；AgentRoleSelector / 设置页共用）。 */
+    val agentRoles: StateFlow<List<com.apex.agent.ui.screen.settings.AgentRole>> =
+        settingsRepository.agentSettings
+            .map { it.allRoles() }
+            .stateIn(
+                viewModelScope,
+                SharingStarted.Eagerly,
+                listOf(com.apex.agent.ui.screen.settings.AgentRole.ALL_ROUNDER)
+            )
+
+    /** 当前激活角色（UI 展示）。 */
+    val activeAgentRole: StateFlow<com.apex.agent.ui.screen.settings.AgentRole> =
+        settingsRepository.agentSettings
+            .map { it.activeRole() }
+            .stateIn(
+                viewModelScope,
+                SharingStarted.Eagerly,
+                com.apex.agent.ui.screen.settings.AgentRole.ALL_ROUNDER
+            )
+
+    /** 激活角色（聊天顶栏 AgentRoleSelector 入口；持久化 + collector 负责引擎生效）。 */
+    fun setAgentRole(roleId: String) {
+        settingsRepository.updateAgentSettings { withRoleActivated(roleId) }
+    }
+
+    /** 角色数据模型 → 引擎 AgentConfig 人设字段（内置 = 全空 = 历史行为）。 */
+    private fun applyRoleToEngine(role: com.apex.agent.ui.screen.settings.AgentRole) {
+        (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
+            cfg.copy(
+                agentName = if (role.isBuiltIn) "" else role.name,
+                userTitle = role.userTitle,
+                roleDefinition = role.roleDefinition,
+                rolePrompt = role.systemPrompt,
+                roleStyle = role.style,
+                roleLanguage = role.replyLanguage
+            )
+        }
+    }
+
+    /** 附件管理器：附件状态流 + 追加/移除/沙箱拷贝的唯一负责人（抽出的单一职责协作类；scope 即 viewModelScope）。 */
     private val attachmentManager = AttachmentManager(
         context = context,
         preprocessor = preprocessor,
@@ -74,10 +259,7 @@ class AgentChatViewModel @Inject constructor(
     /** 任务状态卡数据源（TaskStatusCard 消费）。 */
     val taskState: StateFlow<com.apex.agent.core.engine.task.AgentTask?> get() = taskController.taskState
 
-    /**
-     * 崩溃恢复发现（D-3：VM init 确定性扫描，非后台任务）。
-     * IO 阻塞扫描放 IO dispatcher；结果供 RecoveryBanner 呈现。
-     */
+    /** 崩溃恢复发现（D-3：VM init 确定性扫描，IO 阻塞扫描放 IO dispatcher；结果供 RecoveryBanner 呈现）。 */
     private val _recoveryCandidates = MutableStateFlow<List<com.apex.agent.core.engine.task.AgentTask>>(emptyList())
     val recoveryCandidates: StateFlow<List<com.apex.agent.core.engine.task.AgentTask>> = _recoveryCandidates.asStateFlow()
 
@@ -98,7 +280,8 @@ class AgentChatViewModel @Inject constructor(
     /** 恢复暂停任务：返回的执行流接入与 sendMessage 相同的事件管线。 */
     fun resumeTask() {
         taskController.resume()?.let { flow ->
-            currentJob = viewModelScope.launch { flow.collect { handleEvent(it) } }
+            currentJob?.cancel() // 混沌审查修复：与 sendMessage 对齐，覆盖前取消旧收集器，防双消费者交错写 _uiState
+            currentJob = viewModelScope.launch { collectEngineFlowSafely(flow) }
         }
     }
 
@@ -110,22 +293,28 @@ class AgentChatViewModel @Inject constructor(
     /** 重试失败任务。 */
     fun retryTask() {
         taskController.retry()?.let { flow ->
-            currentJob = viewModelScope.launch { flow.collect { handleEvent(it) } }
+            currentJob?.cancel() // 混沌审查修复：与 sendMessage 对齐，覆盖前取消旧收集器，防双消费者交错写 _uiState
+            currentJob = viewModelScope.launch { collectEngineFlowSafely(flow) }
         }
     }
 
-    /** 恢复横幅：继续崩溃任务。 */
+    /** 恢复横幅：继续崩溃任务（仅移除被继续的那一项，原实现误清空全部候选）。 */
     fun resumeCrashedTask(taskId: String) {
         taskController.resumeFromCrash(taskId)?.let { flow ->
-            _recoveryCandidates.value = emptyList()
-            currentJob = viewModelScope.launch { flow.collect { handleEvent(it) } }
+            _recoveryCandidates.update { list -> list.filterNot { it.taskId == taskId } }
+            currentJob?.cancel() // 混沌审查修复：与 sendMessage 对齐，覆盖前取消旧收集器，防双消费者交错写 _uiState
+            currentJob = viewModelScope.launch { collectEngineFlowSafely(flow) }
         }
     }
 
-    /** 恢复横幅：放弃崩溃任务（终态 CANCELLED，重启不再出现）。 */
-    fun dismissCrashedTask() {
-        _recoveryCandidates.value = emptyList()
-        viewModelScope.launch { taskController.abandonCrashed() }
+    /** 恢复横幅：放弃单个崩溃任务（原实现误弃/误清全部候选）。 */
+    fun dismissCrashedTask(taskId: String) {
+        _recoveryCandidates.update { list -> list.filterNot { it.taskId == taskId } }
+        // 仅当被放弃的候选就是当前激活任务（发现扫描会激活首项）时走运行时终态链；
+        // 其余候选只从横幅移除——若其仍处于崩溃态，下次重启扫描会再次出现（诚实语义）
+        if (taskController.taskState.value?.taskId == taskId) {
+            viewModelScope.launch { taskController.abandonCrashed() }
+        }
     }
 
     /**
@@ -140,6 +329,33 @@ class AgentChatViewModel @Inject constructor(
      */
     private val _requestGithubConnect = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val requestGithubConnect: SharedFlow<Unit> = _requestGithubConnect.asSharedFlow()
+
+    /** 一次性 UI 反馈（Toast 级）：异步动作真实结果由 Screen 收集展示。UX-1：internal（非 private）供 AgentMessageActions.kt 同包扩展访问。 */
+    internal val _uiFeedback = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val uiFeedback: SharedFlow<String> = _uiFeedback.asSharedFlow()
+
+    // ═══ v1.4.4 #7：分享接收 —— 外部分享文本/图片预填输入区 ═══
+    // 刻意放在这里的独立 init 块（在 attachmentManager/_uiFeedback 声明之后）：
+    // Kotlin 属性与 init 块按声明顺序执行，而 viewModelScope 是 Main.immediate ——
+    // StateFlow.collect 会同步发射当前值，若此代码在首个 init 块（依赖成员声明
+    // 之前），冷启动分享路径会在构造期访问未初始化成员直接 NPE。
+    // StateFlow 持久载荷（冷启动 onCreate 路径也不丢）：文本进草稿、图片挂
+    // 附件条；不自动发送（分享 ≠ 授权发送，用户仍需点发送键）。图片必须在
+    // URI 权限窗口内即时拷沙箱，不等用户点发送。
+    init {
+        viewModelScope.launch {
+            sharedIntake.pending.collect { payload ->
+                if (payload == null) return@collect
+                val textFilled = payload.text?.takeIf { it.isNotBlank() }
+                if (textFilled != null) updateInputText(textFilled)
+                payload.imageUri?.let { uri ->
+                    runCatching { attachmentManager.attachImage(uri) }
+                }
+                _uiFeedback.tryEmit(strFmt(R.string.chat_share_received))
+                sharedIntake.consume()
+            }
+        }
+    }
 
     /**
      * Agent 主动提问时的待处理问题。
@@ -160,6 +376,34 @@ class AgentChatViewModel @Inject constructor(
         savedStateHandle[KEY_DRAFT_INPUT] = text
     }
 
+    // ═══ 流水线指令胶囊（斜杠菜单选中 → 结构化挂起，不再裸文本入框）═══
+
+    private val _pendingCommand = MutableStateFlow<PendingPipelineCommand?>(null)
+
+    /** 当前挂在输入栏的流水线指令胶囊（null = 无）。发送时拼回 `/type:id` 走斜杠管线。 */
+    val pendingCommand: StateFlow<PendingPipelineCommand?> = _pendingCommand.asStateFlow()
+
+    /**
+     * 挂起一条流水线指令胶囊（Skill / MCP / 连接器 / 插件）。
+     *
+     * - 已有胶囊时**替换**（单条语义：一次发送触发一条流水线，避免多指令
+     *   组合出 `/skill:a /mcp:b` 这种解析器不认识的复合命令）；
+     * - 输入框里若已有同源斜杠残文（如手动输入了 `/skill:` 前缀），顺手清掉，
+     *   避免胶囊 + 残文双份指令。
+     */
+    fun setPendingCommand(command: PendingPipelineCommand) {
+        _pendingCommand.value = command
+        val draft = inputText.value
+        if (draft.isNotBlank() && draft.trimStart().startsWith("/")) {
+            updateInputText("")
+        }
+    }
+
+    /** 移除胶囊（胶囊行 × 按钮）。 */
+    fun clearPendingCommand() {
+        _pendingCommand.value = null
+    }
+
     /**
      * 自定义模式指令（持久化到 SharedPreferences）。
      *
@@ -172,6 +416,16 @@ class AgentChatViewModel @Inject constructor(
     )
     val customInstruction: StateFlow<String> = _customInstruction.asStateFlow()
 
+    /**
+     * #168 当前选中的 CUSTOM 模式预设（null = 未选，回退旧单串指令）。
+     * AgentChatScreen 据此在顶部显示预设名 chip（点击编辑该预设）。
+     */
+    val activeModePreset: StateFlow<ModePreset?> =
+        settingsRepository.agentSettings
+            .map { it.activeModePreset() }
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     fun setCustomInstruction(text: String) {
         val trimmed = text.trim()
         _customInstruction.value = trimmed
@@ -179,26 +433,13 @@ class AgentChatViewModel @Inject constructor(
             .edit()
             .putString(KEY_CUSTOM_INSTRUCTION, trimmed)
             .apply()
-        // CUSTOM 模式运行时立即生效；非 CUSTOM 模式在下次切换时携带。
-        if (_uiState.value.mode == AgentMode.CUSTOM) {
-            (agentEngine as? ApexAgentEngine)?.updateConfig(
-                AgentConfig(
-                    mode = AgentMode.CUSTOM,
-                    thinkingLevel = _uiState.value.thinkingLevel,
-                    customInstruction = trimmed
-                )
-            )
+        // #168：旧单串仅是后备通道——无选中预设时才即时生效；
+        // 选中预设时预设指令优先（agentSettings collector 已接管）。
+        if (activeModePreset.value == null && _uiState.value.mode == AgentMode.CUSTOM) {
+            (agentEngine as? ApexAgentEngine)?.patchConfig { cfg -> cfg.copy(customInstruction = trimmed) }
         }
     }
 
-    /**
-     * 将一条 Agent 回复整理进记忆（UI 占位实现）。
-     *
-     * 当前仅记录日志与埋点占位，尚未接入 CS-Mem 后端：
-     * 后续版本会把 [text] 交给 CsMemSessionManager 做显式整理/蒸馏，
-     * 使本次对话可被后续任务通过 memory_recall_* 工具召回。
-     * Toast 提示由调用方（AgentBubble）负责，本方法保持纯业务占位。
-     */
     /**
      * 将一条 Agent 回复整理进记忆（接 CS-Mem 显式整理入口）。
      *
@@ -206,11 +447,18 @@ class AgentChatViewModel @Inject constructor(
      * 使其可被 memory_search_nodes 按关键词召回。整理主题取文本前 40 字符。
      */
     fun organizeToMemory(text: String) {
-        val goal = text.take(40).trim().ifBlank { "对话整理" }
+        val goal = text.take(40).trim().ifBlank { str(R.string.chat_memory_goal_default) }
         viewModelScope.launch {
             runCatching { csMemSessionManager.organizeText(goal, text) }
+                .onSuccess { _uiFeedback.tryEmit(strFmt(R.string.chat_organized_to_memory, goal)) }
                 .onFailure { e ->
                     android.util.Log.e("AgentChatViewModel", "organizeToMemory failed", e)
+                    _uiFeedback.tryEmit(
+                        strFmt(
+                            R.string.chat_organize_failed,
+                            e.message ?: str(R.string.chat_unknown_error)
+                        )
+                    )
                 }
         }
     }
@@ -227,15 +475,20 @@ class AgentChatViewModel @Inject constructor(
             val report = runCatching { engine.compressNow() }.getOrNull()
             if (report == null) {
                 _uiState.update { s ->
-                    s.copy(messages = s.messages + AgentUiMessage.System("⚠️ 压缩不可用（未启用压缩引擎）"))
+                    s.copy(messages = s.messages + AgentUiMessage.System(str(R.string.chat_compress_unavailable)))
                 }
                 return@launch
             }
             _uiState.update { s ->
                 s.copy(
                     messages = s.messages + AgentUiMessage.System(
-                        "📦 已压缩上下文：${report.beforeTokens}→${report.afterTokens} tokens " +
-                            "(策略=${report.strategy}, 移除 ${report.messagesRemoved} 条)"
+                        strFmt(
+                            R.string.chat_vm_context_compressed_manual,
+                            report.beforeTokens,
+                            report.afterTokens,
+                            report.strategy,
+                            report.messagesRemoved
+                        )
                     ),
                     contextUsedTokens = engine.currentTokenCount(),
                     contextMaxTokens = engine.maxContextTokens()
@@ -244,7 +497,8 @@ class AgentChatViewModel @Inject constructor(
         }
     }
 
-    private var currentJob: Job? = null
+    // internal：AgentChatHistoryController.kt 的恢复会话需取消在途执行（拆分既定模式）
+    internal var currentJob: Job? = null
 
     // ═══ 工具输出流式缓冲（16ms 节流刷新）═══
     // 每个 ToolOutputChunk 直接更新 StateFlow 会导致高频重组（模型/工具吐字快时
@@ -252,78 +506,55 @@ class AgentChatViewModel @Inject constructor(
     // (≈1 帧) 的 flush Job；期间到达的 chunk 不再启动新 Job，到点后一次性把
     // 缓冲区快照写入 currentToolCall.output。既保留所有文本，又把重组次数压到
     // 每秒 ≤60 次。
-    private val toolOutputBuffer = StringBuilder()
-    private var activeToolCallId: String? = null
-    private var toolFlushJob: Job? = null
+    // 以下流式/工具运行态 internal：resetStreamingState()（历史恢复共用）
+    // 在 AgentChatHistoryController.kt 扩展中访问 —— God-file 预算拆分既定模式。
+    internal val toolOutputBuffer = StringBuilder()
+    internal var activeToolCallId: String? = null
+    internal var toolFlushJob: Job? = null
     /**
      * 运行期工具步骤流的单一事实源（带时间戳的步骤序列）。
      * [ToolCallStart] 时重置，[ToolOutputChunk] 原地替换"活输出"步/[ToolProgress] 追加；
      * [ToolCallComplete] 读取它构造最终过程流，避免反复从 StateFlow 派生。
      */
-    private var currentToolCallSteps: List<ToolStep>? = null
+    internal var currentToolCallSteps: List<ToolStep>? = null
     /** 当前"活输出"步骤（唯一一条被反复原地替换的 OUTPUT 步）的 id；null 表示暂无。 */
-    private var liveOutputStepId: String? = null
+    internal var liveOutputStepId: String? = null
     /** 步骤序列号发生器（单调递增），供时间线自动滚动 key 使用。 */
     private var stepSeqCounter: Long = 0
-    private fun nextStepSeq(): Long = ++stepSeqCounter
+    internal fun nextStepSeq(): Long = ++stepSeqCounter
 
     // ═══ 回复/思考流式缓冲（33ms 节流刷新）═══
-    // ResponseChunk/ThinkingChunk 每 token 直接 _uiState.update { copy(currentResponse += text) }
-    // 是 O(n²) 字符串拷贝 + 每秒上百次重组。改为 StringBuilder 累积，由一个 33ms
-    // (≈2 帧) 的 flush Job 统一刷入 UI 状态（与下方工具输出节流同款模式）。
-    // Complete/ThinkingComplete/ToolCallStart/abort/Error 时做最终 flush。
-    private val responseBuffer = StringBuilder()
-    private val thinkingBuffer = StringBuilder()
-    private var streamFlushJob: Job? = null
-
-    /** 把流式缓冲一次性刷入 UI 状态（两缓冲都为空时是 no-op）。 */
-    private fun flushStreamBuffers() {
-        val responseSnapshot = if (responseBuffer.isEmpty()) "" else {
-            val s = responseBuffer.toString()
-            responseBuffer.setLength(0)
-            s
-        }
-        val thinkingSnapshot = if (thinkingBuffer.isEmpty()) "" else {
-            val s = thinkingBuffer.toString()
-            thinkingBuffer.setLength(0)
-            s
-        }
-        if (responseSnapshot.isEmpty() && thinkingSnapshot.isEmpty()) return
+    // 详见 [StreamingFlushBuffers]（为守住 God-file 行数预算抽出的独立文件）：
+    // chunk 入缓冲、33ms flush Job 统一刷入 UI 状态；Complete/ThinkingComplete/
+    // ToolCallStart/abort/Error 时由调用方做最终 flush。
+    internal val streamBuffers = StreamingFlushBuffers(viewModelScope) { responseDelta, thinkingDelta ->
         _uiState.update { state ->
             state.copy(
-                currentResponse = state.currentResponse + responseSnapshot,
-                currentThinking = state.currentThinking + thinkingSnapshot
+                currentResponse = state.currentResponse + responseDelta,
+                currentThinking = state.currentThinking + thinkingDelta
             )
         }
-    }
-
-    /** 确保存在一个 33ms 后到期的 flush Job（期间到达的 chunk 复用同一 Job）。 */
-    private fun ensureStreamFlushJob() {
-        if (streamFlushJob == null) {
-            streamFlushJob = viewModelScope.launch {
-                delay(STREAM_FLUSH_INTERVAL_MS)
-                flushStreamBuffers()
-                streamFlushJob = null
-            }
-        }
-    }
-
-    /** 取消流式 flush Job 并清空两个流式缓冲（新会话/新消息/中止时防串轮残留）。 */
-    private fun resetStreamBuffers() {
-        streamFlushJob?.cancel()
-        streamFlushJob = null
-        responseBuffer.clear()
-        thinkingBuffer.clear()
     }
 
     /**
      * 运行期"活输出"步骤的唯一写入口：每次 flush 用最新尾部快照【原地替换】同一条
      * OUTPUT 步骤（而非追加新步骤），消除旧实现里逐次叠加重复文本的缺陷。
+     *
+     * 替换时**保留原步骤 id**：时间线以 s.id 作 LazyColumn key —— 每次换新 UUID
+     * 会让活输出行每 16ms 被 dispose/recreate（横滚位置重置、重组放大），
+     * 与「原地替换」的注释意图相悖。seq 仍然递增（时间线滚动感知更新靠它）。
+     * （internal —— 事件归约已迁出至 AgentChatEventApplier.kt 扩展）
      */
-    private fun upsertLiveOutputStep(snapshot: String) {
-        val live = ToolStep(phase = StepPhase.OUTPUT, text = snapshot, seq = nextStepSeq())
-        val steps = currentToolCallSteps ?: emptyList()
+    internal fun upsertLiveOutputStep(snapshot: String) {
         val existingId = liveOutputStepId
+        // 替换形态：沿用原 id（LazyColumn key 稳定）；新建形态：全新 id。
+        val live = ToolStep(
+            id = existingId ?: java.util.UUID.randomUUID().toString(),
+            phase = StepPhase.OUTPUT,
+            text = snapshot,
+            seq = nextStepSeq()
+        )
+        val steps = currentToolCallSteps ?: emptyList()
         if (existingId != null) {
             val idx = steps.indexOfFirst { it.id == existingId }
             if (idx >= 0) {
@@ -341,14 +572,20 @@ class AgentChatViewModel @Inject constructor(
      * 在该流水线的 agent 循环中产生的工具调用会携带对应来源分类与名称，
      * 便于 UI 区分"这是一个 Skill / 连接器 / 插件调用"。循环结束后清空。
      */
-    private var routeContextKind: ToolKind? = null
-    private var routeContextName: String? = null
+    internal var routeContextKind: ToolKind? = null
+    internal var routeContextName: String? = null
 
     /** 正在展示中的流水线横幅 id（[AgentUiMessage.PipelineBanner]），收尾时原地置为完成态。 */
-    private var activeBannerId: String? = null
+    internal var activeBannerId: String? = null
+
+    // ═══ 思考耗时计时（ThinkingBubble 秒数显示）═══
+    /** 当前一轮思考的起始时刻（SystemClock.elapsedRealtime 基；0 = 未在思考）。
+     *  [AgentEvent.ThinkingStart] 置位、[AgentEvent.ThinkingComplete]/abort 清零；
+     *  ThinkingComplete 用它与当前时刻差值落盘 ThinkingMessage.durationMs。 */
+    internal var thinkingStartElapsed: Long = 0
 
     /** 引擎一轮执行收尾时调用：把未完成的流水线横幅置为完成态（停止脉冲、显示耗时）。 */
-    private fun finishActiveBanner() {
+    internal fun finishActiveBanner() {
         val id = activeBannerId ?: return
         activeBannerId = null
         _uiState.update { state ->
@@ -372,7 +609,12 @@ class AgentChatViewModel @Inject constructor(
      */
     fun sendMessage(text: String) {
         val trimmedText = text.trim()
-        if (trimmedText.isEmpty() && attachmentManager.attachments.value.isEmpty()) return
+        // 二轮审计 A-1：不计入 ERROR 占位附件——「空文本 + 全部附件读取失败」时
+        // 不应发出空消息（P2-9 的 enabled 判定与 drainAttachments 的过滤口径对齐）。
+        val hasUsableAttachment = attachmentManager.attachments.value.any { it.status != UploadStatus.ERROR }
+        // 胶囊挂起时输入框文本视为"附加要求"（可为空）——胶囊本身即指令主体。
+        val pendingCmd = _pendingCommand.value
+        if (trimmedText.isEmpty() && !hasUsableAttachment && pendingCmd == null) return
 
         // 取消前一个尚未完成的流式任务
         currentJob?.cancel()
@@ -383,25 +625,42 @@ class AgentChatViewModel @Inject constructor(
         // ★ 缺陷 2 修复：无条件收集并清空附件，避免斜杠指令分支 return 后附件永久残留
         val currentAttachments = attachmentManager.drainAttachments()
 
-        // 清空草稿（无论是否斜杠指令，发送后都应清空输入框）
+        // 清空草稿（无论是否斜杠指令，发送后都应清空输入框）+ 摘下胶囊
         updateInputText("")
+        _pendingCommand.value = null
+
+        // 胶囊 → 拼回斜杠命令：`/type:id` +（输入框有文本时）附加要求。
+        // 附件与斜杠指令互斥（下方分支提示后丢弃），胶囊路径同样遵循。
+        val effectiveText = if (pendingCmd != null) {
+            if (trimmedText.isEmpty()) pendingCmd.toCommandToken()
+            else pendingCmd.toCommandToken() + " " + trimmedText
+        } else {
+            trimmedText
+        }
 
         // 斜杠指令分支：附件已被收集，但不随指令发送（给出 System 提示）
-        if (trimmedText.startsWith("/")) {
+        if (effectiveText.startsWith("/")) {
             if (currentAttachments.isNotEmpty()) {
                 _uiState.update { s ->
                     s.copy(
                         messages = s.messages + AgentUiMessage.System(
-                            "⚠️ 斜杠指令不携带附件，已移除 ${currentAttachments.size} 个附件"
+                            strFmt(R.string.chat_slash_attachments_removed, currentAttachments.size)
                         )
                     )
                 }
             }
-            handleSlashCommand(trimmedText)
+            handleSlashCommand(effectiveText)
             return
         }
 
         currentJob = viewModelScope.launch {
+            // P0 修复（互斥锁冲突丢消息）：旧实现只 cancel UI 收集器（currentJob），
+            // TaskRuntime 镜像收集器与执行锁不随 UI 生命周期走 —— 在途任务继续持锁。
+            // 下一轮 executeNormalMessage → taskController.execute 撞互斥锁 →
+            // "TaskRuntime rejects concurrent execution" 错误气泡，用户消息打水漂
+            //（abort 后快速重发的窗口期必现）。先 await cancel 完成再执行新消息
+            //（串行化，无竞态；无在途任务时 cancel 立即返回 false）。
+            taskController.cancel()
             executeNormalMessage(trimmedText, currentAttachments)
         }
     }
@@ -419,7 +678,8 @@ class AgentChatViewModel @Inject constructor(
         currentJob?.cancel()
         // 同 sendMessage：被取消的上一轮流水线横幅收尾，避免残留"运行中"脉冲。
         finishActiveBanner()
-        updateInputText("")
+        // P2：不清草稿 —— retry 的文本来自历史消息而非输入框；用户正在打的新草稿
+        // 不该被无声清掉（regenerateResponse 已特意保留草稿，此路径漏修对齐）。
         currentJob = viewModelScope.launch {
             runEngine(trimmed, attachments)
         }
@@ -439,6 +699,10 @@ class AgentChatViewModel @Inject constructor(
         text: String,
         currentAttachments: List<Attachment>
     ) {
+        // 技能自动装备（渐进披露零成本路）：消息命中已安装技能的 tags/id/name
+        // → 发送前预激活（≤ 2 个），本轮提示词即携带方法论全文；异常静默不阻断发送。
+        runCatching { skillAutoActivator.autoEquip(text) }
+
         // 异步落盘附件（IO 线程）
         // 优先使用预拷贝结果，未预拷贝的回退到同步拷贝
         val persistedAttachments = try {
@@ -446,7 +710,10 @@ class AgentChatViewModel @Inject constructor(
                 currentAttachments.map { att ->
                     // 尝试从预拷贝缓存获取（零等待）
                     val preprocessedPath = preprocessor.getSandboxPath(att.uri)
-                    val localPath = preprocessedPath ?: attachmentManager.copyToSandboxSafe(att.uri, att.name)
+                    // 命中预拷贝：晋升到正式 attachments 目录（生命周期归一，
+                    // 否则已发送附件留在 attachments_pre，进程重启后即成永久孤儿）
+                    val localPath = preprocessedPath?.let { attachmentCleanup.promoteToAttachments(it) }
+                        ?: attachmentManager.copyToSandboxSafe(att.uri, att.name)
 
                     MessageAttachment(
                         name = att.name,
@@ -464,7 +731,10 @@ class AgentChatViewModel @Inject constructor(
             _uiState.update { s ->
                 s.copy(
                     messages = s.messages + AgentUiMessage.Error(
-                        message = "附件处理失败：${e.message ?: e::class.simpleName}",
+                        message = strFmt(
+                            R.string.chat_attachment_failed,
+                            e.message ?: e::class.simpleName ?: ""
+                        ),
                         canRetry = true
                     ),
                     isLoading = false
@@ -486,24 +756,43 @@ class AgentChatViewModel @Inject constructor(
      */
     private suspend fun runEngine(text: String, persistedAttachments: List<MessageAttachment>) {
         // 新一轮流式开始：清空上一轮可能残留的流式缓冲（防跨轮串字）；retry 路径同样受益。
-        resetStreamBuffers()
+        streamBuffers.reset()
+        // P1（旧工具卡悬挂）：runEngine/retry 覆盖新一轮时必须清掉上一轮的工具运行态
+        //（对比 abort() 的完整清理面）—— 否则被取消轮次的工具卡永久「运行中」脉冲
+        // + 计时器常跑；toolOutputBuffer/flush Job/activeToolCallId 同属该清理面。
+        toolFlushJob?.cancel()
+        toolFlushJob = null
+        activeToolCallId = null
+        toolOutputBuffer.setLength(0)
+        liveOutputStepId = null
+        currentToolCallSteps = null
+        // 在途部分回复保留为 isPartial（abort() 同款语义 —— 新发送取消旧任务时，
+        // 已流出的内容不该无声消失）。
+        val inFlightResponse = _uiState.value.currentResponse
         _uiState.update { state ->
             state.copy(
-                messages = state.messages + AgentUiMessage.User(
-                    text = text,
-                    attachments = persistedAttachments
-                ),
+                messages = state.messages +
+                    (if (inFlightResponse.isNotBlank())
+                        listOf(AgentUiMessage.Agent(text = inFlightResponse, isPartial = true))
+                    else emptyList()) +
+                    AgentUiMessage.User(
+                        text = text,
+                        attachments = persistedAttachments
+                    ),
                 isLoading = true,
                 currentThinking = "",
-                currentResponse = ""
+                currentResponse = "",
+                currentToolCall = null
             )
         }
 
         // ═══ 多模态输入：图片 → ImageContent（Vision），非图片 → FileRef（路径上下文）═══
         // 图片附件经 ImageAttachmentConverter 压缩成 base64 ImageContent，注入
-        // LlmMessage.User.images 让 Vision-capable LLM 真正看图；非图片附件仍作为
-        // 文件路径上下文（Agent 可用 read_file / search_files 读取）。单次最多 3 张图，
+        // LlmMessage.User.images 让 Vision-capable LLM 真正看图；单次最多 3 张图，
         // 防止请求体过大 / token 超限。
+        // Bug 修复：旧实现 take(3) 超出的图片与解码失败的图片被**静默丢弃**
+        //（既不进 Vision 也不进 FileRef，用户发 5 张图第 4/5 张无声消失）。
+        // 现在一律降级为 FileRef —— Agent 仍可用 read_file 读取它们。
         val imageContents = mutableListOf<ImageContent>()
         val fileRefs = mutableListOf<FileRef>()
 
@@ -512,37 +801,45 @@ class AgentChatViewModel @Inject constructor(
             val file = File(localPath)
             if (!file.exists()) continue
 
-            if (attachment.type == AttachmentType.IMAGE) {
+            if (attachment.type == AttachmentType.IMAGE &&
+                imageContents.size < MAX_VISION_IMAGES
+            ) {
                 val imageContent = ImageAttachmentConverter.fromFile(
                     file = file,
                     mimeType = attachment.mimeType
                 )
-                if (imageContent != null) imageContents.add(imageContent)
-            } else {
-                fileRefs.add(
-                    FileRef(
-                        name = attachment.name,
-                        mimeType = attachment.mimeType,
-                        localPath = localPath,
-                        sizeBytes = attachment.sizeBytes
-                    )
-                )
+                if (imageContent != null) {
+                    imageContents.add(imageContent)
+                    continue
+                }
+                // 解码/压缩失败 → 降级 FileRef（下方统一收集）
             }
+            // 非图片 / 超出 Vision 张数上限 / 转换失败的附件：以文件引用交给 Agent
+            fileRefs.add(
+                FileRef(
+                    name = attachment.name,
+                    mimeType = attachment.mimeType,
+                    localPath = localPath,
+                    sizeBytes = attachment.sizeBytes
+                )
+            )
         }
 
         val userInput = UserInput(
             text = text,
-            images = imageContents.take(3),
+            images = imageContents,
             files = fileRefs
         )
 
-        // ═══ "小圆环"工具菜单：发送前注入会话上下文 + 收窄工具白名单 ═══
+        // ═══ "小圆环"工具菜单：发送前注入会话上下文 + v4 工具计划参数 ═══
         // 时间注入在调用时刻生成；规则/结构化输出/网络搜索指令组装为
-        // "## Session Context" 段落；函数调用圈选则只向模型暴露白名单工具。
+        // "## Session Context" 段落；「函数调用」圈选 = 强制调用（tool_choice）；
+        // 不选 = 默认 CORE 工具集 + 目录（直接发送即可用，不再需要手动圈选）。
         (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
             cfg.copy(
                 additionalSystemContext = chatToolkit.buildSessionContext(),
-                enabledToolIds = chatToolkit.effectiveToolWhitelist()
+                forcedToolIds = chatToolkit.forcedToolIds(),
+                exposeAllTools = chatToolkit.exposeAllToolsEnabled()
             )
         }
 
@@ -556,7 +853,10 @@ class AgentChatViewModel @Inject constructor(
             _uiState.update { s ->
                 s.copy(
                     messages = s.messages + AgentUiMessage.Error(
-                        message = "执行失败：${e.message ?: e::class.simpleName}",
+                        message = strFmt(
+                            R.string.chat_execution_failed,
+                            e.message ?: e::class.simpleName ?: ""
+                        ),
                         canRetry = true
                     ),
                     isLoading = false
@@ -565,349 +865,18 @@ class AgentChatViewModel @Inject constructor(
         }
     }
 
-    private fun handleEvent(event: AgentEvent) {
-        when (event) {
-            // ═══ 思考 ═══
-            is AgentEvent.ThinkingStart -> {
-                // 新一轮思考：清掉上一轮可能残留的缓冲（防串轮）。
-                thinkingBuffer.clear()
-                _uiState.update { it.copy(currentThinking = "") }
-            }
-            is AgentEvent.ThinkingChunk -> {
-                thinkingBuffer.append(event.text)
-                ensureStreamFlushJob()
-            }
-            is AgentEvent.ThinkingComplete -> {
-                // 最终 flush：把仍在缓冲中的思考文本刷入 UI 后再收尾。
-                flushStreamBuffers()
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages + AgentUiMessage.ThinkingMessage(event.fullThought),
-                        currentThinking = ""
-                    )
-                }
-            }
+    // ═══ HTML 产物预览（应用内 WebView）═══
+    // resolveHtmlPreviewPath() 已抽出到 AgentChatHtmlPreview.kt（internal 扩展，
+    // 调用点 vm.resolveHtmlPreviewPath 解析不变）。
 
-            // ═══ Plan模式 ═══
-            is AgentEvent.PlanGenerated -> {
-                _uiState.update { it.copy(plan = event.plan) }
-            }
-            is AgentEvent.PlanAwaitingConfirmation -> {
-                _uiState.update { it.copy(awaitingPlanConfirmation = true) }
-            }
-            is AgentEvent.UserInputRequired -> {
-                _uiState.update { it.copy(pendingUserInput = UserInputRequest(event.prompt, event.type)) }
-            }
-            is AgentEvent.PlanConfirmed -> {
-                _uiState.update { state ->
-                    state.copy(
-                        awaitingPlanConfirmation = false,
-                        messages = state.messages + AgentUiMessage.PlanMessage(event.plan)
-                    )
-                }
-            }
-
-            // ═══ Spec 模式 ═══
-            is AgentEvent.SpecGenerated -> {
-                _uiState.update { it.copy(spec = event.spec) }
-            }
-            is AgentEvent.SpecAwaitingConfirmation -> {
-                _uiState.update { it.copy(awaitingSpecConfirmation = true) }
-            }
-            is AgentEvent.SpecConfirmed -> {
-                _uiState.update { state ->
-                    state.copy(
-                        awaitingSpecConfirmation = false,
-                        messages = state.messages + AgentUiMessage.SpecMessage(event.spec)
-                    )
-                }
-            }
-
-            // ═══ 工具调用（流式）═══
-            is AgentEvent.ToolCallStart -> {
-                // 流式回复/思考暂停：先刷出缓冲，保证已有文本先于工具卡落盘。
-                flushStreamBuffers()
-                // 重置缓冲区 + 节流状态，记录当前活跃工具 callId 用于 chunk 路由。
-                activeToolCallId = event.callId
-                toolOutputBuffer.clear()
-                toolFlushJob?.cancel()
-                toolFlushJob = null
-                liveOutputStepId = null
-                // 重置运行期步骤流（START 步）。
-                currentToolCallSteps = listOf(
-                    ToolStep(
-                        phase = StepPhase.START,
-                        text = "调用 ${event.toolName}，参数：\n${event.arguments}",
-                        seq = nextStepSeq()
-                    )
-                )
-
-                val (kind, server) = classifyTool(event.toolName, event.arguments, routeContextKind)
-                val skill = if (kind == ToolKind.SKILL) routeContextName else null
-
-                _uiState.update { state ->
-                    state.copy(
-                        currentToolCall = AgentToolCallUi(
-                            callId = event.callId,
-                            toolName = event.toolName,
-                            args = event.arguments,
-                            output = "",
-                            steps = currentToolCallSteps ?: emptyList(),
-                            progress = null,
-                            progressMessage = null,
-                            isRunning = true,
-                            kind = kind,
-                            server = server,
-                            skill = skill
-                        )
-                    )
-                }
-            }
-            is AgentEvent.ToolOutputChunk -> {
-                // 仅处理当前活跃工具的 chunk；上一轮工具迟到的 chunk 丢弃（安全）。
-                if (event.callId != activeToolCallId) return
-
-                toolOutputBuffer.append(stripAnsi(event.chunk))
-
-                // 16ms 内的多个 chunk 合并为一次 UI 更新（≈1 帧节流）。
-                if (toolFlushJob == null) {
-                    toolFlushJob = viewModelScope.launch {
-                        delay(FLUSH_INTERVAL_MS)
-                        val snapshot = toolOutputBuffer.toString()
-                            .takeLast(AgentToolCallUi.MAX_LIVE_TOOL_OUTPUT_CHARS)
-                        // 原地替换唯一的"活输出"步骤（不追加），避免重叠文本重复叠加。
-                        upsertLiveOutputStep(snapshot)
-                        _uiState.update { state ->
-                            val tc = state.currentToolCall ?: return@update state
-                            state.copy(
-                                currentToolCall = tc.copy(
-                                    output = snapshot,
-                                    steps = (currentToolCallSteps ?: emptyList())
-                                        .takeLast(AgentToolCallUi.MAX_LIVE_TOOL_STEPS)
-                                )
-                            )
-                        }
-                        toolFlushJob = null
-                    }
-                }
-            }
-            is AgentEvent.ToolProgress -> {
-                if (event.callId != activeToolCallId) return
-                _uiState.update { state ->
-                    val tc = state.currentToolCall ?: return@update state
-                    val msg = event.message ?: "进度 ${((event.percent ?: 0f) * 100).toInt()}%"
-                    val progressStep = ToolStep(
-                        phase = StepPhase.PROGRESS,
-                        text = msg,
-                        percent = event.percent,
-                        seq = nextStepSeq()
-                    )
-                    // 同步写入运行期步骤流单一事实源。
-                    currentToolCallSteps = (currentToolCallSteps ?: emptyList()) +
-                        progressStep
-                    state.copy(
-                        currentToolCall = tc.copy(
-                            progress = event.percent,
-                            progressMessage = event.message,
-                            steps = (tc.steps + progressStep)
-                                .takeLast(AgentToolCallUi.MAX_LIVE_TOOL_STEPS)
-                        )
-                    )
-                }
-            }
-            is AgentEvent.ToolCallComplete -> {
-                // 取消尚未刷新的 flush Job；剩余缓冲不再单独成步——完整输出已由
-                // output/fullOutput 承载。
-                toolFlushJob?.cancel()
-                toolFlushJob = null
-                activeToolCallId = null
-                toolOutputBuffer.clear()
-
-                val (kind, server) = classifyTool(event.toolName, event.arguments, routeContextKind)
-                val skill = if (kind == ToolKind.SKILL) routeContextName else null
-
-                // 最终过程流：丢弃"活输出"步骤（其快照与完整输出重复），仅保留
-                // START / PROGRESS 等结构性步骤 + 收尾步；输出统一去 ANSI 转义序列。
-                val cleanOutput = stripAnsi(event.output)
-                val cleanFullOutput = stripAnsi(event.fullOutput.ifBlank { event.output })
-                val finalSteps = ((currentToolCallSteps ?: emptyList())
-                    .filter { it.id != liveOutputStepId } + ToolStep(
-                    phase = if (event.success) StepPhase.COMPLETE else StepPhase.ERROR,
-                    text = if (event.success)
-                        "完成（${event.durationMs}ms）：${cleanOutput}"
-                    else
-                        "失败（${event.durationMs}ms）：${cleanOutput}",
-                    seq = nextStepSeq()
-                )).takeLast(AgentToolCallUi.MAX_LIVE_TOOL_STEPS)
-                liveOutputStepId = null
-
-                _uiState.update { state ->
-                    state.copy(
-                        currentToolCall = null,
-                        messages = state.messages + AgentUiMessage.ToolCall(
-                            toolName = event.toolName,
-                            args = event.arguments,
-                            output = cleanOutput,
-                            fullOutput = cleanFullOutput,
-                            success = event.success,
-                            durationMs = event.durationMs,
-                            kind = kind,
-                            server = server,
-                            skill = skill,
-                            steps = finalSteps
-                        )
-                    )
-                }
-                // 清理运行期步骤缓存（已被写入完成卡）。
-                currentToolCallSteps = null
-            }
-
-            // ═══ 反思模式：评审意见 ═══
-            // 引擎在草稿流式结束后发射本事件。草稿已在 currentResponse 中流式累积，
-            // 这里先把草稿落为一条 Agent 消息（"生成"），再追加评审卡片；
-            // 随后引擎流式发射修正后的最终回复（ResponseChunk → ResponseComplete）。
-            is AgentEvent.ReflectionReview -> {
-                // 草稿流式结束即评审：先做最终 flush，确保缓冲中的草稿文本完整落为消息。
-                flushStreamBuffers()
-                _uiState.update { state ->
-                    val draft = state.currentResponse
-                    state.copy(
-                        messages = state.messages +
-                            (if (draft.isNotBlank()) listOf(AgentUiMessage.Agent(draft)) else emptyList()) +
-                            listOf(AgentUiMessage.ReflectionReviewMessage(event.reviewText)),
-                        currentResponse = ""
-                    )
-                }
-            }
-
-            // ═══ 流式回复 ═══
-            is AgentEvent.ResponseChunk -> {
-                responseBuffer.append(event.text)
-                ensureStreamFlushJob()
-            }
-            is AgentEvent.ResponseComplete -> {
-                // 最终 flush：把仍在缓冲中的回复文本刷入 UI 后再落为完整消息。
-                flushStreamBuffers()
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages + AgentUiMessage.Agent(event.fullText),
-                        currentResponse = "",
-                        isLoading = false
-                    )
-                }
-            }
-
-            // ═══ Plan 模式：步骤开始（流水线分隔卡，长任务进度可视化）═══
-            is AgentEvent.StepStart -> {
-                flushStreamBuffers()
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages + AgentUiMessage.StepMarker(
-                            stepIndex = event.stepIndex,
-                            description = event.description
-                        )
-                    )
-                }
-            }
-
-            // ═══ 压缩 ═══
-            is AgentEvent.ContextCompressed -> {
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages + AgentUiMessage.System(
-                            "📦 Context compressed: ${event.beforeTokens}→${event.afterTokens} tokens " +
-                            "(${event.strategy}, removed ${event.messagesRemoved} msgs" +
-                            (if (event.messagesTruncated > 0) ", truncated ${event.messagesTruncated}" else "") +
-                            ")"
-                        )
-                    )
-                }
-            }
-
-            // ═══ 错误/完成 ═══
-            is AgentEvent.Error -> {
-                // 出错时把已流式输出的部分回复落为 isPartial 消息，避免流式气泡悬挂。
-                flushStreamBuffers()
-                finishActiveBanner()
-                _uiState.update { state ->
-                    val partial = state.currentResponse
-                    state.copy(
-                        messages = state.messages +
-                            (if (partial.isNotBlank())
-                                listOf(AgentUiMessage.Agent(text = partial, isPartial = true))
-                            else emptyList()) +
-                            listOf(
-                                AgentUiMessage.Error(
-                                    message = event.message,
-                                    canRetry = event.recoverable
-                                )
-                            ),
-                        currentResponse = "",
-                        currentThinking = "",
-                        isLoading = false
-                    )
-                }
-            }
-            is AgentEvent.Complete -> {
-                // 本轮任务收尾：展示运行总结卡（旧实现直接丢弃了 Complete 事件的信息）。
-                finishActiveBanner()
-                _uiState.update {
-                    val engine = agentEngine as? ApexAgentEngine
-                    it.copy(
-                        isLoading = false,
-                        messages = it.messages + AgentUiMessage.RunSummary(
-                            summary = event.summary,
-                            totalIterations = event.totalIterations,
-                            totalToolCalls = event.totalToolCalls,
-                            totalDurationMs = event.totalDurationMs
-                        ),
-                        historyDepth = engine?.historyCount() ?: it.historyDepth,
-                        contextUsedTokens = engine?.currentTokenCount() ?: it.contextUsedTokens,
-                        contextMaxTokens = engine?.maxContextTokens() ?: it.contextMaxTokens
-                    )
-                }
-            }
-            is AgentEvent.Aborted -> {
-                finishActiveBanner()
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages + AgentUiMessage.System("⏹ 已中止"),
-                        isLoading = false
-                    )
-                }
-            }
-
-            else -> {}
-        }
-    }
-
-    fun setMode(mode: AgentMode) {
-        _uiState.update { it.copy(mode = mode) }
-        (agentEngine as? ApexAgentEngine)?.updateConfig(
-            AgentConfig(
-                mode = mode,
-                thinkingLevel = _uiState.value.thinkingLevel,
-                customInstruction = if (mode == AgentMode.CUSTOM) _customInstruction.value else null
-            )
-        )
-    }
-
-    /** 用户确认/驳回了 Spec 模式的规格，恢复引擎执行。 */
-    fun submitSpecConfirmation(confirmed: Boolean) {
-        _uiState.update { it.copy(awaitingSpecConfirmation = false) }
-        (agentEngine as? ApexAgentEngine)?.submitSpecConfirmation(confirmed)
-    }
-
-    fun setThinkingLevel(level: ThinkingLevel) {
-        _uiState.update { it.copy(thinkingLevel = level) }
-        (agentEngine as? ApexAgentEngine)?.updateConfig(
-            AgentConfig(mode = _uiState.value.mode, thinkingLevel = level)
-        )
-    }
-
-    fun confirmPlan(confirmed: Boolean) {
+    /**
+     * #169 计划确认（人控升级）：confirmed=false 取消；true 时可携带步骤勾选
+     * （enabledSteps：原 index 清单，null = 全量）与重排（order：原 index 顺序，
+     * null = 声明顺序）。引擎 Phase 3.5 应用调整 + 拓扑排序后锁定计划。
+     */
+    fun confirmPlan(confirmed: Boolean, enabledSteps: List<Int>? = null, order: List<Int>? = null) {
         _uiState.update { it.copy(awaitingPlanConfirmation = false) }
-        (agentEngine as? ApexAgentEngine)?.submitPlanConfirmation(confirmed)
+        (agentEngine as? ApexAgentEngine)?.submitPlanConfirmation(confirmed, enabledSteps, order)
     }
 
     /** 用户回答了 Agent 的提问，恢复引擎执行。 */
@@ -937,7 +906,7 @@ class AgentChatViewModel @Inject constructor(
      */
     fun abort() {
         // 取消前：先刷出未落盘的流式缓冲，拿到完整文本快照。
-        flushStreamBuffers()
+        streamBuffers.flush()
         val partialResponse = _uiState.value.currentResponse
         val partialThinking = _uiState.value.currentThinking
 
@@ -945,27 +914,32 @@ class AgentChatViewModel @Inject constructor(
         // T76：取消走任务运行时（引擎 abort + CANCELLED 落盘，重启不复活）
         viewModelScope.launch { taskController.cancel() }
 
-        // 取消后：部分产物落盘 + 状态复位。
+        // 取消后：部分产物落盘 + 状态复位（部分思考附带实测秒数）。
         finishActiveBanner()
+        val partialThinkingDurationMs = if (thinkingStartElapsed > 0) {
+            android.os.SystemClock.elapsedRealtime() - thinkingStartElapsed
+        } else 0L
+        thinkingStartElapsed = 0
         _uiState.update { state ->
             val extra = buildList<AgentUiMessage> {
                 if (partialResponse.isNotBlank()) {
                     add(AgentUiMessage.Agent(text = partialResponse, isPartial = true))
                 }
                 if (partialThinking.isNotBlank()) {
-                    add(AgentUiMessage.ThinkingMessage(partialThinking))
+                    add(AgentUiMessage.ThinkingMessage(partialThinking, partialThinkingDurationMs))
                 }
-                add(AgentUiMessage.System("⏹ 已中止"))
+                add(AgentUiMessage.System(str(R.string.chat_aborted)))
             }
             state.copy(
                 messages = state.messages + extra,
                 isLoading = false,
                 currentResponse = "",
                 currentThinking = "",
+                currentThinkingStartElapsed = 0,
                 currentToolCall = null
             )
         }
-        resetStreamBuffers()
+        streamBuffers.reset()
         toolFlushJob?.cancel()
         toolFlushJob = null
         toolOutputBuffer.clear()
@@ -976,44 +950,13 @@ class AgentChatViewModel @Inject constructor(
         routeContextName = null
     }
 
-    fun newChat() {
-        currentJob?.cancel()
-        // 清空所有流式/工具运行态，防止残留缓冲串入新会话。
-        resetStreamBuffers()
-        toolFlushJob?.cancel()
-        toolFlushJob = null
-        toolOutputBuffer.clear()
-        activeToolCallId = null
-        liveOutputStepId = null
-        currentToolCallSteps = null
-        activeBannerId = null
-        routeContextKind = null
-        routeContextName = null
-        viewModelScope.launch {
-            (agentEngine as? ApexAgentEngine)?.clearHistory()
-            _uiState.update {
-                it.copy(
-                    messages = emptyList(),
-                    currentThinking = "",
-                    currentResponse = "",
-                    currentToolCall = null,
-                    plan = null,
-                    awaitingPlanConfirmation = false,
-                    spec = null,
-                    awaitingSpecConfirmation = false,
-                    pendingUserInput = null,
-                    isLoading = false,
-                    historyDepth = 0
-                )
-            }
-        }
-    }
+    // newChat() 已迁至 AgentChatHistoryController.kt（历史归档冲刷 + 会话态清空一体；行数预算拆分）
 
+    /** P2-8（6-c）：原写 legacy 死键 llm_reasoning_effort（全工程无消费者）；改持久化到默认 ModelProfile（DynamicLlmClient 监听 profiles 即时重建生效）。 */
     fun setReasoningEffort(effort: ReasoningEffort) {
-        context.getSharedPreferences("apex_settings", Context.MODE_PRIVATE)
-            .edit()
-            .putString("llm_reasoning_effort", effort.name)
-            .apply()
+        settingsRepository.profiles.value.firstOrNull { it.isDefault }?.let {
+            settingsRepository.upsertProfile(it.copy(reasoningEffort = effort))
+        }
         _uiState.update { it.copy(reasoningEffort = effort) }
     }
 
@@ -1034,6 +977,11 @@ class AgentChatViewModel @Inject constructor(
     /** 全部 Provider（用于模型列表展示 Provider 名）。 */
     val providers: StateFlow<List<ProviderConfig>> = settingsRepository.providers
 
+    /** 界面相关 Agent 设置（sendKeyBehavior / showRunSummary 等即时生效项的数据源）。 */
+    val uiSettings: StateFlow<AgentSettings> = settingsRepository.agentSettings
+
+    /** UX-3：LLM 是否已配置（判定口径 = DynamicLlmClient 的真/NoOp 边界，见 AgentChatOnboarding.kt；空会话+未配置时聊天区显示引导卡）。 */
+    val llmConfigured: StateFlow<Boolean> = settingsRepository.llmConfiguredFlow(viewModelScope)
     /**
      * 切换当前模型：把该 Profile 设为默认 + 同步角色映射 + 引擎温度，
      * 运行中的 LLM client 由 DynamicLlmClient 自动重建（即时生效）。
@@ -1046,6 +994,9 @@ class AgentChatViewModel @Inject constructor(
         (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
             cfg.copy(temperature = target.temperature)
         }
+        // 修复：模型原生思考强度跟随当前模型（每 Profile 独立持久化）——
+        // 切换后同步 UI 状态，避免 chip 显示上一个模型的档位（旧实现遗漏）。
+        _uiState.update { it.copy(reasoningEffort = target.reasoningEffort) }
     }
 
     /**
@@ -1066,9 +1017,19 @@ class AgentChatViewModel @Inject constructor(
         }
     }
 
-    /** 函数调用二级菜单候选：全部已注册工具（id + 显示名）。 */
-    fun availableTools(): List<Pair<String, String>> =
-        toolRegistry.getAllTools().map { it.id to it.name }.sortedBy { it.first }
+    /** 函数调用二级菜单候选：全部已注册工具（id + 显示名 + v2 元数据）。 */
+    fun availableTools(): List<ToolRef> =
+        toolRegistry.getAllTools()
+            .map { tool ->
+                val meta = tool.metadata
+                ToolRef(
+                    id = tool.id,
+                    name = tool.name,
+                    category = meta.category,
+                    highRisk = meta.isHighRisk
+                )
+            }
+            .sortedWith(compareBy<ToolRef> { it.category?.order ?: Int.MAX_VALUE }.thenBy { it.id })
 
     /**
      * 已注册工具数量（透传 [ToolRegistry.toolCount]）。供 [AgentChatScreen] 作为
@@ -1128,10 +1089,18 @@ class AgentChatViewModel @Inject constructor(
      * 与 [sendMessage] 共用同一个 [currentJob]：发送新指令会取消上一个流式任务。
      */
     private fun handleSlashCommand(command: String) {
-        val result = SlashCommands.handle(command, githubTokenManager)
+        // mcpConnected 快照：路由器据此对已连接的 /mcp:<id> 注入「用 mcp_call 调
+        // server=<id>」引导提示词（旧实现恒空集，模型面对 MCP 指令只能瞎猜）。
+        val result = SlashCommands.handle(
+            command,
+            githubTokenManager,
+            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet()),
+            // /skill:<id> 路由时同步装备（写入激活存储，本轮提示词即携带方法论）
+            skillActivation = skillActivation
+        )
 
         // 指令会取消上一个流式任务：先清空流式缓冲，防残留文本串入新一轮。
-        resetStreamBuffers()
+        streamBuffers.reset()
 
         // 始终追加反馈消息，让用户看到指令被识别 + 当前状态：
         // Skill/连接器/插件指令使用专用横幅（PipelineBanner），其余指令用 System 行。
@@ -1159,25 +1128,29 @@ class AgentChatViewModel @Inject constructor(
         activeBannerId = execute.banner.id
 
         currentJob = viewModelScope.launch {
-            // 竞态防护：TaskRuntime.execute 对并发执行是同步 check(tryClaim()) —— 用户在
-            // "停止"后 isLoading 已复位但引擎 claim 尚未释放的窗口期内发送斜杠指令，
-            // 会直接抛 IllegalStateException 且此处原本无 catch → 进程闪退。
-            // 与 runEngine 保持一致的兜底：捕获后降级为错误卡片并复位 isLoading。
-            try {
+            // P0 修复（闪退）：taskController.execute 的互斥拒绝
+            // （IllegalStateException：上一轮执行仍在途）发生在作为参数求值时 ——
+            // 位于 collectEngineFlowSafely 的 try/catch **之前**，异常冒泡到
+            // viewModelScope（无 handler）直接闪退。这里先安全求值，拒绝时转
+            // 可读错误气泡（与 executeNormalMessage 的兑底一致）。
+            val flow = try {
+                taskController.cancel() // 先串行化释放（同 sendMessage）
                 taskController.execute(com.apex.agent.core.engine.UserInput.text(execute.agentPrompt))
-                    .collect { event -> handleEvent(event) }
-            } catch (e: CancellationException) {
-                throw e // 协程取消必须重抛（发送新指令会 cancel 旧 job）
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _uiState.update { s ->
                     s.copy(
                         messages = s.messages + AgentUiMessage.Error(
-                            message = "指令执行失败：${e.message ?: e::class.simpleName}"
+                            message = "执行失败：${e.message ?: e::class.simpleName}",
+                            canRetry = true
                         ),
                         isLoading = false
                     )
                 }
+                return@launch
             }
+            collectEngineFlowSafely(flow)
         }.apply {
             invokeOnCompletion {
                 routeContextKind = null
@@ -1191,10 +1164,13 @@ class AgentChatViewModel @Inject constructor(
         private const val KEY_SETTINGS = "apex_settings"
         private const val KEY_CUSTOM_INSTRUCTION = "custom_mode_instruction"
 
-        /** 工具输出 UI 刷新节流间隔（≈1 帧 = 16ms）。 */
-        private const val FLUSH_INTERVAL_MS = 16L
+        /**
+         * 单轮注入 Vision 的图片上限（请求体体积 / token 防护）。
+         * 超出的图片降级为 FileRef（Agent 可用 read_file 读取），不再静默丢弃。
+         */
+        private const val MAX_VISION_IMAGES = 3
 
-        /** 回复/思考流式文本 UI 刷新节流间隔（≈2 帧 = 33ms，约 30fps）。 */
-        private const val STREAM_FLUSH_INTERVAL_MS = 33L
+        /** 工具输出 UI 刷新节流间隔（≈1 帧 = 16ms；internal —— AgentChatEventApplier 共用）。 */
+        internal const val FLUSH_INTERVAL_MS = 16L
     }
 }

@@ -53,13 +53,17 @@ class SlashCommandRouterTest {
     }
 
     @Test
-    fun `Plugin route has plugin emoji and generic prompt`() {
+    fun `Plugin route has plugin emoji and registered-tools status`() {
         val cmd = SlashCommand.Plugin(id = "pdf_reader")
         val route = SlashCommandRouter.route(cmd)
 
-        assertEquals("📦 调用插件: pdf_reader", route.systemMessage)
+        // 插件工具桥已激活（IApexPluginHost + PluginManager 真实注册）：
+        // 路由词应指向已注册的插件工具，并引导模型直接调用。
+        assertEquals("📦 插件: pdf_reader（工具已注册进 Agent 工具表）", route.systemMessage)
         assertFalse(route.requestGithubConnect)
         assertTrue(route.agentPrompt.contains("/plugin:pdf_reader"))
+        assertTrue(route.agentPrompt.contains("已注册进 ToolRegistry"))
+        assertFalse(route.agentPrompt.contains("尚未接线"))
     }
 
     @Test

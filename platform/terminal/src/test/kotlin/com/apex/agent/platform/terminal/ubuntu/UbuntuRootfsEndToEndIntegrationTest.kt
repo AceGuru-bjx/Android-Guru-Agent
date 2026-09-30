@@ -25,13 +25,14 @@ import java.net.URL
 import java.nio.file.Files
 
 /**
- * T72: REAL Ubuntu RootFS End-to-End integration test.
+ * T72/T83: REAL Ubuntu RootFS End-to-End integration test.
  *
  * 这是 T72 的衔接验证（范围第 13 条）—— 证明的不是"两个 subsystem 各自
  * 测试通过"，而是整条链在真实输入上闭环：
  *
- *   Ubuntu archive (cdimage.ubuntu.com, REAL download, REAL SHA-256)
- *     → RootfsProvisionerImpl (download → verify → extract → configure → health)
+ *   REAL Ubuntu archive（夹具下载自 cdimage，REAL SHA-256）
+ *     → 暂存为伪 nativeLibraryDir/libubuntu-rootfs.so（T83 内置交付形态）
+ *     → BundledRootfsSource → RootfsProvisionerImpl (local copy → verify → extract → configure → health)
  *     → READY rootfs (stage evidence + health summary in metadata)
  *     → ProvisionedRootfsProvider → LinuxPRootBackend.prepare() → SpawnSpec
  *     → proot (REAL process) → Ubuntu userspace (/bin/bash, /usr/bin/apt)
@@ -56,7 +57,10 @@ import java.nio.file.Files
 class UbuntuRootfsEndToEndIntegrationTest {
 
     companion object {
-        private val source = OfficialUbuntuRootfsSource()
+        // T83：运行时源已内置化（APK jniLibs 伪 .so）。E2E 保持“真实档案”价值：
+        // 下载官方 ubuntu-base 作为夹具 → 暂存为伪 nativeLibraryDir 里的
+        // libubuntu-rootfs.so → 经 BundledRootfsSource 走与生产完全同构的解包链。
+        private lateinit var source: BundledRootfsSource
         private lateinit var layout: RootfsInstallLayout
         private lateinit var provisioner: RootfsProvisionerImpl
         @Volatile private var installed: Boolean = false
@@ -69,12 +73,18 @@ class UbuntuRootfsEndToEndIntegrationTest {
         @JvmStatic
         @BeforeClass
         fun setUpClass() {
-            // ── network preflight（Level 1 的 assume）──
-            assumeTrue("cdimage.ubuntu.com unreachable — network preflight", networkReachable())
+            // ── network preflight（夹具下载的 assume）──
+            assumeTrue("hosting release unreachable — network preflight", networkReachable())
 
-            // ── one REAL install for the whole class ──
-            val base = Files.createTempDirectory("t72-e2e-").toFile()
+            // ── one REAL staged bundle + one REAL install for the whole class ──
+            val base = Files.createTempDirectory("t83-e2e-").toFile()
             layout = RootfsInstallLayout.under(AbsolutePath(base.absolutePath))
+            val nativeLibDir = java.io.File(base, "nativeLib").apply { mkdirs() }
+            val fixture = downloadFixtureArchive()
+            assumeTrue("fixture download/verify failed — cannot exercise the bundled chain", fixture != null)
+            fixture!!.copyTo(java.io.File(nativeLibDir, BundledRootfsSource.BUNDLE_LIB_NAME), overwrite = true)
+            fixture.delete()
+            source = BundledRootfsSource(nativeLibraryDir = nativeLibDir.absolutePath)
             provisioner = RootfsProvisionerImpl(
                 source = source,
                 validator = null,
@@ -99,8 +109,33 @@ class UbuntuRootfsEndToEndIntegrationTest {
             }
         }
 
+        /**
+         * 夹具获取：下载真实完整 rootfs 24.04.4 amd64（T84 交付物本体，~310MB）并校验
+         * 固定 SHA-256。下载只是测试夹具的获取手段（生产链路已是内置离线解包，零网络）。
+         */
+        private fun downloadFixtureArchive(): java.io.File? = try {
+            val url = "https://github.com/AceGuru-mjh/Android-Guru-Agent/releases/download/ubuntu-rootfs-24.04.4-full/apex-ubuntu-full-24.04.4-amd64.tar.gz"
+            val expectedSha = "57fb03f916cae40202134594a6ad063167174714e1ad36a50f0575b015b87228"
+            val tmp = java.io.File.createTempFile("t84-e2e-archive", ".tar.gz")
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 30_000
+                readTimeout = 900_000
+                instanceFollowRedirects = true
+            }
+            conn.inputStream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            val actual = RootfsDownloader.sha256OfFile(tmp)
+            if (actual != expectedSha) {
+                tmp.delete()
+                null
+            } else {
+                tmp
+            }
+        } catch (e: Throwable) {
+            null
+        }
+
         private fun networkReachable(): Boolean = try {
-            val conn = URL("https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/SHA256SUMS")
+            val conn = URL("https://github.com/AceGuru-mjh/Android-Guru-Agent/releases/tag/ubuntu-rootfs-24.04.4-full")
                 .openConnection() as HttpURLConnection
             conn.connectTimeout = 10_000
             conn.readTimeout = 10_000
@@ -139,7 +174,16 @@ class UbuntuRootfsEndToEndIntegrationTest {
                 // (production target) ignores it — setting it unconditionally is safe
                 pb.environment()["PROOT_NO_SECCOMP"] = "1"
                 System.getenv("LD_LIBRARY_PATH")?.let { pb.environment()["LD_LIBRARY_PATH"] = it }
-                pb.start().waitFor() == 0
+                val proc = pb.start()
+                // 有界等待（30s）：探测命令不退出 = ptrace 受限/seccomp 冲突等环境问题。
+                // 此前 waitFor() 无限期阻塞 —— 僵尸 proot 挂住 setUpClass 后整个
+                // test task 空转到 20 分钟超时（CI 症状：其后无任何测试事件）。
+                val exited = proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                if (!exited) {
+                    runCatching { proc.destroyForcibly() }
+                    return false
+                }
+                proc.exitValue() == 0
             } catch (e: Throwable) {
                 false
             }
@@ -149,15 +193,15 @@ class UbuntuRootfsEndToEndIntegrationTest {
     // ─── Level 1: RootFS Productionization (network only) ───
 
     @Test
-    fun `L1 real download sha256 extract configure health produces READY`() {
+    fun `L1 bundled local copy sha256 extract configure health produces READY`() {
         assumeTrue("install failed: $installError", installed)
         val result = runBlocking { provisioner.current() }
         assertNotNull("READY rootfs exists", result)
         val rootfs = result!!
         assertEquals("ubuntu-24.04.4-x86_64", rootfs.id)
         assertEquals(CpuArchitecture.X86_64, rootfs.architecture)
-        // REAL checksum from the official SHA256SUMS
-        assertEquals("c1e67ef7b17a6300e136118bd1dc04725009cb376c1aad10abcf8cd453628d58", rootfs.checksum)
+        // REAL checksum from the hosted full-rootfs digests (rootfs-digests.txt, run #10)
+        assertEquals("57fb03f916cae40202134594a6ad063167174714e1ad36a50f0575b015b87228", rootfs.checksum)
     }
 
     @Test
@@ -173,7 +217,8 @@ class UbuntuRootfsEndToEndIntegrationTest {
         val health = meta!!.health
         assertNotNull("health summary persisted", health)
         assertTrue("health valid (0 FAIL items)", health!!.valid)
-        assertTrue("3413-ish entries extracted: ${meta.entryCount}", (meta.entryCount ?: 0) > 3000)
+        // T84 完整环境档：条目数远超骨架时代的 3413（58 包 + 全套 dev 头文件）
+        assertTrue("full-env entry count extracted: ${meta.entryCount}", (meta.entryCount ?: 0) > 10_000)
     }
 
     @Test
@@ -229,39 +274,22 @@ class UbuntuRootfsEndToEndIntegrationTest {
     // ─── Level 2: LinuxPRootBackend SpawnSpec → REAL proot → Ubuntu userspace ───
 
     /**
-     * argv 适配：host proot 5.4（upstream）没有 Termux 扩展。
-     *  - 去掉 `--`（5.4 语法：options 直接跟 command）
-     *  - `-E K=V` 对 → 返回给调用方放进 ProcessBuilder env（upstream 继承语义）
+     * argv 适配：host proot 5.x（upstream）与生产 Termux proot 5.1.107 仅两处差异：
+     *  - 去掉 `--`（upstream 自研 argv 解析器不识别；Termux 补丁支持）
+     *  - 去掉 `--kill-on-exit`（upstream 5.1.0 不认；一次性 exec 不需要）
+     * T88：**guest env 不再适配** —— env trampoline（`/usr/bin/env -i K=V …`）
+     * 在 upstream proot 上原样合法，测试真正执行生产 argv 形状（旧适配层把 -E
+     * 偷搬到宿主 env，正是 CI 全绿而设备炸 `unknown option '-E'` 的共犯）。
      */
-    private fun adaptForUpstreamProot(argv: List<String>): Pair<List<String>, Map<String, String>> {
-        val env = mutableMapOf<String, String>()
-        val out = mutableListOf<String>()
-        var i = 0
-        while (i < argv.size) {
-            val a = argv[i]
-            when {
-                a == "--" -> { /* upstream: no separator */ }
-                a == "--kill-on-exit" -> { /* Termux/5.2+ extension; one-shot exec doesn't need it */ }
-                a == "-E" -> {
-                    val kv = argv[i + 1]
-                    val eq = kv.indexOf('=')
-                    if (eq > 0) env[kv.substring(0, eq)] = kv.substring(eq + 1)
-                    i++
-                }
-                else -> out.add(a)
-            }
-            i++
-        }
-        return out to env
-    }
+    private fun adaptForUpstreamProot(argv: List<String>): List<String> =
+        argv.filter { it != "--" && it != "--kill-on-exit" }
 
-    private fun executorWith(adaptedEnv: Map<String, String>): ProotExecutor {
+    private fun executorWith(): ProotExecutor {
         val hostEnv = mutableMapOf<String, String>(
             "PROOT_NO_SECCOMP" to "1",   // glibc 2.39 guest + ptrace seccomp accel conflict
             "PATH" to "/usr/bin:/bin"
         )
         System.getenv("LD_LIBRARY_PATH")?.let { hostEnv["LD_LIBRARY_PATH"] = it }
-        hostEnv.putAll(adaptedEnv)   // guest env rides the inherited env on upstream proot
         return ProotExecutor(hostEnv = { hostEnv })
     }
 
@@ -292,12 +320,13 @@ class UbuntuRootfsEndToEndIntegrationTest {
         }.getOrThrow()
         assertEquals("SpawnSpec argv[0] is the proot binary", prootBinary!!.absolutePath, spec.argv[0])
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(spec.argv)
+        val adaptedArgv = adaptForUpstreamProot(spec.argv)
         // replace the trailing "/bin/bash -i" with the test command
+        // （env trampoline 的 K=V 赋值保留在 bash 之前 —— guest 仍拿到注入的 env）
         val bashIdx = adaptedArgv.indexOfLast { it == "/bin/bash" }
         assertTrue("bash -i found in argv: $adaptedArgv", bashIdx > 0)
         val finalArgv = adaptedArgv.subList(0, bashIdx) + guestCommand
-        val executor = executorWith(guestEnv)
+        val executor = executorWith()
         return executor.execute(
             PRootCommand(AbsolutePath(finalArgv[0]), finalArgv.drop(1)),
             timeoutMs = timeoutMs

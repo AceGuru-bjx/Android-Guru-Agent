@@ -14,13 +14,21 @@ data class AgentChatUiState(
     val messages: List<AgentUiMessage> = emptyList(),
     val isLoading: Boolean = false,
     val currentThinking: String = "",       // 当前思考内容（流式）
+    /** 当前流式思考的开始时刻（SystemClock.elapsedRealtime 基；0 = 无进行中思考）。ThinkingBubble 实时秒数计时用。 */
+    val currentThinkingStartElapsed: Long = 0,
     val currentResponse: String = "",       // 当前回复内容（流式）
     val currentToolCall: AgentToolCallUi? = null, // 当前执行的工具
     val mode: AgentMode = AgentMode.BUILD,
     val thinkingLevel: ThinkingLevel = ThinkingLevel.STANDARD,
     val reasoningEffort: ReasoningEffort = ReasoningEffort.NONE,
+    /** 双级思考控制第二级：强制深度思考（引擎档位钉 MAXIMUM，提示词层强制深推理）。 */
+    val forceDeepThinking: Boolean = false,
     val plan: ExecutionPlan? = null,
     val awaitingPlanConfirmation: Boolean = false,
+    /** #169：计划已确认锁定（PlanConfirmed 后置 true；锁定后执行期间不可改）。 */
+    val planConfirmed: Boolean = false,
+    /** #169：当前执行到的计划步骤（StepStart 的 stepIndex；-1 = 未在步骤执行中）。 */
+    val currentStepIndex: Int = -1,
     /** Spec 模式的当前规格与确认状态。 */
     val spec: ExecutionSpec? = null,
     val awaitingSpecConfirmation: Boolean = false,
@@ -28,7 +36,9 @@ data class AgentChatUiState(
     val historyDepth: Int = 0,
     /** 上下文仪表盘：当前占用 token 数与上限（分子/分母） */
     val contextUsedTokens: Int = 0,
-    val contextMaxTokens: Int = 1
+    val contextMaxTokens: Int = 1,
+    /** 会话累计消耗 token（多轮真实 usage 累加；0 = 端点未返回统计）。 */
+    val sessionTotalTokens: Long = 0
 )
 
 /**
@@ -44,9 +54,55 @@ data class UserInputRequest(
  *
  * 引擎事件本身没有"类型"字段，ViewModel 在 [classifyTool] 中根据
  * toolName 前缀与已知 id 推断。这样用户能一眼区分本地工具 / MCP /
- * 联网搜索 / 网页抓取 / Skill / 连接器 / 插件调用。
+ * 联网搜索 / 网页抓取 / Skill / GitHub / 连接器 / 插件调用。
+ *
+ * GITHUB 独立于 CONNECTOR：官方 Octocat mark + GitHub 品牌灰，
+ * 与通用连接器（Link 图标 + 紫色）视觉区分。
  */
-enum class ToolKind { LOCAL, MCP, WEB_SEARCH, WEB_FETCH, SKILL, CONNECTOR, PLUGIN }
+enum class ToolKind { LOCAL, MCP, WEB_SEARCH, WEB_FETCH, SKILL, GITHUB, CONNECTOR, PLUGIN }
+
+/**
+ * 待发送的流水线指令（迷你胶囊）。
+ *
+ * 用户从斜杠菜单选中 Skill / MCP / 插件 / 连接器时，不再把 `/skill:xxx`
+ * 裸文本塞进输入框，而是以结构化胶囊挂在输入栏上：
+ * - 胶囊按类型渲染图标（Skill 用 Material `Code`（即 `</>`）/ MCP 用 Api /
+ *   连接器用 Link / 插件用 Extension）与「type: 名称」标签；
+ * - 发送时与输入框文本拼回 `"/type:id 附加文本"` 走既有斜杠管线
+ *   （解析/路由/横幅/工具来源标记全部复用，零新链路）；
+ * - 再选一条直接替换当前胶囊（单条语义：一次发送触发一条流水线）。
+ *
+ * @param type 指令类型（"skill" / "mcp" / "connector" / "plugin"）。
+ * @param id 指令 id（斜杠命令冒号后的部分）。
+ * @param label 展示名（菜单项 label，优先于裸 id 呈现）。
+ */
+@Immutable
+data class PendingPipelineCommand(
+    val type: String,
+    val id: String,
+    val label: String
+) {
+    /** 拼回斜杠命令首词：`/skill:web_search`。 */
+    fun toCommandToken(): String = "/$type:$id"
+
+    companion object {
+        /**
+         * 从斜杠菜单命令串解析胶囊（宽容失败 → null 走旧文本插入路径）。
+         * 输入形态：`/skill:web_search `（菜单命令自带尾随空格）或无空格裸命令。
+         */
+        fun fromCommand(command: String, label: String): PendingPipelineCommand? {
+            val token = command.trim()
+            if (!token.startsWith("/")) return null
+            val colon = token.indexOf(':')
+            if (colon <= 1) return null
+            val type = token.substring(1, colon).lowercase()
+            val id = token.substring(colon + 1).trim()
+            if (id.isEmpty()) return null
+            if (type !in setOf("skill", "mcp", "connector", "plugin")) return null
+            return PendingPipelineCommand(type = type, id = id, label = label.ifBlank { id })
+        }
+    }
+}
 
 @Immutable
 sealed interface AgentUiMessage {
@@ -138,6 +194,8 @@ sealed interface AgentUiMessage {
     @Immutable
     data class ThinkingMessage(
         val thought: String,
+        /** 本次思考耗时（毫秒；ThinkingStart→ThinkingComplete 实测）。UI 显示秒数用。 */
+        val durationMs: Long = 0,
         override val id: String = java.util.UUID.randomUUID().toString()
     ) : AgentUiMessage
     /**

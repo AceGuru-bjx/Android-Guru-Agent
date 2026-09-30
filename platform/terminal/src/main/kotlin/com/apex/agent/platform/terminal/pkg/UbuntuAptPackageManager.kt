@@ -18,6 +18,8 @@ import com.apex.agent.platform.terminal.workspace.WorkspacePath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -78,8 +80,20 @@ class UbuntuAptPackageManager(
     /** apt 操作默认超时（apt update/install 可能较慢）。 */
     private val defaultTimeoutMs: Long = DEFAULT_APT_TIMEOUT_MS,
     /** 输出上限（首 512KB + 尾 512KB）。 */
-    private val maxOutputBytes: Long = ProotExecutor.DEFAULT_MAX_OUTPUT_BYTES
+    private val maxOutputBytes: Long = ProotExecutor.DEFAULT_MAX_OUTPUT_BYTES,
+    /**
+     * T81 (D-6 / §34)：统一执行上下文工厂 —— rootfs/workspace/home/proot/env
+     * 的单一构造点。null → 按上述构造参数内部自建（兼容旧构造；生产 DI 注入
+     * 与 LinuxPRootBackend 共享的实例）。
+     */
+    private val contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory? = null
 ) : LinuxPackageManager {
+
+    /** T81 (D-6)：惰性内部工厂（旧构造兼容路径）。 */
+    private val effectiveContextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory
+        get() = contextFactory ?: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory(
+            binaryProvider, rootfsProvider, workspaces, userHome, hostEnv, environment
+        )
 
     private val _events = MutableSharedFlow<PackageOperationEvent>(
         extraBufferCapacity = 64,
@@ -305,6 +319,28 @@ class UbuntuAptPackageManager(
         return exec.exitCode == 0 && exec.stdout.contains("install ok installed")
     }
 
+    /**
+     * T84：批量已装探测 —— 单次 `dpkg-query -W -f='${binary:Package}\t${Provides}\t${db:Status-Abbrev}'`
+     * 多包（契约见 [LinuxPackageManager.batchInstalledStatus]）。
+     *
+     * 两个实测要点：
+     *  1. **虚包**：essential 清单含 `awk`（虚包，由 gawk 提供）—— dpkg-query
+     *     按包名查库查不到它（no packages found matching awk → stderr + 退出码 1）。
+     *     故格式带 ${Provides} 列，虚包随已装实体（gawk）一并算已装；
+     *  2. **退出码 1 容忍**：未知/虚包名只触发 warning，其余包的记录仍完整落在
+     *     stdout —— 解析部分输出，缺失包按「未装」处理（安全回退）；null 仅留给
+     *     环境不可用（rootfs 未就绪 / exec 异常）。
+     */
+    override suspend fun batchInstalledStatus(packages: List<String>): Map<String, Boolean>? {
+        if (packages.isEmpty()) return emptyMap()
+        val rootfs = rootfsProvider.current() ?: return null
+        // dpkg-query 模板含 ${...}（dpkg 占位符语法）—— Kotlin 字符串拼接避开模板转义。
+        val format = "-f=" + "$" + "{binary:Package}" + "\t" + "$" + "{Provides}" + "\t" + "$" + "{db:Status-Abbrev}" + "\n"
+        val argv = listOf("dpkg-query", "-W", format) + packages
+        val exec = runAptRead(rootfs, argv, timeoutMs = 30_000) ?: return null
+        return parseBatchInstalledStatus(exec.stdout, packages)
+    }
+
     override suspend fun installedVersion(packageName: String): String? {
         val rootfs = rootfsProvider.current() ?: return null
         // dpkg-query -W -f=${Version} <pkg>
@@ -316,6 +352,78 @@ class UbuntuAptPackageManager(
     // ──────────────────────────────────────────────────────────────────
     // repair (dpkg --configure -a)
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * T82（Termux 基线 §5.2）：真实已安装包列表。
+     *
+     * 旧 `terminal.linux.packages installed` action 是诚实记录的 stub（只回
+     * brokenPackages + 让 Agent 自己 shell `dpkg -l`）。本实现经
+     * `dpkg-query -W -f=${binary:Package}\t${db:Status-Abbrev}\t${Version}` 解析
+     * （只读、无锁、有界），status 以 `ii` 开头 = 正确安装。
+     */
+    override suspend fun installed(limit: Int): List<com.apex.agent.platform.terminal.pkg.InstalledPackage> {
+        val rootfs = rootfsProvider.current() ?: return emptyList()
+        // dpkg -W 模板含 ${...}（dpkg 占位符语法）—— Kotlin 模板转义为 ${'$'}{…}。
+        val format = "-f=" + "$" + "{binary:Package}" + "\t" + "$" + "{db:Status-Abbrev}" + "\t" + "$" + "{Version}" + "\n"
+        val argv = listOf("dpkg-query", "-W", format)
+        val exec = runAptRead(rootfs, argv, timeoutMs = 30_000) ?: return emptyList()
+        if (exec.exitCode != 0) return emptyList()
+        return exec.stdout.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { line ->
+                val parts = line.split('\t')
+                if (parts.size < 3) return@mapNotNull null
+                val pkg = parts[0].trim()
+                if (pkg.isEmpty()) return@mapNotNull null
+                com.apex.agent.platform.terminal.pkg.InstalledPackage(
+                    name = pkg,
+                    status = parts[1].trim(),
+                    version = parts.drop(2).joinToString("\t").trim()
+                )
+            }
+            .filter { it.properlyInstalled }
+            .take(limit.coerceAtMost(2000))
+            .toList()
+    }
+
+    /** T82（基线 §5.5）：apt autoremove —— 统一写操作框架（锁 + 事件 + 磁盘 preflight）。 */
+    override suspend fun autoremove(): PackageOperation {
+        val opId = newOpId()
+        val argv = listOf("apt-get", "-y", "autoremove")
+        return runWriteOp(opId, PackageOperationType.REMOVE, emptyList(), argv, defaultTimeoutMs) { exec, _ ->
+            PackageOperationResult(
+                durationMs = exec.durationMs,
+                exitCode = exec.exitCode,
+                operationId = opId,
+                state = if (exec.ok) PackageOperationState.SUCCEEDED else PackageOperationState.FAILED,
+                stdout = exec.stdout,
+                stderr = exec.stderr,
+                stdoutTruncated = exec.stdoutTruncated,
+                stderrTruncated = exec.stderrTruncated,
+                maxOutputBytes = maxOutputBytes
+            )
+        }
+    }
+
+    /** T82（基线 §5.5）：apt clean —— 下载缓存清理。 */
+    override suspend fun clean(): PackageOperation {
+        val opId = newOpId()
+        val argv = listOf("apt-get", "clean")
+        return runWriteOp(opId, PackageOperationType.REPAIR, emptyList(), argv, defaultTimeoutMs) { exec, _ ->
+            PackageOperationResult(
+                durationMs = exec.durationMs,
+                exitCode = exec.exitCode,
+                operationId = opId,
+                state = if (exec.ok) PackageOperationState.SUCCEEDED else PackageOperationState.FAILED,
+                stdout = exec.stdout,
+                stderr = exec.stderr,
+                stdoutTruncated = exec.stdoutTruncated,
+                stderrTruncated = exec.stderrTruncated,
+                maxOutputBytes = maxOutputBytes
+            )
+        }
+    }
 
     override suspend fun repair(): PackageOperation {
         val opId = newOpId()
@@ -373,6 +481,34 @@ class UbuntuAptPackageManager(
         try {
             return lock.withLock(rootfs) {
                 currentCoroutineContext().ensureActive()
+                // T81 (U-4) + T84：写操作磁盘 preflight。
+                // T84 修正：INSTALL 的空间需求按**真实缺失包数**估算 —— 旧公式
+                // packages.size × 250MB 对全预装场景（完整 rootfs 的 bootstrap 校验）
+                // 虚报 ~6GB 把正常设备拒之门外。批量探测不可用（null）时回退旧估算。
+                val requiredBytes = when (type) {
+                    PackageOperationType.INSTALL -> {
+                        val statuses = batchInstalledStatus(packages.map { it.name })
+                        val chargeable = if (statuses != null) {
+                            statuses.values.count { !it }
+                        } else {
+                            packages.size
+                        }
+                        100L * 1024 * 1024 + chargeable * 250L * 1024 * 1024
+                    }
+                    PackageOperationType.UPGRADE ->
+                        100L * 1024 * 1024 + packages.size * 250L * 1024 * 1024
+                    else -> 100L * 1024 * 1024
+                }
+                runCatching { diskPreflight(java.io.File(rootfs.location!!.value), requiredBytes, type.name) }
+                    .onFailure { fe ->
+                        val err = PackageOperationError(
+                            PackageErrorCode.DISK_FULL,
+                            fe.message ?: "insufficient disk space",
+                            recoverable = false
+                        )
+                        emit(PackageOperationEvent.Failed(opId, err))
+                        throw fe
+                    }
                 emit(PackageOperationEvent.Progress(opId, "EXECUTE", aptArgv.joinToString(" ")))
                 val exec = runAptBounded(rootfs, aptArgv, timeoutMs)
                 currentCoroutineContext().ensureActive()
@@ -383,18 +519,24 @@ class UbuntuAptPackageManager(
                     else -> PackageOperationState.FAILED
                 }
                 val finalResult = result.copy(state = finalState)
-                if (finalState == PackageOperationState.SUCCEEDED) {
+                // P3 fix（审计 6-b）：mapExecToError 只调一次 —— 原实现事件发射与 op
+                // 构造各调一次（重复构造 + 双份日志噪音）。
+                val err = if (finalState == PackageOperationState.SUCCEEDED) null
+                    else mapExecToError(exec, aptArgv)
+                if (err == null) {
                     emit(PackageOperationEvent.Completed(opId, finalResult))
                 } else {
-                    val err = mapExecToError(exec, aptArgv)
                     emit(PackageOperationEvent.Failed(opId, err))
                 }
-                opOf(opId, type, packages, startedAt, finalState, finalResult, if (finalState == PackageOperationState.SUCCEEDED) null else mapExecToError(exec, aptArgv))
+                opOf(opId, type, packages, startedAt, finalState, finalResult, err)
             }
         } catch (ce: CancellationException) {
+            // 状态发射：订阅者看到真实取消（RUNNING → CANCELLED），而非 FAILED
             emit(PackageOperationEvent.StateChanged(opId, PackageOperationState.RUNNING, PackageOperationState.CANCELLED))
-            val err = PackageOperationError(PackageErrorCode.CANCELLED, "operation cancelled", false)
-            return cancelledOp(opId, type, packages, startedAt, err)
+            // P2 fix（审计 6-b，与类文档第 5 条契约对齐）：CancellationException 必须
+            // 重抛（保留 finally 释放锁）—— 原实现吞掉后返回 cancelledOp，调用方
+            // Job 已被取消却看到写操作“正常返回”，结构化取消传播失效。
+            throw ce
         } catch (e: Exception) {
             val err = mapExceptionToError(e, aptArgv)
             emit(PackageOperationEvent.Failed(opId, err))
@@ -403,6 +545,33 @@ class UbuntuAptPackageManager(
             coordinator.releaseWrite(opId)
         }
     }
+
+    /**
+     * T81 (U-2)：读操作最近一次环境错误（proot 崩溃/rootfs 缺失/超时…）。
+     * 原实现 catch(Exception)→null 全吞：isInstalled()=false 与真实「未安装」
+     * 不可区分（静默失败掩盖环境损坏）。返回值保持保守语义（false/空），
+     * 但环境错误通过此 StateFlow 可观察 —— 工具层据此区分并引导 repair。
+     */
+    private val _lastReadError = kotlinx.coroutines.flow.MutableStateFlow<PackageOperationError?>(null)
+    val lastReadError: kotlinx.coroutines.flow.StateFlow<PackageOperationError?> = _lastReadError.asStateFlow()
+
+    /**
+     * T81 (U-4)：写操作磁盘 preflight —— rootfs 所在卷剩余空间不足时提前结构化失败
+     * （DISK_FULL），不再等 apt 中途失败留下半装状态。估算：每包 250MB 保守预算
+     * + 100MB 基线（dpkg 数据库/日志）。可通过 [diskPreflight] 注入替换（测试）。
+     */
+    internal var diskPreflight: suspend (rootfsDir: java.io.File, requiredBytes: Long, stage: String) -> Unit =
+        { dir, required, stage ->
+            val usable = dir.usableSpace
+            // P3 fix（审计 6-b）：usable==0（卷满/不可读）也会触发 DISK_FULL ——
+            // 原 `usable in 1 until required` 把 0 排除在外，满盘反而漏判放行。
+            if (usable < required) {
+                throw RuntimeException(
+                    "PackageError:DISK_FULL — ${'$'}stage 前磁盘不足（需 ${'$'}{required / (1024 * 1024)}MB，" +
+                        "可用 ${'$'}{usable / (1024 * 1024)}MB）"
+                )
+            }
+        }
 
     /** 经 ProotExecutor 执行一个 apt 子命令（写操作路径，有界输出）。 */
     private suspend fun runAptBounded(
@@ -417,7 +586,11 @@ class UbuntuAptPackageManager(
         return executor.executeBounded(command, timeoutMs = timeoutMs, maxOutputBytes = maxOutputBytes)
     }
 
-    /** 读操作路径（无锁，短超时）。返回 null = rootfs 不可用。 */
+    /**
+     * 读操作路径（无锁，短超时）。返回 null = 环境不可用。
+     * T81 (U-2)：环境错误不再静默吞掉 —— 记录到 [lastReadError]（含结构化
+     * 错误码），返回值仍为 null（调用方保守语义不变）。
+     */
     private suspend fun runAptRead(
         rootfs: RootfsDescriptor,
         aptArgv: List<String>,
@@ -427,6 +600,7 @@ class UbuntuAptPackageManager(
             val command = buildProotCommand(rootfs, aptArgv, environment.aptGuestEnv())
             executor.executeBounded(command, timeoutMs = timeoutMs, maxOutputBytes = maxOutputBytes)
         } catch (e: Exception) {
+            _lastReadError.value = mapExceptionToError(e, aptArgv)
             null
         }
     }
@@ -513,6 +687,10 @@ class UbuntuAptPackageManager(
     private fun mapExceptionToError(e: Throwable, aptArgv: List<String>): PackageOperationError {
         val msg = e.message ?: ""
         return when {
+            // T81 (U-6)：跨实例 OS 锁竞争（PackageOperationLock 抛 PackageLockError:OsLockHeld）
+            // 原映射无此标记 → 错标 UNKNOWN/不可恢复；应为 APT_LOCKED/可重试。
+            msg.contains("PackageLockError:OsLockHeld") || msg.contains("OsLockHeld") ->
+                PackageOperationError(PackageErrorCode.APT_LOCKED, msg, recoverable = true)
             msg.contains("PROOT_UNAVAILABLE") -> PackageOperationError(PackageErrorCode.PROOT_UNAVAILABLE, msg, false)
             msg.contains("ROOTFS_NOT_READY") -> PackageOperationError(PackageErrorCode.ROOTFS_NOT_READY, msg, false)
             msg.contains("WORKSPACE_UNAVAILABLE") -> PackageOperationError(PackageErrorCode.WORKSPACE_UNAVAILABLE, msg, true)
@@ -589,18 +767,54 @@ class UbuntuAptPackageManager(
         result = null, error = error
     )
 
-    private fun cancelledOp(
-        opId: String, type: PackageOperationType, packages: List<PackageSpec>,
-        startedAt: Long, error: PackageOperationError
-    ): PackageOperation = opOf(
-        opId, type, packages, startedAt, PackageOperationState.CANCELLED,
-        result = null, error = error
-    )
-
     companion object {
-        /** apt 操作默认超时（apt update/install 在慢网络下可能数分钟）。 */
-        const val DEFAULT_APT_TIMEOUT_MS: Long = 180_000L
+        /**
+         * apt 操作默认超时。180s 在慢网络（尤其中国大陆 → ports.ubuntu.com 官方源）
+         * 下普遍不够：apt update 需拉取 InRelease + 索引 20-40MB，bootstrap 的
+         * base packages 安装更是 200MB+ 级下载 —— 180s 必超时（TIMEOUT → bootstrap
+         * FAILED@APT_UPDATE/BASE_PACKAGES）。提升到 10 分钟与 ensureReady 的
+         * 30 分钟总预算（UbuntuLifecycleCoordinator.DEFAULT_ENSURE_TIMEOUT_MS，T84）
+         * 对齐；超时只惩罚挂死，正常慢速下载不会误杀。
+         */
+        const val DEFAULT_APT_TIMEOUT_MS: Long = 600_000L
         /** apt 操作的 guest cwd（/root —— 持久 home，可写）。 */
         const val GUEST_APT_CWD = "/root"
+
+        /**
+         * T84：`dpkg-query -W -f='${binary:Package}\t${Provides}\t${db:Status-Abbrev}'`
+         * 输出解析（纯函数，供 [batchInstalledStatus] 与单测直接消费）。
+         *
+         * - status 前缀 `ii` = 已正确安装（T82 基线同判据）；
+         * - **虚包解析**：已装实体 Provides 列里的名字（如 gawk → awk）一并算已装；
+         * - 未出现在输出中的包 = 未装（调用方安全回退，绝不误报已装）。
+         */
+        internal fun parseBatchInstalledStatus(
+            stdout: String,
+            packages: List<String>
+        ): Map<String, Boolean> {
+            // (name, provides, installed)
+            val rows = stdout.lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .mapNotNull { line ->
+                    val cols = line.split('\t')
+                    if (cols.size < 3) return@mapNotNull null
+                    Triple(
+                        cols[0].trim(),
+                        cols[1].trim().split(' ', ',').map { it.trim() }.filter { it.isNotEmpty() },
+                        cols.last().trim().startsWith("ii")
+                    )
+                }
+                .toList()
+            val pkgNameShape = Regex("[a-z0-9][a-z0-9.+\\-]*")
+            val installedNames = buildSet {
+                rows.filter { it.third }.forEach { (name, provides, _) ->
+                    add(name)
+                    // 版本化 provides 形如 "awk (= 1:5.2...)" —— 按包名形状过滤碎片
+                    provides.filter { it.matches(pkgNameShape) }.forEach { add(it) }
+                }
+            }
+            return packages.associateWith { it in installedNames }
+        }
     }
 }

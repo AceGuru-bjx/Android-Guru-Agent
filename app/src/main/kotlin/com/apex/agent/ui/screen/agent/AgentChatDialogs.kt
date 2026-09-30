@@ -11,25 +11,27 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,11 +41,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.apex.agent.core.engine.AgentQuestion
 import com.apex.agent.core.engine.InputType
-import com.apex.agent.core.engine.ThinkingLevel
 import com.apex.agent.core.llm.ReasoningEffort
+import com.apex.agent.R
 
 // ═══ 自定义模式组件 ═══
 
@@ -60,11 +64,11 @@ internal fun CustomInstructionDialog(
     var text by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("自定义模式指令") },
+        title = { Text(stringResource(R.string.chat_custom_instruction_title)) },
         text = {
             Column {
                 Text(
-                    text = "该指令会拼入 system prompt，指导 Agent 行为（如输出格式、语言、步骤约束）。",
+                    text = stringResource(R.string.chat_custom_instruction_desc),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -72,7 +76,7 @@ internal fun CustomInstructionDialog(
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    placeholder = { Text("例如：始终用中文回答，先给结论再给细节") },
+                    placeholder = { Text(stringResource(R.string.chat_custom_instruction_hint)) },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 3,
                     maxLines = 8
@@ -80,89 +84,167 @@ internal fun CustomInstructionDialog(
             }
         },
         confirmButton = {
-            androidx.compose.material3.Button(onClick = { onSave(text) }) { Text("保存") }
+            androidx.compose.material3.Button(onClick = { onSave(text) }) { Text(stringResource(R.string.chat_save)) }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onClear) { Text("清除") }
-                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onClear) { Text(stringResource(R.string.chat_clear)) }
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
             }
         }
     )
 }
 
-// ═══ 思考深度选择器 ═══
+// ═══ 思考控制（双级 · RikkaHub 式）═══
 
+/**
+ * 双级思考控制菜单（替换旧版六档单一选择器）。
+ *
+ * 紧凑化（用户反馈「思考程度那一部分太高」）：原 AssistChip 默认 32dp 高 +
+ * 内部额外 padding，且 emoji 文案在部分字体下撑高。换成与 AgentModeSelector
+ * 同款的 28dp 紧凑胶囊（图标 13dp + labelMedium），顶栏高度由整行最高胶囊
+ * 决定 → 全行统一在 ~36dp 内。
+ *
+ * 第一级「模型思考强度」：模型**原生**推理参数（reasoning_effort /
+ * thinking.budget_tokens / enable_thinking，按 Provider 差异化下发）——
+ * 仅对支持思考模式的模型生效，档位持久化到默认 ModelProfile。
+ * 第二级「强制深度思考」：与模型原生能力无关的**提示词层强制**——引擎
+ * ThinkingLevel 钉 MAXIMUM（七步 ToT + 工具自检 + 终检清单），对任何模型
+ * 生效；两级互不干涉，可叠加（原生深思考 + 提示词强制 = 最深推理）。
+ */
 @Composable
-internal fun ThinkingLevelSelector(
-    current: ThinkingLevel,
-    onSelect: (ThinkingLevel) -> Unit
+internal fun ThinkingControlMenu(
+    reasoningEffort: ReasoningEffort,
+    forceDeepThinking: Boolean,
+    onReasoningEffortSelect: (ReasoningEffort) -> Unit,
+    onForceDeepThinkingChange: (Boolean) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val thinkingMenuCd = stringResource(R.string.chat_cd_thinking_menu)
 
     Box {
-        AssistChip(
+        Surface(
             onClick = { expanded = true },
-            label = { Text("💭 ${current.name}") },
-            leadingIcon = {
-                Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(16.dp))
+            shape = RoundedCornerShape(50),
+            // 强制深度思考态换 tertiary 配色，对齐原 AssistChip 的 icon tint 语义
+            color = if (forceDeepThinking) MaterialTheme.colorScheme.tertiaryContainer
+            else MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = if (forceDeepThinking) MaterialTheme.colorScheme.onTertiaryContainer
+            else MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.heightIn(min = 28.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Psychology,
+                    contentDescription = thinkingMenuCd,
+                    modifier = Modifier.size(13.dp)
+                )
+                Text(
+                    text = when {
+                        forceDeepThinking -> stringResource(R.string.chat_thinking_chip_forced)
+                        reasoningEffort != ReasoningEffort.NONE ->
+                            stringResource(R.string.chat_thinking_chip_effort, reasoningEffortLabelShort(reasoningEffort))
+                        else -> stringResource(R.string.chat_thinking_chip_default)
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp)
+                )
             }
-        )
+        }
 
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            ThinkingLevel.entries.forEach { level ->
-                DropdownMenuItem(
-                    text = { Text("${level.name} - ${level.description}") },
-                    onClick = {
-                        onSelect(level)
-                        expanded = false
-                    },
-                    trailingIcon = {
-                        if (level == current) {
-                            Icon(Icons.Default.Check, contentDescription = null)
-                        }
-                    }
+            Column(
+                modifier = Modifier
+                    .width(300.dp)
+                    .padding(horizontal = 4.dp)
+            ) {
+                // ── 第一级：模型思考强度（API 原生参数）──
+                Text(
+                    text = stringResource(R.string.chat_thinking_effort_title),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                 )
+                Text(
+                    text = stringResource(R.string.chat_thinking_effort_desc),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    ReasoningEffort.entries.forEach { effort ->
+                        FilterChip(
+                            selected = effort == reasoningEffort,
+                            onClick = { onReasoningEffortSelect(effort) },
+                            label = { Text(reasoningEffortLabelShort(effort), style = MaterialTheme.typography.labelSmall) },
+                            leadingIcon = if (effort == reasoningEffort) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            } else null
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+                HorizontalDivider()
+
+                // ── 第二级：强制深度思考（提示词层强制）──
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onForceDeepThinkingChange(!forceDeepThinking) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.chat_thinking_force_title),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = stringResource(R.string.chat_thinking_force_desc),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = forceDeepThinking,
+                        onCheckedChange = { onForceDeepThinkingChange(it) }
+                    )
+                }
             }
         }
     }
 }
 
-/**
- * 模型原生思考强度选择条
- */
-@OptIn(ExperimentalMaterial3Api::class)
+/** 模型原生思考强度短标签（菜单内 chip 用，窄空间友好）。 */
 @Composable
-internal fun ReasoningEffortRow(
-    current: ReasoningEffort,
-    onSelect: (ReasoningEffort) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text(
-            text = "原生思考:",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.align(Alignment.CenterVertically)
-        )
-        ReasoningEffort.entries.forEach { effort ->
-            FilterChip(
-                selected = effort == current,
-                onClick = { onSelect(effort) },
-                label = { Text(effort.displayName, style = MaterialTheme.typography.labelSmall) },
-                leadingIcon = if (effort == current) {
-                    { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
-                } else null
-            )
-        }
-    }
+private fun reasoningEffortLabelShort(effort: ReasoningEffort): String = when (effort) {
+    ReasoningEffort.NONE -> stringResource(R.string.chat_effort_none)
+    ReasoningEffort.LOW -> stringResource(R.string.chat_effort_low)
+    ReasoningEffort.MEDIUM -> stringResource(R.string.chat_effort_medium)
+    ReasoningEffort.HIGH -> stringResource(R.string.chat_effort_high)
+    ReasoningEffort.MAX -> stringResource(R.string.chat_effort_max)
 }
 
 @Composable
@@ -197,7 +279,7 @@ internal fun QuestionCard(
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(12.dp), // 统一卡片半径（Plan/Spec/ToolCall/TaskStatus 均 12dp，原 16 为孤例）
         colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
         )
@@ -208,7 +290,7 @@ internal fun QuestionCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = "🧩 Agent 需要你选择",
+                    text = stringResource(R.string.chat_question_title),
                     style = MaterialTheme.typography.titleSmall
                 )
                 if (multiSelect) {
@@ -217,7 +299,7 @@ internal fun QuestionCard(
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = "可多选",
+                            text = stringResource(R.string.chat_multi_select),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
@@ -276,7 +358,7 @@ internal fun QuestionCard(
 
                             if (option.recommended) {
                                 Text(
-                                    text = "推荐",
+                                    text = stringResource(R.string.chat_recommended),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -328,7 +410,7 @@ internal fun QuestionCard(
                     }
 
                     Text(
-                        text = "自定义",
+                        text = stringResource(R.string.chat_custom),
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(start = 4.dp)
                     )
@@ -357,7 +439,7 @@ internal fun QuestionCard(
                         onClick = onCancel,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("跳过")
+                        Text(stringResource(R.string.chat_skip))
                     }
                 }
 
@@ -374,7 +456,7 @@ internal fun QuestionCard(
                     enabled = canSubmit,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("继续")
+                    Text(stringResource(R.string.chat_continue))
                 }
             }
         }
@@ -419,15 +501,17 @@ internal fun UserInputDialog(
                     else -> true
                 }
             ) {
-                Text(if (isConfirmation) "确认" else "提交")
+                Text(if (isConfirmation) stringResource(R.string.chat_confirm)
+                else stringResource(R.string.chat_submit))
             }
         },
         dismissButton = {
             TextButton(onClick = onCancel) {
-                Text(if (isConfirmation) "拒绝" else "取消")
+                Text(if (isConfirmation) stringResource(R.string.chat_decline)
+                else stringResource(R.string.chat_cancel))
             }
         },
-        title = { Text("需要你的输入") },
+        title = { Text(stringResource(R.string.chat_input_required_title)) },
         text = {
             Column {
                 Text(
@@ -464,7 +548,7 @@ internal fun UserInputDialog(
                                 text = it
                                 if (it.isNotBlank()) selectedChoice = null
                             },
-                            label = { Text("或输入自定义答案") },
+                            label = { Text(stringResource(R.string.chat_custom_answer_label)) },
                             modifier = Modifier.fillMaxWidth(),
                             minLines = 1,
                             maxLines = 3
@@ -473,7 +557,7 @@ internal fun UserInputDialog(
                     // CONFIRMATION → 语义提示
                     isConfirmation -> {
                         Text(
-                            text = "点击「确认」继续执行，或「拒绝」终止。",
+                            text = stringResource(R.string.chat_confirmation_hint),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -483,7 +567,7 @@ internal fun UserInputDialog(
                         OutlinedTextField(
                             value = text,
                             onValueChange = { text = it },
-                            label = { Text("你的回答") },
+                            label = { Text(stringResource(R.string.chat_your_answer)) },
                             modifier = Modifier.fillMaxWidth(),
                             minLines = 2,
                             maxLines = 6

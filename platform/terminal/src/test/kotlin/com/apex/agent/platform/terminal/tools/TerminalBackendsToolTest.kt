@@ -31,14 +31,18 @@ class TerminalBackendsToolTest {
     }
 
     private class FakeRuntime(private val statuses: List<TerminalRuntime.BackendStatus>) : TerminalRuntime {
+        override suspend fun shutdown(): Result<com.apex.agent.platform.terminal.runtime.TerminalRuntime.ShutdownResult> =
+            Result.success(com.apex.agent.platform.terminal.runtime.TerminalRuntime.ShutdownResult(0, 0, true))
+
         override suspend fun backends(): List<TerminalRuntime.BackendStatus> = statuses
         // 其余门面操作在工具测试中不可达 —— 工具只调 backends()。
         override suspend fun create(shell: String, cwd: String, rows: Int, cols: Int, env: Map<String, String>, privilege: com.apex.agent.platform.terminal.policy.PrivilegeLevel, backendId: String, workspaceId: String?): Result<TerminalRuntime.CreateResult> = throw UnsupportedOperationException()
         override suspend fun run(sessionId: Long, command: String, owner: com.apex.agent.platform.terminal.io.InputOwner, background: Boolean, timeoutMs: Long): Result<TerminalRuntime.RunResult> = Result.failure(UnsupportedOperationException())
-        override suspend fun observe(sessionId: Long, mode: TerminalRuntime.ObserveMode, afterCursor: Long, maxBytes: Int, maxEvents: Int): Result<TerminalRuntime.ObserveResult> = Result.failure(UnsupportedOperationException())
+        override suspend fun observe(sessionId: Long, mode: TerminalRuntime.ObserveMode, afterCursor: Long, maxBytes: Int, maxEvents: Int, scrollbackLines: Int): Result<TerminalRuntime.ObserveResult> = Result.failure(UnsupportedOperationException())
         override suspend fun wait(sessionId: Long, condition: com.apex.agent.platform.terminal.wait.WaitCondition, timeoutMs: Long): Result<com.apex.agent.platform.terminal.wait.WaitResult> = Result.failure(UnsupportedOperationException())
-        override suspend fun write(sessionId: Long, owner: com.apex.agent.platform.terminal.io.InputOwner, kind: TerminalRuntime.WriteKind, text: String?, key: com.apex.agent.platform.terminal.io.TerminalKey?): Result<TerminalRuntime.WriteResult> = Result.failure(UnsupportedOperationException())
+        override suspend fun write(sessionId: Long, owner: com.apex.agent.platform.terminal.io.InputOwner, kind: TerminalRuntime.WriteKind, text: String?, key: com.apex.agent.platform.terminal.io.TerminalKey?, bytes: ByteArray?): Result<TerminalRuntime.WriteResult> = Result.failure(UnsupportedOperationException())
         override suspend fun signal(sessionId: Long, signal: com.apex.agent.platform.terminal.io.UnixSignal, owner: com.apex.agent.platform.terminal.io.InputOwner, jobId: Long?): Result<TerminalRuntime.SignalResult> = Result.failure(UnsupportedOperationException())
+        override suspend fun signalForeground(sessionId: Long, signal: com.apex.agent.platform.terminal.io.UnixSignal, owner: com.apex.agent.platform.terminal.io.InputOwner, jobId: Long?): Result<TerminalRuntime.SignalResult> = Result.failure(UnsupportedOperationException())
         override suspend fun cancel(sessionId: Long, jobId: Long): Result<TerminalRuntime.CancelResult> = Result.failure(UnsupportedOperationException())
         override suspend fun resize(sessionId: Long, rows: Int, cols: Int): Result<TerminalRuntime.ResizeResult> = Result.failure(UnsupportedOperationException())
         override suspend fun snapshot(mode: TerminalRuntime.SnapshotMode, sessionId: Long?, recentEvents: Int, recentOutputBytes: Int): Result<TerminalRuntime.SnapshotResult> = Result.failure(UnsupportedOperationException())
@@ -46,6 +50,7 @@ class TerminalBackendsToolTest {
         override suspend fun close(sessionId: Long, force: Boolean): Result<TerminalRuntime.CloseResult> = Result.failure(UnsupportedOperationException())
         override fun screenStateFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.platform.terminal.screen.TerminalScreenState>? = null
         override fun semanticStateFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.platform.terminal.state.TerminalSemanticState>? = null
+        override fun styledScreenFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?>? = null
         override suspend fun recover(): List<Long> = emptyList()
         override suspend fun recoveredSnapshot(sessionId: Long): com.apex.agent.platform.terminal.state.TerminalSemanticState? = null
     }

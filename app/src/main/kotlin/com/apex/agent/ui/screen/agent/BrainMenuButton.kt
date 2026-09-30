@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,12 +25,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -46,11 +48,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apex.agent.core.llm.ModelProfile
+import com.apex.agent.ui.component.BrandLogo
+import com.apex.agent.ui.component.ModelBrands
+import com.apex.agent.R
 import kotlin.math.roundToInt
+import java.util.Locale
 
 /** 模型列表单项行高；列表展开高度固定为其 3 倍（规格要求）。 */
 private val MODEL_ITEM_HEIGHT = 48.dp
@@ -79,6 +86,9 @@ fun BrainMenuButton(
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     var modelListOpen by remember { mutableStateOf(false) }
+    // i18n：Toast 文案在组合内预取（onClick 非组合上下文）
+    val onlyOneModelToast = stringResource(R.string.chat_only_one_model)
+    val brainDescription = stringResource(R.string.chat_cd_brain)
 
     val current = profiles.firstOrNull { it.id == currentProfileId } ?: profiles.firstOrNull()
     val arrowRotation by animateFloatAsState(
@@ -88,13 +98,17 @@ fun BrainMenuButton(
     )
 
     Box(modifier = modifier) {
-        IconButton(onClick = { menuOpen = !menuOpen }, modifier = Modifier.size(36.dp)) {
-            Icon(
-                Icons.Default.Psychology,
-                contentDescription = "小大脑",
-                tint = if (menuOpen) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp)
+        IconButton(
+            onClick = { menuOpen = !menuOpen },
+            modifier = Modifier
+                .size(40.dp) // 对齐修复：与 Attach/Github/Send 统一 40dp（原 36dp）
+                .semantics { contentDescription = brainDescription }
+        ) {
+            // #174：入口显示当前模型品牌图标（模型族 > 服务商 > 通用首字母兜底）
+            BrandLogo(
+                brand = current?.let { ModelBrands.resolve(it.providerId, it.modelId) },
+                size = 24.dp,
+                fallbackInitial = current?.let { providerNameOf(it.providerId) }
             )
         }
 
@@ -110,10 +124,17 @@ fun BrainMenuButton(
             shadowElevation = 8.dp,
             modifier = Modifier.width(300.dp)
         ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    // 修复：菜单内容（模型卡+可展开列表+3 滑块）可超出窗口高度且不可滚，
+                    // 小屏/横屏下滑块不可达 —— 加滚动上限
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 // ── 第一项：当前模型选择器 ─────────────────────
                 Text(
-                    "当前模型",
+                    stringResource(R.string.chat_current_model),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -135,16 +156,23 @@ fun BrainMenuButton(
                                 .weight(1f)
                                 .clickable {
                                     if (profiles.size <= 1) {
-                                        Toast.makeText(context, "仅有一个模型", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, onlyOneModelToast, Toast.LENGTH_SHORT).show()
                                     } else {
                                         modelListOpen = !modelListOpen
                                     }
                                 }
                                 .padding(horizontal = 12.dp)
                         ) {
+                            // #174：当前模型品牌图标
+                            BrandLogo(
+                                brand = current?.let { ModelBrands.resolve(it.providerId, it.modelId) },
+                                size = 30.dp,
+                                fallbackInitial = current?.let { providerNameOf(it.providerId) }
+                            )
+                            Spacer(Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    current?.name ?: "未配置",
+                                    current?.name ?: stringResource(R.string.chat_not_configured),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
@@ -165,7 +193,8 @@ fun BrainMenuButton(
                         IconButton(onClick = { modelListOpen = !modelListOpen }) {
                             Icon(
                                 Icons.Default.KeyboardArrowUp,
-                                contentDescription = if (modelListOpen) "收起模型列表" else "展开模型列表",
+                                contentDescription = if (modelListOpen) stringResource(R.string.chat_cd_collapse_models)
+                                else stringResource(R.string.chat_cd_expand_models),
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.rotate(arrowRotation)
                             )
@@ -200,6 +229,13 @@ fun BrainMenuButton(
                                         }
                                         .padding(horizontal = 12.dp)
                                 ) {
+                                    // #174：列表项品牌图标（模型族优先，聚合商托管也认）
+                                    BrandLogo(
+                                        brand = ModelBrands.resolve(profile.providerId, profile.modelId),
+                                        size = 26.dp,
+                                        fallbackInitial = providerNameOf(profile.providerId)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             profile.name,
@@ -218,7 +254,7 @@ fun BrainMenuButton(
                                     if (profile.id == current?.id) {
                                         Icon(
                                             Icons.Default.Check,
-                                            contentDescription = "当前模型",
+                                            contentDescription = stringResource(R.string.chat_current_model),
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(18.dp)
                                         )
@@ -250,7 +286,7 @@ fun BrainMenuButton(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
-                    Text("配置模型", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.chat_configure_model), style = MaterialTheme.typography.bodyMedium)
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
@@ -298,7 +334,7 @@ private fun BrainParamSliders(
 
     Column(modifier = modifier) {
         Text(
-            "模型参数",
+            stringResource(R.string.chat_model_params),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -306,7 +342,7 @@ private fun BrainParamSliders(
             label = "Temperature",
             value = temperature,
             valueRange = 0f..2f,
-            display = "%.2f".format(temperature),
+            display = String.format(Locale.US, "%.2f", temperature),
             onDrag = { temperature = it },
             onCommit = { commit() }
         )
@@ -314,7 +350,7 @@ private fun BrainParamSliders(
             label = "Top-P",
             value = topP,
             valueRange = 0f..1f,
-            display = "%.2f".format(topP),
+            display = String.format(Locale.US, "%.2f", topP),
             onDrag = { topP = it },
             onCommit = { commit() }
         )
@@ -358,7 +394,7 @@ private fun BrainSliderRow(
                 activeTrackColor = MaterialTheme.colorScheme.primary,
                 inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
             ),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f).semantics { contentDescription = label } // 修复：TalkBack 播报滑块名称
         )
         Text(
             display,

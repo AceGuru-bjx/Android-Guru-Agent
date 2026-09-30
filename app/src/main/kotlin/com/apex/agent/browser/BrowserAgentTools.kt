@@ -484,13 +484,60 @@ class BrowserAgentTools @Inject constructor(
             "browser_input" -> redact("text")
             "browser_select" -> redact("value")
             "browser_file_upload" -> redact("path")
+            "browser_wait_for" -> redact("value")
             else -> args
         }.take(200)
         }
     }
 
+    /** 独立条件等待：点击/提交后的异步内容到达（SPA 刷新、搜索结果、登录跳转）。 */
+    val waitFor = object : AgentTool {
+        override val id = "browser_wait_for"
+        override val name = "browser_wait_for"
+        override val description =
+            "等待页面异步变化成立后再继续：selector（CSS 选择器出现）/ text（页面可见文本包含子串）/ url（当前 URL 包含子串）。" +
+                "点击/提交后内容异步到达时用它替代盲 sleep，返回是否命中与耗时。"
+        override val parametersSchema = """{"type":"object","properties":{"mode":{"type":"string","enum":["selector","text","url"],"description":"等待条件类型"},"value":{"type":"string","description":"选择器 / 文本子串 / URL 子串"},"timeout_ms":{"type":"integer","description":"超时毫秒数，默认 10000，上限 60000"}},"required":["mode","value"]}"""
+        override suspend fun execute(arguments: String): String {
+            guard(engine)?.let { return it }
+            val mode = argStr(arguments, "mode")?.lowercase()
+                ?: return "Error: 缺少 mode 参数（selector|text|url）"
+            val value = argStr(arguments, "value")
+                ?: return "Error: 缺少 value 参数"
+            val timeout = argInt(arguments, "timeout_ms", 10_000).toLong()
+            val outcome = engine.waitForCondition(mode, value, timeout)
+            return if (outcome.matched) {
+                "✅ ${outcome.detail}（${outcome.elapsedMs}ms）"
+            } else {
+                "⏱ ${outcome.detail}（未命中，页面可能仍需更久或条件写错）"
+            }
+        }
+    }
+
+    /** 页面类型推断：一次信号采集 → 类型 + 动作建议，帮模型先建页面心智模型。 */
+    val pageType = object : AgentTool {
+        override val id = "browser_page_type"
+        override val name = "browser_page_type"
+        override val description =
+            "推断当前页面类型（auth 登录 / form 表单 / article 文章 / video 视频 / search 搜索 / list 列表 / portal 门户 / generic）" +
+                "并给出该类型的建议动作与 focus 策略。多步任务开始时先调它再决定 snapshot 策略，省 token 又准。"
+        override val parametersSchema = """{"type":"object","properties":{}}"""
+        override suspend fun execute(arguments: String): String {
+            guard(engine)?.let { return it }
+            val info = engine.pageType()
+            return buildString {
+                appendLine("页面类型：${info.type}")
+                appendLine("建议：${info.hint}")
+                if (info.signals.isNotEmpty()) {
+                    appendLine("信号：" + info.signals.entries.joinToString(", ") { "${it.key}=${it.value}" })
+                }
+            }.trim()
+        }
+    }
+
     fun all(): List<AgentTool> = listOf(
         navigate, snapshot, click, input, select, toggle, scroll, screenshot, show,
-        fileUpload, dateInput, debugDump, contextSummary, networkLog, downloadList
+        fileUpload, dateInput, debugDump, contextSummary, networkLog, downloadList,
+        waitFor, pageType
     ).map { TracedTool(it, engine, tracer) }
 }

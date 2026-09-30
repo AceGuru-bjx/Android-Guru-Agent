@@ -40,9 +40,52 @@ class ObservationEngine(
     private val _screenState = MutableStateFlow(virtualTerminal.snapshot())
     val screenState: StateFlow<com.apex.agent.platform.terminal.screen.TerminalScreenState> = _screenState.asStateFlow()
 
-    /** Called by PtyOutputPump after feeding bytes to VT — pushes new screen snapshot. */
+    /**
+     * P83: styled render state for the UI grid renderer (colors / cursor / scrollback).
+     *
+     * Computed LAZILY — only while a collector is attached (subscriptionCount > 0).
+     * This is the backpressure contract between the PTY feed rate and the UI: the
+     * plain [screenState] stays token-cheap for Agent observation, while the styled
+     * projection costs O(cells) and is skipped entirely when no terminal UI is open
+     * (agent-only usage, background sessions, etc.).
+     */
+    private val _styledState = MutableStateFlow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?>(null)
+    val styledState: StateFlow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?> = _styledState.asStateFlow()
+
+    /** Scrollback lines included in each styled snapshot (bounded for frame cost). */
+    private val styledScrollbackLines: Int = 400
+
+    // ── P0（性能）：styled 全量快照节流 ──
+    // styledSnapshot(400) = 400+rows × cols 个 RenderCell 分配。旧实现在**每个**
+    // 8KB 读块后都算一次（cat 大文件 → 每秒上百次全量渲染、百万级对象/秒的分配
+    // 洪峰，双核机直接拖垮整机响应）；而 UI 侧 sample(33) 每帧最多消费一次 ——
+    // 绝大多数计算被白白丢弃。现在：33ms 最小间隔内跳过（标脏待重试），
+    // pump 空闲轮询的 onOutput 兑底补算被节流掉的最后一段，屏幕不会停在旧帧。
+    // 全部仅在 styledState 有订阅者时生效（与旧契约一致）。
+    private var styledDirty = false
+    private var lastStyledAtNs = 0L
+
+    /**
+     * Called by PtyOutputPump after feeding bytes to VT — pushes new screen snapshot.
+     * Also invoked from the pump's idle poll (no-data branch) to settle the throttled
+     * tail: 输出停止后最后 33ms 内被跳过的内容由此补渲染。
+     */
     fun refreshScreenState() {
         _screenState.value = virtualTerminal.snapshot()
+        if (_styledState.subscriptionCount.value > 0) {
+            styledDirty = true
+            maybeRefreshStyled()
+        }
+    }
+
+    /** 节流后的 styled 快照刷新（脏标记 + 33ms 最小间隔；间隔不足则留脏等下次机会）。 */
+    private fun maybeRefreshStyled() {
+        if (!styledDirty) return
+        val now = System.nanoTime()
+        if (now - lastStyledAtNs < STYLED_MIN_INTERVAL_NS) return // 留脏：下一帧/空闲兑底
+        styledDirty = false
+        lastStyledAtNs = now
+        _styledState.value = virtualTerminal.styledSnapshot(styledScrollbackLines)
     }
 
     /** Push-based semantic state (from SemanticStateReducer, already a StateFlow). */
@@ -61,7 +104,8 @@ class ObservationEngine(
         mode: TerminalRuntime.ObserveMode,
         afterCursor: Long,
         maxBytes: Int,
-        maxEvents: Int
+        maxEvents: Int,
+        scrollbackLines: Int = 0
     ): TerminalRuntime.ObserveResult {
         val currentCursor = ringBuffer.totalCursor
         return when (mode) {
@@ -97,11 +141,18 @@ class ObservationEngine(
             }
 
             TerminalRuntime.ObserveMode.SCREEN -> {
+                // T82：scrollback 尾部（oldest→newest）—— 主屏保存最近 1000 行；
+                // 仅 RealVirtualTerminal 支持（Stub 不带 —— null 字段保持诚实）。
+                val tail = if (scrollbackLines > 0) {
+                    (virtualTerminal as? com.apex.agent.platform.terminal.screen.RealVirtualTerminal)
+                        ?.scrollbackLines(scrollbackLines)
+                } else null
                 TerminalRuntime.ObserveResult(
                     mode = mode,
                     sessionId = sessionId,
                     cursor = currentCursor,
-                    screen = virtualTerminal.snapshot()
+                    screen = virtualTerminal.snapshot(),
+                    scrollbackTail = tail
                 )
             }
 
@@ -116,9 +167,14 @@ class ObservationEngine(
                     truncated = slice.truncated,
                     overrun = slice.overrun,
                     oldestCursor = if (slice.overrun) ringBuffer.oldestCursor else null,
-                    raw = String(slice.bytes, Charsets.UTF_8)
+                    raw = com.apex.agent.platform.terminal.buffer.Utf8Boundary.decodeWindow(slice.bytes)  // T81 (D-6)：跳过窗口头部残缺 UTF-8 序列
                 )
             }
         }
+    }
+
+    private companion object {
+        /** styled 快照最小刷新间隔（与 UI sample(33) 对齐；≈1 帧）。 */
+        const val STYLED_MIN_INTERVAL_NS = 33_000_000L
     }
 }

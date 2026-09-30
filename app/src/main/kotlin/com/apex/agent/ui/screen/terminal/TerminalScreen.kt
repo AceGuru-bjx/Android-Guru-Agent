@@ -1,9 +1,13 @@
 package com.apex.agent.ui.screen.terminal
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,7 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -24,29 +28,34 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,336 +64,1037 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.apex.agent.R
+import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
+import com.apex.agent.ui.screen.terminal.history.TerminalHistorySheet
+import com.apex.agent.ui.screen.terminal.scheme.TerminalSchemePickerSheet
+import com.apex.agent.ui.screen.terminal.settings.TerminalSettingsDrawer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * 终端页：左上角三条杠菜单（终端专属设置抽屉），含三个分区：
- *  1. 终端设置（字号/行数/单色）
- *  2. Agent 命令黑名单 / 白名单
- *  3. 环境依赖下载中心（官方源+镜像，一键全装 / 独立装 / Android 依赖一键装）
+ * 终端页 v2（T85 — Apex Console 重做）。
+ *
+ * 旧版布局问题（用户实测反馈）：顶栏 + tab 条 + 状态条 + Ubuntu 横幅四层堆叠，
+ * 浅色 Material 顶栏与深色终端区割裂；「未解包」横幅等用户行动而不是自动预备。
+ *
+ * 新设计（对齐 Termux / JuiceSSH 的「控制台优先」范式）：
+ *  - **整页深色控制台**（ConsoleTheme，薄荷强调色对齐 App neon-mint 主题），
+ *    顶栏 / 会话条 / 状态条与终端区视觉连续，不再浅深割裂；
+ *  - **顶栏**：汉堡 + 标题 + 当前后端副标题（mono），动作区 = 新建 / 环境中心 / 终端设置；
+ *  - **会话条**：仅多会话（≥2）时出现 —— 单会话零干扰（Termux 同款哲学）；
+ *  - **状态条**：细 mono 行（会话状态 / 前台 job / 等待输入 / 反馈）；
+ *  - **主区**：有会话 → 全幅终端 grid；无会话 → [EnvironmentPanel]（环境准备
+ *    进度 / 失败重试 / 空态快捷入口）—— 取代旧的「未解包横幅 + 终端未启动占位」
+ *    双重死区；
+ *  - **环境自动预备**：ApexApp 启动即后台解包（T85），READY 后 ViewModel 自动
+ *    拉起 Ubuntu 会话 —— 用户进页即见真实 bash，零点击。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TerminalScreen(
+    onOpenNavDrawer: () -> Unit,
     viewModel: TerminalViewModel = hiltViewModel()
 ) {
+    val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+    val activeId by viewModel.activeSessionId.collectAsStateWithLifecycle()
+    val semantic by viewModel.semanticState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val ubuntu by viewModel.ubuntuLifecycleState.collectAsStateWithLifecycle()
+    val ubuntuProgress by viewModel.ubuntuProgress.collectAsStateWithLifecycle()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
     val blacklist by viewModel.blacklist.collectAsStateWithLifecycle()
     val whitelist by viewModel.whitelist.collectAsStateWithLifecycle()
-    val useMirror by viewModel.useMirror.collectAsStateWithLifecycle()
-    val install by viewModel.install.collectAsStateWithLifecycle()
 
     val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var showNewSessionDialog by remember { mutableStateOf(false) }
+    var showEnvironmentCenter by remember { mutableStateOf(false) }
+    var showSchemePicker by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
 
-    // 终端页主内容（占位：PTY 输出区，后续接入 TerminalRuntime 实时流）
-    androidx.compose.material3.ModalNavigationDrawer(
+    // 保持屏幕常亮：看长任务输出（编译 / apt / 训练日志）时不被息屏打断 ——
+    // Termux 默认持有 wakelock，这里用等价的 window flag，交给用户开关。
+    val keepScreenOn = settings.keepScreenOn
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(keepScreenOn) {
+        val window = (view.context as? android.app.Activity)?.window
+        if (window != null) {
+            if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            // 离屏必须还原：否则终端页退出后整 App 一直亮屏耗电
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // 环境中心打开时刷新一次占用（安装/删除后状态驱动刷新，这里兑底）
+    LaunchedEffect(showEnvironmentCenter) {
+        if (showEnvironmentCenter) viewModel.refreshRootfsSize()
+    }
+
+    // 反馈条自动消隐
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(5000)
+            viewModel.consumeNotice()
+        }
+    }
+
+    val activeTab = sessions.firstOrNull { it.id == activeId }
+    val hasSession = activeId != null && activeTab != null
+
+    ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
             TerminalSettingsDrawer(
                 settings = settings,
                 onSettings = viewModel::updateSettings,
+                schemeName = viewModel.currentSchemeDisplayName(),
+                onOpenSchemePicker = { showSchemePicker = true },
+                boldAsBright = viewModel.boldAsBright.collectAsStateWithLifecycle().value,
+                onBoldAsBright = viewModel::setBoldAsBright,
+                onOpenHistory = { showHistory = true },
+                extraKeys = viewModel.extraKeys.collectAsStateWithLifecycle().value,
+                onAddExtraKey = viewModel::addExtraKey,
+                onRemoveExtraKey = viewModel::removeExtraKey,
+                onResetExtraKeys = viewModel::resetExtraKeys,
                 blacklist = blacklist,
                 whitelist = whitelist,
                 onAddBlack = viewModel::addBlacklist,
                 onRemoveBlack = viewModel::removeBlacklist,
                 onAddWhite = viewModel::addWhitelist,
                 onRemoveWhite = viewModel::removeWhitelist,
-                useMirror = useMirror,
-                onToggleMirror = viewModel::setUseMirror,
-                depItems = viewModel.depItems,
-                install = install,
-                onInstallDep = viewModel::installDep,
-                onInstallAll = viewModel::installAll,
-                onInstallAndroid = viewModel::installAndroidOnly,
                 onClose = { scope.launch { drawerState.close() } }
             )
         }
     ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("终端") },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "终端设置", tint = MaterialTheme.colorScheme.primary)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                        titleContentColor = MaterialTheme.colorScheme.onSurface,
-                        navigationIconContentColor = MaterialTheme.colorScheme.primary
-                    )
-                )
-            }
-        ) { padding ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-            ) {
-                // ATR 2.0 §41: Runtime → ScreenState → TerminalRenderer → Compose
-                TerminalRenderer(viewModel = viewModel)
-            }
-        }
-    }
-}
-
-// ═══ 终端专属设置抽屉 ═══
-@Composable
-private fun TerminalSettingsDrawer(
-    settings: TerminalViewModel.TerminalSettings,
-    onSettings: (TerminalViewModel.TerminalSettings.() -> TerminalViewModel.TerminalSettings) -> Unit,
-    blacklist: Set<String>,
-    whitelist: Set<String>,
-    onAddBlack: (String) -> Unit,
-    onRemoveBlack: (String) -> Unit,
-    onAddWhite: (String) -> Unit,
-    onRemoveWhite: (String) -> Unit,
-    useMirror: Boolean,
-    onToggleMirror: (Boolean) -> Unit,
-    depItems: List<TerminalViewModel.DepItem>,
-    install: TerminalViewModel.InstallState,
-    onInstallDep: (TerminalViewModel.DepItem) -> Unit,
-    onInstallAll: () -> Unit,
-    onInstallAndroid: () -> Unit,
-    onClose: () -> Unit
-) {
-    ModalDrawerSheet(modifier = Modifier.width(340.dp)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .background(ConsoleTheme.bg)
         ) {
-            // 标题
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SurfaceBadge(Icons.Default.Terminal, MaterialTheme.colorScheme.primary)
-                Text("终端设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            }
+            // ═══ 顶栏（深色控制台；外层 Scaffold 已提供 status bar inset）═══
+            ConsoleTopBar(
+                activeTab = activeTab,
+                ubuntuPhase = ubuntu.phase,
+                ubuntuPercent = ubuntuProgress?.percent ?: 0,
+                onOpenNavDrawer = onOpenNavDrawer,
+                onNewSession = { showNewSessionDialog = true },
+                onOpenCenter = { showEnvironmentCenter = true },
+                onOpenSettings = { scope.launch { drawerState.open() } }
+            )
 
-            // ═══ 1. 终端设置 ═══
-            SettingsCard(Icons.Default.Settings, "终端外观") {
-                LabeledNumber("字号", settings.fontSize, 8, 32) { onSettings { copy(fontSize = it) } }
-                LabeledNumber("最大行数", settings.maxLines, 100, 10000) { onSettings { copy(maxLines = it) } }
-                ToggleRow("单色模式", settings.monochrome) { onSettings { copy(monochrome = it) } }
-            }
-
-            // ═══ 2. 黑名单 / 白名单 ═══
-            SettingsCard(Icons.Default.Block, "命令黑名单 / 白名单") {
-                Text(
-                    "白名单非空时仅允许其中命令；黑名单中的命令始终禁止。按命令首段（如 rm / adb）匹配。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = "黑名单",
-                    items = blacklist.toList().sorted(),
-                    onAdd = onAddBlack,
-                    onRemove = onRemoveBlack,
-                    danger = true
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = "白名单",
-                    items = whitelist.toList().sorted(),
-                    onAdd = onAddWhite,
-                    onRemove = onRemoveWhite,
-                    danger = false
+            // ═══ 会话条（≥2 个会话才显示 —— 单会话零干扰）═══
+            if (sessions.size >= 2) {
+                SessionStrip(
+                    sessions = sessions,
+                    activeId = activeId,
+                    onSelect = viewModel::selectSession,
+                    onClose = viewModel::closeSession
                 )
             }
 
-            // ═══ 3. 环境依赖下载中心 ═══
-            SettingsCard(Icons.Default.Download, "环境依赖下载中心") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("使用镜像源", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                        Text("关闭则走官方源", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(
-                        checked = useMirror,
-                        onCheckedChange = onToggleMirror,
-                        colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary)
+            // ═══ 状态条（有活跃会话时；细 mono 行）═══
+            if (semantic != null) {
+                StatusStrip(semantic = semantic, notice = notice)
+            }
+
+            // ═══ 主区：终端 / 环境面板 ═══
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                if (hasSession) {
+                    // T88（3）：:terminal-view Canvas 直绘（替换 LazyColumn+BasicText
+                    // 渲染链 —— 滚动/选区/IME/鼠标上报全部下放 View 层）。
+                    TerminalViewHost(
+                        viewModel = viewModel,
+                        modifier = Modifier.fillMaxSize()
                     )
-                }
-                Spacer(Modifier.height(10.dp))
-                // 一键全装 / Android 一键装
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ActionButton("一键安装全部", install.runningId != null, Modifier.weight(1f)) { onInstallAll() }
-                    ActionButton("Android 依赖", install.runningId == "__android__", Modifier.weight(1f)) { onInstallAndroid() }
-                }
-                Spacer(Modifier.height(10.dp))
-                Text("可独立安装：", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(6.dp))
-                depItems.forEach { item ->
-                    DepRow(
-                        item = item,
-                        installing = install.runningId == item.id,
-                        onInstall = { onInstallDep(item) }
-                    )
-                }
-                // 安装日志
-                if (install.log.isNotEmpty()) {
-                    Spacer(Modifier.height(10.dp))
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            install.log,
-                            modifier = Modifier.padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    // T87：死会话覆盖层 —— 会话进程已退出时不再让用户对着
+                    // 死 PTY 敲字（旧体验：每次输入弹「输入失败」却无路可走）。
+                    if (activeTab != null && !activeTab.isAlive) {
+                        DeadSessionOverlay(
+                            isUbuntu = activeTab.isUbuntu,
+                            onRestart = viewModel::restartActiveSession,
+                            onClose = { viewModel.closeSession(activeTab.id) }
                         )
                     }
+                } else {
+                    EnvironmentPanel(
+                        phase = ubuntu.phase,
+                        progress = ubuntuProgress,
+                        lastError = ubuntu.lastError,
+                        onRetry = viewModel::installUbuntu,
+                        onNewUbuntu = { viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU) },
+                        onNewLocal = { viewModel.createSession(TerminalViewModel.BACKEND_LOCAL) },
+                        onOpenCenter = { showEnvironmentCenter = true }
+                    )
+                }
+
+                // 有会话但环境仍在后台收敛（用户先用 Android Shell）→ 细进度条贴底
+                if (hasSession && ubuntu.phase in setOf(
+                        UbuntuLifecycleCoordinator.Phase.INSTALLING,
+                        UbuntuLifecycleCoordinator.Phase.BOOTSTRAPPING
+                    )
+                ) {
+                    UbuntuBusyStrip(
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                        phase = ubuntu.phase,
+                        progress = ubuntuProgress
+                    )
                 }
             }
-
-            TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
-                Text("关闭")
-            }
         }
     }
-}
 
-@Composable
-private fun SettingsCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, content: @Composable () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SurfaceBadge(icon, MaterialTheme.colorScheme.primary)
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            }
-            Spacer(Modifier.height(10.dp))
-            content()
-        }
-    }
-}
-
-@Composable
-private fun SurfaceBadge(icon: androidx.compose.ui.graphics.vector.ImageVector, tint: androidx.compose.ui.graphics.Color) {
-    Surface(shape = CircleShape, color = tint.copy(alpha = 0.15f), modifier = Modifier.size(34.dp)) {
-        Box(contentAlignment = Alignment.Center) { Icon(icon, null, Modifier.size(18.dp), tint = tint) }
-    }
-}
-
-@Composable
-private fun ToggleRow(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Switch(checked = checked, onCheckedChange = onToggle, colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary))
-    }
-}
-
-@Composable
-private fun LabeledNumber(label: String, value: Int, min: Int, max: Int, onSet: (Int) -> Unit) {
-    var text by remember { mutableStateOf(value.toString()) }
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        OutlinedTextField(
-            value = text,
-            onValueChange = { t ->
-                text = t
-                t.toIntOrNull()?.coerceIn(min, max)?.let(onSet)
+    if (showNewSessionDialog) {
+        NewSessionDialog(
+            onDismiss = { showNewSessionDialog = false },
+            onUbuntu = {
+                showNewSessionDialog = false
+                viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
             },
-            modifier = Modifier.width(88.dp),
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            textStyle = MaterialTheme.typography.bodyMedium
+            onLocal = {
+                showNewSessionDialog = false
+                viewModel.createSession(TerminalViewModel.BACKEND_LOCAL)
+            }
+        )
+    }
+
+    // ═══ 环境中心（顶栏图层入口）═══
+    if (showEnvironmentCenter) {
+        EnvironmentCenterSheet(
+            onDismiss = { showEnvironmentCenter = false },
+            ubuntu = ubuntu,
+            progress = ubuntuProgress,
+            rootfsSize = viewModel.rootfsSize.collectAsStateWithLifecycle().value,
+            onInstallUbuntu = viewModel::installUbuntu,
+            onCancelUbuntuInstall = viewModel::cancelUbuntuInstall,
+            onRepairUbuntu = viewModel::repairUbuntu,
+            onRemoveUbuntu = viewModel::removeUbuntu,
+            onCreateUbuntuSession = {
+                showEnvironmentCenter = false
+                viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
+            },
+            useMirror = viewModel.useMirror.collectAsStateWithLifecycle().value,
+            onToggleMirror = viewModel::setUseMirror,
+            depItems = viewModel.depItems,
+            install = viewModel.install.collectAsStateWithLifecycle().value,
+            onInstallDep = viewModel::installDep,
+            onInstallAll = viewModel::installAll,
+            onInstallAndroid = viewModel::installAndroidOnly
+        )
+    }
+
+    // ═══ T87：配色方案选择器 ═══
+    if (showSchemePicker) {
+        TerminalSchemePickerSheet(
+            currentSchemeId = viewModel.colorSchemeId.collectAsStateWithLifecycle().value,
+            onPick = { viewModel.setColorScheme(it) },
+            onDismiss = { showSchemePicker = false }
+        )
+    }
+
+    // ═══ T87：命令历史 ═══
+    if (showHistory) {
+        TerminalHistorySheet(
+            entries = viewModel.commandHistoryEntries.collectAsStateWithLifecycle().value,
+            onPick = { cmd ->
+                viewModel.sendInput(cmd)
+                showHistory = false
+            },
+            onClear = { viewModel.clearCommandHistory() },
+            onDismiss = { showHistory = false }
         )
     }
 }
 
+// ═══════════════════════ T87：死会话覆盖层 ═══════════════════════
+
+/**
+ * 会话已退出覆盖层（半透明盖在终端 grid 上）。
+ *
+ * - 「重启会话」→ 同 backend 重建（[TerminalViewModel.restartActiveSession]）；
+ * - 「关闭」→ 移除 tab；
+ * - 下方如实展示发生了什么（进程结束 = 退出/被杀；不再伪装成输入故障）。
+ */
 @Composable
-private fun CommandListEditor(title: String, items: List<String>, onAdd: (String) -> Unit, onRemove: (String) -> Unit, danger: Boolean) {
-    var input by remember { mutableStateOf("") }
-    Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-    Spacer(Modifier.height(4.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = input,
-            onValueChange = { input = it },
-            modifier = Modifier.weight(1f),
-            singleLine = true,
-            placeholder = { Text("如 rm / adb / format", style = MaterialTheme.typography.bodySmall) },
-            textStyle = MaterialTheme.typography.bodySmall
-        )
-        TextButton(onClick = {
-            if (input.isNotBlank()) { onAdd(input.trim()); input = "" }
-        }) { Text("添加") }
-    }
-    if (items.isNotEmpty()) {
-        Spacer(Modifier.height(6.dp))
-        LazyColumn(modifier = Modifier.height((items.size.coerceAtMost(4) * 36).dp)) {
-            items(items) { cmd ->
-                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("• $cmd", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                    TextButton(onClick = { onRemove(cmd) }) { Text("移除", color = MaterialTheme.colorScheme.error) }
+private fun DeadSessionOverlay(
+    isUbuntu: Boolean,
+    onRestart: () -> Unit,
+    onClose: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xB00E1411)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = ConsoleTheme.amber,
+                modifier = Modifier.size(40.dp)
+            )
+            Text(
+                stringResource(R.string.term_session_dead_title),
+                color = ConsoleTheme.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                stringResource(
+                    if (isUbuntu) R.string.term_session_dead_ubuntu else R.string.term_session_dead_local
+                ),
+                color = ConsoleTheme.dim,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextButton(
+                    onClick = onRestart,
+                    modifier = Modifier
+                        .background(ConsoleTheme.accentSoft, RoundedCornerShape(10.dp))
+                ) {
+                    Text(stringResource(R.string.term_session_restart), color = ConsoleTheme.accent, fontSize = 13.sp)
+                }
+                TextButton(onClick = onClose) {
+                    Text(stringResource(R.string.term_close), color = ConsoleTheme.dim, fontSize = 13.sp)
                 }
             }
         }
     }
 }
 
+// ═══════════════════════ 控制台主题 ═══════════════════════
+
+/**
+ * 终端页控制台配色（自含深色调色 —— 与 [TerminalViewHost] 的终端内容区一致，
+ * 不随 App 浅/深主题漂移；强调色取 App dark 主题 primary「neon mint」0xFF4EE9B0）。
+ */
+internal object ConsoleTheme {
+    /** 页面底色（顶栏/条带下的 chrome 层）。 */
+    val bg = Color(0xFF0C1210)
+    /** 顶栏 / 状态条底色。 */
+    val bar = Color(0xFF111815)
+    /** 会话 chip 底色。 */
+    val chip = Color(0xFF18211C)
+    /** 活跃 chip 底色。 */
+    val chipActive = Color(0xFF1F3429)
+    /** 分隔线。 */
+    val stroke = Color(0xFF233029)
+    /** 主文本（提亮至近白 —— 与 TerminalViewHost 前景纯白统一，终端「白色字体」反馈）。 */
+    val text = Color(0xFFF2F7F4)
+    /** 次级文本。 */
+    val dim = Color(0xFF7E948A)
+    /** 强调（neon mint —— App dark primary）。 */
+    val accent = Color(0xFF4EE9B0)
+    /** 强调弱底（选中态 / 进度底）。 */
+    val accentSoft = Color(0xFF1B382D)
+    /** 警示（amber —— App dark secondary）。 */
+    val amber = Color(0xFFFFB454)
+    /** 危险（magenta —— App dark tertiary）。 */
+    val danger = Color(0xFFFF6B9D)
+    /** 危险弱底。 */
+    val dangerSoft = Color(0xFF38182A)
+}
+
+// ═══════════════════════ 顶栏 ═══════════════════════
+
 @Composable
-private fun DepRow(item: TerminalViewModel.DepItem, installing: Boolean, onInstall: () -> Unit) {
+private fun ConsoleTopBar(
+    activeTab: TerminalViewModel.SessionTab?,
+    ubuntuPhase: UbuntuLifecycleCoordinator.Phase,
+    ubuntuPercent: Int,
+    onOpenNavDrawer: () -> Unit,
+    onNewSession: () -> Unit,
+    onOpenCenter: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest).padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ConsoleTheme.bar)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(
-                if (item.group == TerminalViewModel.DepGroup.ANDROID) Icons.Default.Android else Icons.Default.CheckCircle,
-                null, Modifier.size(16.dp),
-                tint = if (item.group == TerminalViewModel.DepGroup.ANDROID) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-            )
-            Text(item.name, style = MaterialTheme.typography.bodyMedium)
+        IconButton(onClick = onOpenNavDrawer) {
+            Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.term_cd_nav), tint = ConsoleTheme.text)
         }
-        TextButton(enabled = !installing, onClick = onInstall) {
-            Text(if (installing) "安装中…" else "安装")
-        }
-    }
-}
-
-@Composable
-private fun ActionButton(label: String, loading: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = if (loading) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primary,
-        modifier = modifier.clip(RoundedCornerShape(10.dp)).then(Modifier.clickableSafe(enabled = !loading, onClick = onClick))
-    ) {
-        Box(modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
             Text(
-                if (loading) "$label…" else label,
-                style = MaterialTheme.typography.labelMedium,
+                stringResource(R.string.term_title),
+                fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = if (loading) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimary
+                color = ConsoleTheme.text
+            )
+            // 副标题：当前后端 / 环境收敛进度（mono，一行）
+            val subtitle = when {
+                activeTab != null && activeTab.isUbuntu -> "ubuntu 24.04 · bash"
+                activeTab != null -> "android shell"
+                ubuntuPhase in setOf(
+                    UbuntuLifecycleCoordinator.Phase.INSTALLING,
+                    UbuntuLifecycleCoordinator.Phase.BOOTSTRAPPING
+                ) -> stringResource(R.string.term_env_preparing, ubuntuPercent)
+                ubuntuPhase == UbuntuLifecycleCoordinator.Phase.FAILED -> stringResource(R.string.term_env_error_short)
+                else -> stringResource(R.string.term_waiting_session)
+            }
+            Text(
+                subtitle,
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ConsoleTheme.dim,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        IconButton(onClick = onNewSession) {
+            Icon(Icons.Default.Add, contentDescription = stringResource(R.string.term_cd_new_session), tint = ConsoleTheme.accent)
+        }
+        IconButton(onClick = onOpenCenter) {
+            Icon(Icons.Default.Layers, contentDescription = stringResource(R.string.term_cd_env_center), tint = ConsoleTheme.accent)
+        }
+        IconButton(onClick = onOpenSettings) {
+            Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.term_cd_settings), tint = ConsoleTheme.accent)
+        }
+    }
+}
+
+// ═══════════════════════ 会话条 ═══════════════════════
+
+/** 会话 tab 标题的最大字符数 —— shell 标题（tmux/ssh）可能很长，UI 只取前若干字符 + 省略号。 */
+private const val MAX_TAB_TITLE = 24
+
+@Composable
+private fun SessionStrip(
+    sessions: List<TerminalViewModel.SessionTab>,
+    activeId: Long?,
+    onSelect: (Long) -> Unit,
+    onClose: (Long) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ConsoleTheme.bg)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        items(sessions, key = { it.id }) { tab ->
+            SessionChip(
+                tab = tab,
+                active = tab.id == activeId,
+                onSelect = { onSelect(tab.id) },
+                onClose = { onClose(tab.id) }
             )
         }
     }
 }
 
-// 轻量 clickable 包装，复用已 import 的 androidx.compose.foundation.clickable
 @Composable
-private fun Modifier.clickableSafe(enabled: Boolean, onClick: () -> Unit): Modifier =
-    this.then(this.clickable(enabled = enabled, onClick = onClick))
+private fun SessionChip(
+    tab: TerminalViewModel.SessionTab,
+    active: Boolean,
+    onSelect: () -> Unit,
+    onClose: () -> Unit
+) {
+    // 标题优先显示 shell 自己设的窗口名（OSC 0/1/2 —— vim/tmux/ssh 都会设），
+    // 没有才退回 "#id 后端"。对齐 Termux / JuiceSSH：多会话靠标题分辨在跑什么。
+    // #170：Agent 创建的会话（backendId=="agent"，见 TerminalViewModel 的推断）
+    // 加「Agent·」徽标 —— 会话列表本就不按 owner 过滤，Agent 的 PTY 会话与
+    // 用户会话同列展示，徽标让来源一目了然（用户接管输入仍走 USER owner）。
+    val agentBadge = if (tab.backendId == "agent") "Agent·" else ""
+    val title = tab.title?.take(MAX_TAB_TITLE)
+        ?: "#${tab.id} $agentBadge${if (tab.isUbuntu) "Ubuntu" else "Android"}"
+    val chipBg by animateColorAsState(
+        targetValue = if (active) ConsoleTheme.accentSoft else ConsoleTheme.chip,
+        label = "chip-bg"
+    )
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(chipBg)
+            .clickable(onClick = onSelect)
+            .padding(start = 10.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        // 存活状态点
+        Box(
+            Modifier
+                .size(6.dp)
+                .background(
+                    if (tab.isAlive) ConsoleTheme.accent else ConsoleTheme.danger,
+                    CircleShape
+                )
+        )
+        Column {
+            Text(
+                title,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                color = ConsoleTheme.text
+            )
+            Text(
+                if (tab.title != null) "#${tab.id} $agentBadge${if (tab.isUbuntu) "Ubuntu" else "Android"}" else tab.state,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ConsoleTheme.dim,
+                maxLines = 1
+            )
+        }
+        Icon(
+            Icons.Default.Close, stringResource(R.string.term_cd_close_session),
+            Modifier
+                .size(18.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onClose)
+                .padding(3.dp),
+            tint = ConsoleTheme.dim
+        )
+    }
+}
+
+// ═══════════════════════ 状态条 ═══════════════════════
+
+@Composable
+private fun StatusStrip(
+    semantic: com.apex.agent.platform.terminal.state.TerminalSemanticState?,
+    notice: String?
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ConsoleTheme.bar)
+            .padding(horizontal = 12.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        if (semantic == null) {
+            Text(
+                stringResource(R.string.term_no_session),
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ConsoleTheme.dim
+            )
+        } else {
+            Text(
+                "#${semantic.session.id} ${semantic.session.state.name} ${semantic.session.rows}×${semantic.session.cols}",
+                fontSize = 10.5.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ConsoleTheme.dim,
+                maxLines = 1
+            )
+            // 前台 job
+            semantic.foregroundJob?.let { job ->
+                Text(
+                    "▶ ${job.command.take(26)}",
+                    fontSize = 10.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = ConsoleTheme.accent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            // 等待输入（prompt 检测）
+            if (semantic.prompt?.detected == true || semantic.input.state.name == "HIGH_CONFIDENCE") {
+                Text(
+                    stringResource(R.string.term_waiting_input),
+                    fontSize = 10.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = ConsoleTheme.amber,
+                    maxLines = 1
+                )
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        if (notice != null) {
+            Text(
+                notice,
+                fontSize = 10.sp,
+                color = ConsoleTheme.danger,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.72f, fill = false)
+            )
+        }
+    }
+}
+
+// ═══════════════════════ 环境面板（无会话时的主区）═══════════════════════
+
+/**
+ * 无会话时的主区面板 —— 三个形态：
+ *  - **准备中**（NOT_INSTALLED/INSTALLING/ROOTFS_READY/BOOTSTRAPPING/RECOVERING）：
+ *    三步进度（解压内置环境 → 配置系统 → 初始化工具链）+ 百分比/字节 + 当前阶段消息。
+ *    T85 自动预备语义：App 启动即后台进行，用户无需任何操作，完成后自动进终端；
+ *  - **失败**（FAILED）：错误详情 + 重试 + 环境中心；
+ *  - **就绪空态**（READY，会话被用户全部关闭）：快捷新建入口。
+ */
+@Composable
+private fun EnvironmentPanel(
+    phase: UbuntuLifecycleCoordinator.Phase,
+    progress: UbuntuLifecycleCoordinator.LifecycleProgress?,
+    lastError: String?,
+    onRetry: () -> Unit,
+    onNewUbuntu: () -> Unit,
+    onNewLocal: () -> Unit,
+    onOpenCenter: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 28.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        when (phase) {
+            UbuntuLifecycleCoordinator.Phase.FAILED -> EnvironmentFailureContent(
+                lastError = lastError,
+                onRetry = onRetry,
+                onOpenCenter = onOpenCenter
+            )
+            UbuntuLifecycleCoordinator.Phase.READY -> EnvironmentReadyEmptyContent(
+                onNewUbuntu = onNewUbuntu,
+                onNewLocal = onNewLocal
+            )
+            else -> EnvironmentPreparingContent(
+                phase = phase,
+                progress = progress,
+                onNewLocal = onNewLocal,
+                onOpenCenter = onOpenCenter
+            )
+        }
+    }
+}
+
+/** 环境准备步骤序号：0 解压内置档案 → 1 配置系统 → 2 初始化工具链。 */
+private fun setupStepIndex(stage: String?): Int = when {
+    stage == null -> 0
+    stage.startsWith("install:CONFIGURING") ||
+        stage.startsWith("install:ACTIVATING") ||
+        stage.startsWith("install:VALIDATING") -> 1
+    stage.startsWith("bootstrap:") -> 2
+    else -> 0 // install:RESOLVING/DOWNLOADING/VERIFYING/EXTRACTING
+}
+
+@Composable
+private fun EnvironmentPreparingContent(
+    phase: UbuntuLifecycleCoordinator.Phase,
+    progress: UbuntuLifecycleCoordinator.LifecycleProgress?,
+    onNewLocal: () -> Unit,
+    onOpenCenter: () -> Unit
+) {
+    // ── 顶部图标：呼吸光晕的终端符号 ──
+    val transition = rememberInfiniteTransition(label = "env-glow")
+    val glow by transition.animateFloat(
+        initialValue = 0.55f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Reverse),
+        label = "env-glow-alpha"
+    )
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(84.dp)
+                .background(ConsoleTheme.accent.copy(alpha = 0.14f * glow), CircleShape)
+        )
+        Surface(
+            shape = CircleShape,
+            color = ConsoleTheme.accentSoft,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ConsoleTheme.accent.copy(alpha = 0.35f))
+        ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(64.dp)) {
+                Icon(
+                    Icons.Default.Terminal, contentDescription = null,
+                    tint = ConsoleTheme.accent,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(22.dp))
+    Text(
+        stringResource(R.string.term_env_prep_title),
+        fontSize = 19.sp,
+        fontWeight = FontWeight.Bold,
+        color = ConsoleTheme.text
+    )
+    Spacer(Modifier.height(6.dp))
+    Text(
+        stringResource(R.string.term_env_prep_desc),
+        fontSize = 12.sp,
+        color = ConsoleTheme.dim,
+        textAlign = TextAlign.Center
+    )
+    Spacer(Modifier.height(28.dp))
+
+    // ── 三步进度 ──
+    val currentStep = setupStepIndex(progress?.stage)
+    val steps = listOf(
+        stringResource(R.string.term_step_unpack),
+        stringResource(R.string.term_step_configure),
+        stringResource(R.string.term_step_toolchain)
+    )
+    steps.forEachIndexed { index, label ->
+        SetupStepRow(
+            label = label,
+            state = when {
+                index < currentStep -> SetupStepState.DONE
+                index == currentStep -> SetupStepState.ACTIVE
+                else -> SetupStepState.PENDING
+            }
+        )
+    }
+    Spacer(Modifier.height(26.dp))
+
+    // ── 进度条 + 百分比 / 字节 ──
+    val percent = progress?.percent ?: 0
+    val bytes = progress?.bytesTransferred ?: 0L
+    val bytesTotal = progress?.bytesTotal
+    val determinate = percent > 0 || (bytesTotal != null && bytesTotal > 0L)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(ConsoleTheme.bar)
+            .border(androidx.compose.foundation.BorderStroke(1.dp, ConsoleTheme.stroke), RoundedCornerShape(12.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when {
+                    progress == null -> stringResource(R.string.term_starting)
+                    else -> progress.message.ifBlank { progress.stage }
+                },
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ConsoleTheme.dim,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (determinate) {
+                Text(
+                    "$percent%",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
+                    color = ConsoleTheme.accent
+                )
+            }
+        }
+        if (determinate) {
+            LinearProgressIndicator(
+                progress = { (percent.coerceIn(0, 100)) / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = ConsoleTheme.accent,
+                trackColor = ConsoleTheme.accentSoft
+            )
+            if (bytesTotal != null && bytesTotal > 0L) {
+                Text(
+                    "${formatMb(bytes)} / ${formatMb(bytesTotal)}",
+                    fontSize = 10.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = ConsoleTheme.dim
+                )
+            }
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = ConsoleTheme.accent,
+                trackColor = ConsoleTheme.accentSoft
+            )
+        }
+        Text(
+            stringResource(R.string.term_prep_footnote),
+            fontSize = 10.5.sp,
+            color = ConsoleTheme.dim
+        )
+    }
+    Spacer(Modifier.height(18.dp))
+
+    // ── 次级入口：不等环境，先用 Android Shell / 环境中心 ──
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        TextButton(onClick = onNewLocal) {
+            Icon(Icons.Default.Android, null, Modifier.size(15.dp), tint = ConsoleTheme.dim)
+            Spacer(Modifier.width(6.dp))
+            Text(stringResource(R.string.term_use_android_first), color = ConsoleTheme.dim, fontSize = 12.sp)
+        }
+        TextButton(onClick = onOpenCenter) {
+            Icon(Icons.Default.Layers, null, Modifier.size(15.dp), tint = ConsoleTheme.dim)
+            Spacer(Modifier.width(6.dp))
+            Text(stringResource(R.string.term_env_center), color = ConsoleTheme.dim, fontSize = 12.sp)
+        }
+    }
+}
+
+private enum class SetupStepState { DONE, ACTIVE, PENDING }
+
+@Composable
+private fun SetupStepRow(label: String, state: SetupStepState) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        when (state) {
+            SetupStepState.DONE -> Icon(
+                Icons.Default.CheckCircle, contentDescription = null,
+                tint = ConsoleTheme.accent, modifier = Modifier.size(18.dp)
+            )
+            SetupStepState.ACTIVE -> CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 1.8.dp,
+                color = ConsoleTheme.accent
+            )
+            SetupStepState.PENDING -> Box(
+                Modifier
+                    .size(16.dp)
+                    .background(ConsoleTheme.stroke, CircleShape)
+            )
+        }
+        Text(
+            label,
+            fontSize = 13.sp,
+            color = when (state) {
+                SetupStepState.DONE -> ConsoleTheme.text
+                SetupStepState.ACTIVE -> ConsoleTheme.accent
+                SetupStepState.PENDING -> ConsoleTheme.dim
+            },
+            fontWeight = if (state == SetupStepState.ACTIVE) FontWeight.SemiBold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun EnvironmentFailureContent(
+    lastError: String?,
+    onRetry: () -> Unit,
+    onOpenCenter: () -> Unit
+) {
+    Icon(
+        Icons.Default.Warning, contentDescription = null,
+        tint = ConsoleTheme.danger, modifier = Modifier.size(56.dp)
+    )
+    Spacer(Modifier.height(18.dp))
+    Text(stringResource(R.string.term_env_failed_title), fontSize = 19.sp, fontWeight = FontWeight.Bold, color = ConsoleTheme.text)
+    Spacer(Modifier.height(8.dp))
+    if (!lastError.isNullOrBlank()) {
+        Text(
+            lastError.take(300),
+            fontSize = 10.5.sp,
+            fontFamily = FontFamily.Monospace,
+            color = ConsoleTheme.dim,
+            textAlign = TextAlign.Center,
+            maxLines = 6,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(10.dp))
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ConsoleTheme.dangerSoft,
+        modifier = Modifier.clip(RoundedCornerShape(12.dp))
+    ) {
+        Row(
+            Modifier
+                .clickable(onClick = onRetry)
+                .padding(horizontal = 26.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(Icons.Default.Refresh, contentDescription = null, tint = ConsoleTheme.danger, modifier = Modifier.size(17.dp))
+            Text(stringResource(R.string.term_retry), color = ConsoleTheme.danger, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        }
+    }
+    Spacer(Modifier.height(14.dp))
+    TextButton(onClick = onOpenCenter) {
+        Text(stringResource(R.string.term_open_env_center_diag), color = ConsoleTheme.dim, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun EnvironmentReadyEmptyContent(
+    onNewUbuntu: () -> Unit,
+    onNewLocal: () -> Unit
+) {
+    Icon(
+        Icons.Default.Terminal, contentDescription = null,
+        tint = ConsoleTheme.accent, modifier = Modifier.size(52.dp)
+    )
+    Spacer(Modifier.height(18.dp))
+    Text(stringResource(R.string.term_no_terminal_session), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = ConsoleTheme.text)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        stringResource(R.string.term_env_ready_hint),
+        fontSize = 12.sp,
+        color = ConsoleTheme.dim,
+        textAlign = TextAlign.Center
+    )
+    Spacer(Modifier.height(24.dp))
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ConsoleTheme.accentSoft,
+        border = androidx.compose.foundation.BorderStroke(1.dp, ConsoleTheme.accent.copy(alpha = 0.4f)),
+        modifier = Modifier.clip(RoundedCornerShape(12.dp))
+    ) {
+        Row(
+            Modifier
+                .clickable(onClick = onNewUbuntu)
+                .padding(horizontal = 30.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Icon(Icons.Default.Terminal, contentDescription = null, tint = ConsoleTheme.accent, modifier = Modifier.size(18.dp))
+            Text(stringResource(R.string.term_new_ubuntu_session), color = ConsoleTheme.accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    TextButton(onClick = onNewLocal) {
+        Icon(Icons.Default.Android, null, Modifier.size(15.dp), tint = ConsoleTheme.dim)
+        Spacer(Modifier.width(6.dp))
+        Text("Android Shell", color = ConsoleTheme.dim, fontSize = 12.sp)
+    }
+}
+
+// ═══════════════════════ 有会话时的环境收敛细条 ═══════════════════════
+
+@Composable
+private fun UbuntuBusyStrip(
+    modifier: Modifier = Modifier,
+    phase: UbuntuLifecycleCoordinator.Phase,
+    progress: UbuntuLifecycleCoordinator.LifecycleProgress?
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xE6101714))
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(12.dp),
+            strokeWidth = 1.4.dp,
+            color = ConsoleTheme.accent
+        )
+        Text(
+            if (phase == UbuntuLifecycleCoordinator.Phase.INSTALLING) {
+                stringResource(R.string.term_busy_unpacking, progress?.percent ?: 0)
+            } else {
+                stringResource(R.string.term_busy_bootstrap)
+            },
+            fontSize = 11.sp,
+            color = ConsoleTheme.dim,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+// ═══════════════════════ 新建会话对话框 ═══════════════════════
+
+@Composable
+private fun NewSessionDialog(
+    onDismiss: () -> Unit,
+    onUbuntu: () -> Unit,
+    onLocal: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.term_new_session_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SessionTypeCard(
+                    icon = { Icon(Icons.Default.Terminal, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp)) },
+                    title = stringResource(R.string.term_ubuntu_session),
+                    desc = stringResource(R.string.term_session_ubuntu_desc),
+                    onClick = onUbuntu
+                )
+                SessionTypeCard(
+                    icon = { Icon(Icons.Default.Android, null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(22.dp)) },
+                    title = "Android Shell",
+                    desc = stringResource(R.string.term_session_android_desc),
+                    onClick = onLocal
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.term_cancel)) }
+        }
+    )
+}
+
+@Composable
+private fun SessionTypeCard(
+    icon: @Composable () -> Unit,
+    title: String,
+    desc: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        icon()
+        Column {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                desc,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/** 字节 → MB 文本（1 位小数）。 */
+private fun formatMb(bytes: Long): String =
+    String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+

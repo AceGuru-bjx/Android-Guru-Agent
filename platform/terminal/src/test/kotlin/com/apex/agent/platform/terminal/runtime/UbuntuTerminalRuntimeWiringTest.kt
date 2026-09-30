@@ -9,10 +9,11 @@ import com.apex.agent.platform.terminal.proot.PRootBinaryProvider
 import com.apex.agent.platform.terminal.proot.PRootCommand
 import com.apex.agent.platform.terminal.proot.PRootVersion
 import com.apex.agent.platform.terminal.proot.ProotExecutor
-import com.apex.agent.platform.terminal.ubuntu.OfficialUbuntuRootfsSource
+import com.apex.agent.platform.terminal.ubuntu.BundledRootfsSource
 import com.apex.agent.platform.terminal.ubuntu.ProvisionedRootfsProvider
 import com.apex.agent.platform.terminal.ubuntu.ProvisioningResult
 import com.apex.agent.platform.terminal.ubuntu.RootfsConfigurator
+import com.apex.agent.platform.terminal.ubuntu.RootfsDownloader
 import com.apex.agent.platform.terminal.ubuntu.RootfsHealthInspector
 import com.apex.agent.platform.terminal.ubuntu.RootfsInstallLayout
 import com.apex.agent.platform.terminal.ubuntu.RootfsProvisionerImpl
@@ -65,12 +66,19 @@ class UbuntuTerminalRuntimeWiringTest {
         @JvmStatic
         @BeforeClass
         fun setUpClass() {
-            assumeTrue("cdimage.ubuntu.com unreachable", networkReachable())
+            assumeTrue("hosting release unreachable", networkReachable())
 
             val base = Files.createTempDirectory("t73-wiring-").toFile()
             layout = RootfsInstallLayout.under(AbsolutePath(base.absolutePath))
+            // T83：真实档案作夹具 → 伪 nativeLibraryDir 暂存 → BundledRootfsSource
+            //（与生产内置交付同构；下载仅为夹具获取手段）
+            val nativeLibDir = File(base, "nativeLib").apply { mkdirs() }
+            val fixture = downloadFixtureArchive()
+            assumeTrue("fixture download/verify failed", fixture != null)
+            fixture!!.copyTo(File(nativeLibDir, BundledRootfsSource.BUNDLE_LIB_NAME), overwrite = true)
+            fixture.delete()
             provisioner = RootfsProvisionerImpl(
-                source = OfficialUbuntuRootfsSource(),
+                source = BundledRootfsSource(nativeLibraryDir = nativeLibDir.absolutePath),
                 validator = null,
                 layout = layout,
                 configurator = RootfsConfigurator(),
@@ -101,7 +109,7 @@ class UbuntuTerminalRuntimeWiringTest {
         }
 
         private fun networkReachable(): Boolean = try {
-            val conn = URL("https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/SHA256SUMS")
+            val conn = URL("https://github.com/AceGuru-mjh/Android-Guru-Agent/releases/tag/ubuntu-rootfs-24.04.4-full")
                 .openConnection() as HttpURLConnection
             conn.connectTimeout = 10_000
             conn.readTimeout = 10_000
@@ -113,6 +121,28 @@ class UbuntuTerminalRuntimeWiringTest {
             false
         }
 
+        /**
+         * T84 夹具获取：下载真实完整 rootfs 24.04.4 amd64（交付物本体，~310MB）并校验
+         * 固定 SHA-256（下载只是测试夹具的获取手段 —— 生产链路已是 APK 内置离线解包，零网络）。
+         */
+        private fun downloadFixtureArchive(): File? = try {
+            val url = "https://github.com/AceGuru-mjh/Android-Guru-Agent/releases/download/ubuntu-rootfs-24.04.4-full/apex-ubuntu-full-24.04.4-amd64.tar.gz"
+            val expectedSha = "57fb03f916cae40202134594a6ad063167174714e1ad36a50f0575b015b87228"
+            val tmp = File.createTempFile("t84-wiring-archive", ".tar.gz")
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 30_000
+                readTimeout = 900_000
+                instanceFollowRedirects = true
+            }
+            conn.inputStream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            if (RootfsDownloader.sha256OfFile(tmp) == expectedSha) tmp else {
+                tmp.delete()
+                null
+            }
+        } catch (e: Throwable) {
+            null
+        }
+
         private fun prootWorks(bin: File): Boolean {
             if (!installed) return false
             val rootfs = runBlocking { provisioner.current() } ?: return false
@@ -121,7 +151,15 @@ class UbuntuTerminalRuntimeWiringTest {
                 pb.environment().clear()
                 pb.environment()["PROOT_NO_SECCOMP"] = "1"
                 System.getenv("LD_LIBRARY_PATH")?.let { pb.environment()["LD_LIBRARY_PATH"] = it }
-                pb.start().waitFor() == 0
+                val proc = pb.start()
+                // 有界等待（30s）：同 UbuntuRootfsEndToEndIntegrationTest / ProotExecutorProotSmokeTest
+                // 的同一防御 —— ptrace 受限环境下的无界 waitFor 会挂住整个测试任务。
+                val exited = proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                if (!exited) {
+                    runCatching { proc.destroyForcibly() }
+                    return false
+                }
+                proc.exitValue() == 0
             } catch (e: Throwable) {
                 false
             }
@@ -217,8 +255,8 @@ class UbuntuTerminalRuntimeWiringTest {
         File(layout.baseDir.value, "workspaces/default").apply { mkdirs() }
             .let { File(it, "marker.txt").writeText("bind-works") }
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -269,8 +307,8 @@ class UbuntuTerminalRuntimeWiringTest {
         argv.removeAt(argv.size - 1)
         argv.addAll(listOf("-c", "cat /workspace/marker.txt"))
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -295,8 +333,8 @@ class UbuntuTerminalRuntimeWiringTest {
             "echo persist-me > /root/PERSIST.txt && cat /root/PERSIST.txt && " +
                 "test -f /root/.bashrc && echo BASHRC-OK"))
 
-        val (adaptedArgv, guestEnv) = adaptForUpstreamProot(argv)
-        val exec = executorWith(guestEnv).execute(
+        val adaptedArgv = adaptForUpstreamProot(argv)
+        val exec = executorWith().execute(
             PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
             timeoutMs = 120_000
         )
@@ -317,44 +355,33 @@ class UbuntuTerminalRuntimeWiringTest {
         val argv2 = pty2.argvOf(nid2).toMutableList()
         argv2.removeAt(argv2.size - 1)
         argv2.addAll(listOf("-c", "cat /root/PERSIST.txt"))
-        val (a2, ge2) = adaptForUpstreamProot(argv2)
-        val exec2 = executorWith(ge2).execute(
+        val a2 = adaptForUpstreamProot(argv2)
+        val exec2 = executorWith().execute(
             PRootCommand(AbsolutePath(a2[0]), a2.drop(1)), timeoutMs = 120_000
         )
         assertTrue("second session sees home: '${exec2.stdout}'", exec2.stdout.contains("persist-me"))
     }
 
-    // ─── upstream proot 5.4 host adaptation（与 T72 E2E 相同的语义等价层）───
+    // ─── upstream proot host adaptation（与 T72 E2E 同层）───
 
-    private fun adaptForUpstreamProot(argv: List<String>): Pair<List<String>, Map<String, String>> {
-        val env = mutableMapOf<String, String>()
-        val out = mutableListOf<String>()
-        var i = 0
-        while (i < argv.size) {
-            val a = argv[i]
-            when {
-                a == "--" -> { /* upstream: no separator */ }
-                a == "--kill-on-exit" -> { /* Termux/5.2+ extension */ }
-                a == "-E" -> {
-                    val kv = argv[i + 1]
-                    val eq = kv.indexOf('=')
-                    if (eq > 0) env[kv.substring(0, eq)] = kv.substring(eq + 1)
-                    i++
-                }
-                else -> out.add(a)
-            }
-            i++
-        }
-        return out to env
+    /**
+     * T88：设备 argv 与上游（Debian/CI）proot 的唯一差异只剩两个 proot 选项：
+     * `--`（上游自研 argv 解析器不识别，Termux 补丁才支持）与 `--kill-on-exit`
+     * （一次性 exec 不需要）。**guest env 不再适配** —— env trampoline
+     * （`/usr/bin/env -i K=V … cmd`）在上游 proot 上原样合法且语义一致，
+     * 测试由此真正执行生产 argv 形状，而不是把 -E 偷偷搬到宿主 env 里
+     * （旧适配层正是 CI 全绿而设备炸 -E 的共犯）。
+     */
+    private fun adaptForUpstreamProot(argv: List<String>): List<String> {
+        return argv.filter { it != "--" && it != "--kill-on-exit" }
     }
 
-    private fun executorWith(adaptedEnv: Map<String, String>): ProotExecutor {
+    private fun executorWith(): ProotExecutor {
         val hostEnv = mutableMapOf<String, String>(
             "PROOT_NO_SECCOMP" to "1",
             "PATH" to "/usr/bin:/bin"
         )
         System.getenv("LD_LIBRARY_PATH")?.let { hostEnv["LD_LIBRARY_PATH"] = it }
-        hostEnv.putAll(adaptedEnv)
         return ProotExecutor(hostEnv = { hostEnv })
     }
 }

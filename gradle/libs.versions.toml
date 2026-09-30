@@ -20,6 +20,15 @@ junit = "4.13.2"
 room = "2.6.1"
 # 赛博霓虹悬浮球（JitPack；仅允许该 group 走 jitpack 仓库，版本固定避免动态解析）
 easyfloat = "2.0.4"
+# Liquid Glass 底层 —— Haze：GPU GraphicsLayer 背景采样 + RenderEffect 模糊（Maven Central）
+# 选型 1.4.0：字节码级验证 90 个 Compose 引用全部存在于本项目 Compose 1.7.6；
+# compileSdk 35 对齐；Kotlin 2.1.0 元数据对 2.0.21 消费端一版向前兼容。
+haze = "1.4.0"
+# Vico —— 开源图表库（Maven Central，稳定线 1.13.1）：任务历史/记忆统计可视化。
+# 选型 1.13.1（稳定版，非 2.x beta）：依赖 Compose 1.5+（本项目 1.7.6 向后兼容），
+# Kotlin 1.9 编译产物对 2.0.21 消费端零影响；仅引 compose 核心（不引 m2/m3 主题模块，
+# 避免与本项目 Material3 主题冲突）。
+vico = "1.13.1"
 
 [libraries]
 # Compose
@@ -67,12 +76,19 @@ work-runtime = { group = "androidx.work", name = "work-runtime-ktx", version.ref
 
 # Coil
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+coil-svg = { group = "io.coil-kt", name = "coil-svg", version.ref = "coil" }
 
 # Security
 security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "security-crypto" }
 
 # 赛博霓虹悬浮球（JitPack 发布，坐标 group 为 com.github.princekin-f）
 easyfloat = { group = "com.github.princekin-f", name = "EasyFloat", version.ref = "easyfloat" }
+
+# Liquid Glass 底层引擎（Maven Central，dev.chrisbanes.haze）—— ui/glass 包唯一底层依赖
+haze = { group = "dev.chrisbanes.haze", name = "haze", version.ref = "haze" }
+
+# Vico 开源图表库（Maven Central，稳定线 1.13.1）—— 任务历史/记忆统计可视化
+vico-compose = { group = "com.patrykandpatrick.vico", name = "compose", version.ref = "vico" }
 
 # Room
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }

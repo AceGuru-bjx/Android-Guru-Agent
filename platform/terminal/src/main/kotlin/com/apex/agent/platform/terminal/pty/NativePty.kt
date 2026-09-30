@@ -61,8 +61,14 @@ interface NativePty {
     /** Block until data is available or [timeoutMs] elapses. Returns true if data available. */
     fun nativeWaitForData(sessionId: Int, timeoutMs: Long): Boolean
 
-    /** Send a Unix signal (number) to the session's foreground process group. */
+    /** Send a Unix signal (number) to the session's whole process group (shell included). */
     fun nativeSendSignal(sessionId: Int, signal: Int): Boolean
+
+    /**
+     * T82：只信号前台作业组（tcgetpgrp）—— shell 不受影响。无前台作业/会话不存在
+     * → false（调用方退化到 session 级信号）。Ctrl-C 语义（打断当前命令、保留 shell）。
+     */
+    fun nativeSignalForegroundGroup(sessionId: Int, signal: Int): Boolean
 
     /** Resize the PTY (sends SIGWINCH to the child). */
     fun nativeResize(sessionId: Int, rows: Int, cols: Int): Boolean
@@ -78,6 +84,16 @@ interface NativePty {
      * For signal-killed processes, returns 128 + signalNumber.
      */
     fun nativeGetExitCode(sessionId: Int): Int
+
+    /**
+     * T87：execv 失败的确切原因（null/空 = exec 成功或会话不存在）。
+     *
+     * [nativeCreateSessionArgv] 返回后立即可查（native 构造期已通过 CLOEXEC
+     * 报告管道定论）。「创建成功但进程即死」的会话（真机 proot ENOENT/
+     * ELIBBAD/EACCES 等）由此获得确切根因，而不是让后续每次 write 的
+     * WriteFailed（EIO）当「输入失败」误导用户。
+     */
+    fun nativeGetSpawnError(sessionId: Int): String?
 
     /**
      * Block until the child exits or [timeoutMs] elapses. Returns the exit code, or -1 on timeout.

@@ -16,9 +16,11 @@ PtyEngine::~PtyEngine() {
     closeAll();
 }
 
-PtySession* PtyEngine::getSession(int id) {
+// T81 (N-1)：锁内拷贝 shared_ptr —— IO/信号/resize 一律锁外执行（见头文件注释）。
+std::shared_ptr<PtySession> PtyEngine::acquire(int id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = sessions_.find(id);
-    return (it != sessions_.end()) ? it->second.get() : nullptr;
+    return (it != sessions_.end()) ? it->second : nullptr;
 }
 
 int PtyEngine::createSession(const std::string& shell, const std::string& workDir,
@@ -43,37 +45,48 @@ int PtyEngine::createSessionArgv(const std::vector<std::string>& argv,
     int id = nextId_++;
     auto session = std::make_shared<PtySession>(id, argv, workDir, envVars, rows, cols);
     if (session->pid() <= 0) {
-        return -1; // 创建失败
+        return -1; // 创建失败（forkpty 失败）
     }
+    // T87：exec 失败的会话仍登记（spawnError 可查、可显式 close），
+    // 由 Kotlin 层 createFromSpec 紧接着 nativeGetSpawnError 探测并失败。
     sessions_[id] = std::move(session);
-    LOGI("Created session %d (total active: %zu)", id, sessions_.size());
+    LOGI("Created session %d (total active: %zu)%s", id, sessions_.size(),
+         sessions_[id]->spawnFailed() ? " [SPAWN-ERROR]" : "");
     return id;
 }
 
+// T87：exec 失败原因（空串 = 成功/未知）。
+std::string PtyEngine::spawnError(int sessionId) {
+    auto s = acquire(sessionId);
+    return s ? s->spawnError() : "";
+}
+
 bool PtyEngine::write(int sessionId, const char* data, size_t len) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    // T81 (N-1)：IO 移出全局锁 —— 原实现持 engine mutex_ 调用 session->write，
+    // session A 的写退避（EASON 最多 200ms）会阻塞所有其他 session 的一切
+    // IO/控制操作，多 session 并发被单锁串行化。PtySession 自身的 ioMutex_
+    // 保证 per-session 串行语义不变。
+    auto s = acquire(sessionId);
     return s ? s->write(data, len) : false;
 }
 
 bool PtyEngine::writeLine(int sessionId, const std::string& line) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->writeLine(line) : false;
 }
 
 std::string PtyEngine::read(int sessionId, int maxBytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->read(maxBytes) : "";
 }
 
 // ReadOutcome 声明于 apex 命名空间作用域（pty_engine.h:28），
 // 而非 PtyEngine 的嵌套类型 —— 此处不得写 PtyEngine::ReadOutcome。
 ReadOutcome PtyEngine::readEx(int sessionId, int maxBytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // T81 (N-1)：read 移出全局锁（同 write）。readEx 可能读满 64KB ——
+    // 持锁期间其他 session 全部 IO 被阻塞（多 session 并发吞吐瓶颈根因）。
+    auto s = acquire(sessionId);
     ReadOutcome out;
-    auto* s = getSession(sessionId);
     if (!s) {
         out.status = PTY_READ_SESSION_NOT_FOUND;
         return out;
@@ -86,53 +99,47 @@ ReadOutcome PtyEngine::readEx(int sessionId, int maxBytes) {
 }
 
 bool PtyEngine::hasData(int sessionId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->hasData() : false;
 }
 
 bool PtyEngine::waitForData(int sessionId, int timeoutMs) {
     // 不持锁等待，避免阻塞其他操作。
-    // P70 生命周期加固：锁内拷贝 shared_ptr（而不是裸指针）再锁外使用 ——
+    // P70 生命周期加固 / T81 (N-1)：acquire 锁内拷贝 shared_ptr 后锁外等待 ——
     // closeSession 可能在此期间从 map 摘除并触发 close/析构，shared_ptr
     // 保证等待期间对象存活（close 只把 fd 置 -1，select 随即返回假）。
-    std::shared_ptr<PtySession> session;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = sessions_.find(sessionId);
-        if (it == sessions_.end()) return false;
-        session = it->second;
-    }
+    auto session = acquire(sessionId);
     return session ? session->waitForData(timeoutMs) : false;
 }
 
 bool PtyEngine::sendSignal(int sessionId, int signal) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->sendSignal(signal) : false;
 }
 
+// T82：只信号前台作业组（不碰 shell 组）—— Ctrl-C 语义保 shell 存活。
+bool PtyEngine::signalForeground(int sessionId, int signal) {
+    auto s = acquire(sessionId);
+    return s ? s->signalForegroundGroup(signal) : false;
+}
+
 void PtyEngine::resize(int sessionId, int rows, int cols) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     if (s) s->resize(rows, cols);
 }
 
 bool PtyEngine::isAlive(int sessionId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->isAlive() : false;
 }
 
 int PtyEngine::getPid(int sessionId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->pid() : -1;
 }
 
 int PtyEngine::getExitCode(int sessionId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto* s = getSession(sessionId);
+    auto s = acquire(sessionId);
     return s ? s->exitCode() : -1;
 }
 

@@ -35,12 +35,10 @@ import androidx.room.PrimaryKey
         Index(value = ["source_node_id"]),
         Index(value = ["target_node_id"]),
         Index(value = ["type"]),
-        // 修复：v2→v3 迁移创建的 (episode_id, edge_label) 唯一索引必须在此声明，
-        // 否则升级用户：迁移后校验发现"未声明索引"→ IllegalStateException；
-        // 全新安装：Room 按实体建表，唯一索引不存在 → upsertAll REPLACE
-        // 幂等去重失效，边表随帧重复膨胀。索引名须与 Room 默认命名
-        // index_edges_episode_id_edge_label 一致（迁移 SQL 已同步对齐）。
-        Index(value = ["episode_id", "edge_label"], unique = true)
+        // P1 fix（审计 6-b）：声明 v3 迁移创建的 (episode_id, edge_label) 唯一索引。
+        // 显式 name 与 MIGRATION_2_3/MIGRATION_3_4 的建索引语句逐字一致 —— 缺此声明时
+        // 升级库校验失败（多出未声明索引）、全新装机又缺该索引（upsert 幂等去重失效）。
+        Index(value = ["episode_id", "edge_label"], unique = true, name = "index_edges_episode_label")
     ]
 )
 data class EdgeEntity(

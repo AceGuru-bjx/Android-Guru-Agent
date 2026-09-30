@@ -19,8 +19,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.apex.agent.R
 
 /**
  * 顶部上下文仪表盘长条。
@@ -31,10 +33,11 @@ import androidx.compose.ui.unit.dp
  *   - 60-80% 警告（橙）
  *   - >80%  危险（粉/红）
  *
- * 点击长条弹出仪表盘菜单：token 详细数据 + 主动压缩按钮。
+ * 点击长条弹出仪表盘菜单：token 详细数据（含会话累计真实消耗）+ 主动压缩按钮。
  *
- * @param usedTokens 当前占用 token（分子）
+ * @param usedTokens 当前占用 token（分子；服务端真实统计优先，无则启发式估算）
  * @param maxTokens  上下文上限 token（分母，<=0 时视为 1 防除零）
+ * @param sessionTotalTokens 会话累计消耗 token（多轮真实 usage 累加；<=0 = 端点未返回统计，行隐藏）
  * @param onCompress 主动压缩回调（接 AgentChatViewModel.compressNow）
  */
 @Composable
@@ -42,6 +45,7 @@ fun ContextMeterBar(
     usedTokens: Int,
     maxTokens: Int,
     onCompress: () -> Unit,
+    sessionTotalTokens: Long = 0,
     modifier: Modifier = Modifier
 ) {
     val safeMax = if (maxTokens <= 0) 1 else maxTokens
@@ -61,70 +65,85 @@ fun ContextMeterBar(
         animationSpec = tween(durationMillis = 400),
         label = "meter_ratio"
     )
-    // 危险态（>80%）脉冲辉光，增强告警未来感
-    val pulse by rememberInfiniteTransition(label = "meter_pulse").animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-        label = "glow_alpha"
-    )
-    val glowAlpha = if (percent >= 80) pulse else 0.5f
+    // 危险态（>80%）脉冲辉光，增强告警未来感。
+    // P3-f（6-c）：infinite transition 移入危险态分支组合——正常/警告态下不再常驻
+    // 无限动画（原先每个空闲帧都在跑），仅 >=80% 时才启动脉冲。
+    val glowAlpha = if (percent >= 80) {
+        val pulse by rememberInfiniteTransition(label = "meter_pulse").animateFloat(
+            initialValue = 0.35f,
+            targetValue = 0.7f,
+            animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+            label = "glow_alpha"
+        )
+        pulse
+    } else 0.5f
 
+    // ═══ 高度收紧（用户反馈「上面那一部分太高」）：整条从 48dp 点击槽位压到 20dp。═══
+    // 顶栏纵向叠了 TopAppBar(64) + 本条 + 模式栏(~52)，此前本条以「48dp 最小触摸目标」
+    // 占位把顶部推到 ~164dp。全宽长条的触摸面积远超 48x48dp（宽度补偿高度，
+    // Material 无障碍对超宽元素允许 <48dp 高度），仪表盘是辅助诊断入口而非高频操作。
     Column(modifier = modifier.fillMaxWidth()) {
         // ═══ 顶部长条（点击弹仪表盘）═══
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(10.dp)
-                .padding(horizontal = 12.dp, vertical = 1.dp)
-                .clickable { menuExpanded = true }
+                .height(20.dp)
+                .clickable { menuExpanded = true },
+            contentAlignment = Alignment.Center
         ) {
-            // 未使用段（暗灰半透明，占满）
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(5.dp)
-                    )
-            )
-            // 已用段（霓虹辉光 + 渐变实体 + 末端亮点，按真实比例）
-            if (animatedRatio > 0f) {
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .padding(horizontal = 12.dp)
+            ) {
+                // 未使用段（暗灰半透明，占满）—— 4dp 细条配 2dp 圆角
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(animatedRatio)
-                        .fillMaxHeight()
-                ) {
-                    // 辉光层：同色放大 + 原生 blur（零依赖霓虹弥散）
+                        .fillMaxSize()
+                        .background(
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(2.dp)
+                        )
+                )
+                // 已用段（霓虹辉光 + 渐变实体 + 末端亮点，按真实比例）
+                if (animatedRatio > 0f) {
                     Box(
                         modifier = Modifier
-                            .matchParentSize()
-                            .blur(7.dp)
-                            .background(color = accent.copy(alpha = glowAlpha))
-                    )
-                    // 实体段：横向渐变（中心亮→边缘微暗）增加体积感
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(
-                                brush = Brush.horizontalGradient(
-                                    colors = listOf(
-                                        accent.copy(alpha = 0.85f),
-                                        accent,
-                                        accent.copy(alpha = 0.9f)
-                                    )
-                                ),
-                                shape = RoundedCornerShape(5.dp)
-                            )
-                    )
-                    // 末端高光点（能量流头部）
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .size(6.dp)
-                            .blur(2.dp)
-                            .background(color = Color.White.copy(alpha = 0.9f))
-                    )
+                            .fillMaxWidth(animatedRatio)
+                            .fillMaxHeight()
+                    ) {
+                        // 辉光层：同色放大 + 原生 blur（零依赖霓虹弥散）
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .blur(7.dp)
+                                .background(color = accent.copy(alpha = glowAlpha))
+                        )
+                        // 实体段：横向渐变（中心亮→边缘微暗）增加体积感
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .background(
+                                    brush = Brush.horizontalGradient(
+                                        colors = listOf(
+                                            accent.copy(alpha = 0.85f),
+                                            accent,
+                                            accent.copy(alpha = 0.9f)
+                                        )
+                                    ),
+                                    shape = RoundedCornerShape(2.dp)
+                                )
+                        )
+                        // 末端高光点（能量流头部）
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(6.dp)
+                                .blur(2.dp)
+                                .background(color = Color.White.copy(alpha = 0.9f))
+                        )
+                    }
                 }
             }
         }
@@ -135,7 +154,7 @@ fun ContextMeterBar(
             onDismissRequest = { menuExpanded = false }
         ) {
             Text(
-                text = "上下文仪表盘",
+                text = stringResource(R.string.context_dashboard),
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
@@ -143,15 +162,22 @@ fun ContextMeterBar(
             HorizontalDivider()
 
             // token 详细数据
-            DashboardRow(label = "已用 Token", value = "$usedTokens")
-            DashboardRow(label = "上下文上限", value = "$safeMax")
-            DashboardRow(label = "占用比例", value = "$percent%")
+            DashboardRow(label = stringResource(R.string.context_used_tokens), value = "$usedTokens")
+            DashboardRow(label = stringResource(R.string.context_max_tokens), value = "$safeMax")
+            DashboardRow(label = stringResource(R.string.context_usage_ratio), value = "$percent%")
+            // 会话累计真实消耗（服务端返回统计的端点才有；未返回则隐藏本行）
+            if (sessionTotalTokens > 0) {
+                DashboardRow(
+                    label = stringResource(R.string.context_session_total_tokens),
+                    value = "$sessionTotalTokens"
+                )
+            }
             DashboardRow(
-                label = "状态",
+                label = stringResource(R.string.context_status),
                 value = when {
-                    percent >= 80 -> "危险"
-                    percent >= 60 -> "警告"
-                    else -> "正常"
+                    percent >= 80 -> stringResource(R.string.context_status_danger)
+                    percent >= 60 -> stringResource(R.string.context_status_warning)
+                    else -> stringResource(R.string.context_status_normal)
                 }
             )
 
@@ -159,7 +185,7 @@ fun ContextMeterBar(
 
             // 主动压缩按钮
             DropdownMenuItem(
-                text = { Text("压缩上下文") },
+                text = { Text(stringResource(R.string.context_compress)) },
                 leadingIcon = {
                     Icon(
                         Icons.Default.Compress,
@@ -173,7 +199,7 @@ fun ContextMeterBar(
                 }
             )
             Text(
-                text = "自动压缩在占用超阈值时由引擎触发",
+                text = stringResource(R.string.context_compress_hint),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)

@@ -106,16 +106,61 @@ jobs:
             $(find core/agent-engine/src/main/kotlin -name "*.kt") \
             -jvm-target 17
 
+      - name: Compile core:code-tools (Coding 模式工具集)
+        run: |
+          SER_PLUGIN=$HOME/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar
+          CLASSPATH="$(find /tmp/apex-libs -name '*.jar' | tr '\n' ':')/tmp/build/tool-registry:/tmp/build/llm-adapter:/tmp/build/logging"
+          kotlinc -Xplugin=$SER_PLUGIN -cp "$CLASSPATH" -d /tmp/build/code-tools \
+            $(find core/code-tools/src/main/kotlin -name "*.kt") \
+            -jvm-target 17
+
+      - name: Compile core:code-engine (Coding 模式引擎)
+        run: |
+          SER_PLUGIN=$HOME/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar
+          CLASSPATH="$(find /tmp/apex-libs -name '*.jar' | tr '\n' ':')/tmp/build/agent-engine:/tmp/build/tool-registry:/tmp/build/llm-adapter:/tmp/build/logging"
+          kotlinc -Xplugin=$SER_PLUGIN -cp "$CLASSPATH" -d /tmp/build/code-engine \
+            $(find core/code-engine/src/main/kotlin -name "*.kt") \
+            -jvm-target 17
+
+      - name: Compile platform:code-workspace (编码工作区管理)
+        run: |
+          SER_PLUGIN=$HOME/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar
+          CLASSPATH="$(find /tmp/apex-libs -name '*.jar' | tr '\n' ':')/tmp/build/code-tools:/tmp/build/logging"
+          kotlinc -Xplugin=$SER_PLUGIN -cp "$CLASSPATH" -d /tmp/build/code-workspace \
+            $(find platform/code-workspace/src/main/kotlin -name "*.kt") \
+            -jvm-target 17
+
       - name: Check tool ID uniqueness
         run: |
-          IDS=$(grep -rh "override val id = " core/tool-registry/src/main/kotlin/ platform/terminal/src/main/kotlin/ | sort | uniq -d)
+          # Tool System v2: also covers app/src/main (app-level tool classes —
+          # github/csmem/browser/ask_user — must not collide with core ids).
+          # T86 修复：旧 grep 对整行做 uniq -d —— `override val id = PROVIDER_ID`
+          # 这类**常量引用**在不同类里字面相同（main 的 SearchProvider 系列），
+          # 被误判"重复"。语义 id 的唯一性只对**字面字符串声明**有判定意义：
+          # 常量引用的真实值在伴生对象里（PROVIDER_ID = "brave" 等），
+          # 本步骤改为对引用形式解析出常量值后再查重。
+          #
+          # 1) 字面声明：id = "literal" → 直接收集
+          # 2) 常量引用：id = CONST → 在同文件找 `const val CONST = "value"`
+          extract_ids() {
+            grep -rn "override val id = " "$1" | while IFS=: read -r file line rest; do
+              ref=$(echo "$rest" | sed -n 's/.*override val id = \([A-Z_][A-Z0-9_]*\)\s*$/\1/p' | tr -d ' ')
+              if [ -n "$ref" ]; then
+                val=$(grep -h "const val $ref = " "$file" | head -1 | sed 's/.*= *"\(.*\)".*/\1/')
+                echo "CONST_REF:${ref}=${val}"
+              else
+                echo "$rest" | sed -n 's/.*override val id = *"\(.*\)".*/LITERAL:\1/p'
+              fi
+            done
+          }
+          IDS=$( { extract_ids core/tool-registry/src/main/kotlin/; extract_ids platform/terminal/src/main/kotlin/; extract_ids app/src/main/kotlin/; } | sort | uniq -d)
           if [ -n "$IDS" ]; then
             echo "❌ Duplicate tool IDs found:"
             echo "$IDS"
             exit 1
           fi
-          TOTAL=$(grep -rh "override val id = " core/tool-registry/src/main/kotlin/ platform/terminal/src/main/kotlin/ | wc -l)
-          echo "✅ $TOTAL unique tool IDs, no duplicates"
+          TOTAL=$(grep -rh "override val id = " core/tool-registry/src/main/kotlin/ platform/terminal/src/main/kotlin/ app/src/main/kotlin/ | wc -l)
+          echo "✅ $TOTAL tool id declarations, no semantic duplicates"
 
       - name: Check duplicate classes
         run: |
@@ -127,36 +172,17 @@ jobs:
             echo "✅ No duplicate class names"
           fi
 
-      - name: Check brace balance
+      - name: Check bracket balance (lexer-aware)
         run: |
+          # 裸 grep 计数会把字符串内括号与注释枚举半括号计入统计造成假阳性。
+          # scripts/kotlin_balance.py 用 Kotlin 词法状态机剥离注释/字符串/raw 串/
+          # 字符串模板/反引号标识符后统计 ( ) { } —— 语法性真失衡仍然必报。
           FAIL=0
-          for f in $(find . -name "*.kt" -not -path "./.git/*" -not -path "./build/*"); do
-            OPENS=$(grep -o '{' "$f" | wc -l)
-            CLOSES=$(grep -o '}' "$f" | wc -l)
-            if [ "$OPENS" != "$CLOSES" ]; then
-              echo "❌ $f: $OPENS { vs $CLOSES }"
-              FAIL=1
-            fi
+          for f in $(find . -name "*.kt" -not -path "./.git/*" -not -path "./build/*" -not -path "*/build/*"); do
+            RESULT=$(python3 scripts/kotlin_balance.py "$f" 2>&1) || { echo "$RESULT"; FAIL=1; }
           done
           if [ $FAIL -eq 0 ]; then
-            echo "✅ All .kt files have balanced braces {}"
-          else
-            exit 1
-          fi
-
-      - name: Check paren balance
-        run: |
-          FAIL=0
-          for f in $(find . -name "*.kt" -not -path "./.git/*" -not -path "./build/*"); do
-            OPENS=$(grep -o '(' "$f" | wc -l)
-            CLOSES=$(grep -o ')' "$f" | wc -l)
-            if [ "$OPENS" != "$CLOSES" ]; then
-              echo "❌ $f: $OPENS ( vs $CLOSES )"
-              FAIL=1
-            fi
-          done
-          if [ $FAIL -eq 0 ]; then
-            echo "✅ All .kt files have balanced parens ()"
+            echo "✅ All .kt files have balanced parens () and braces {} (comments/strings stripped)"
           else
             exit 1
           fi
@@ -177,10 +203,21 @@ jobs:
             echo "⚠️ sha256sum unavailable — skipping digest verification"
           fi
 
+      - name: Compile platform:mcp-host (reverse MCP host)
+        run: |
+          # #173 逆向 MCP Host：手机作为 MCP Server（streamable HTTP 子集）。
+          # 纯 Kotlin JVM（ServerSocket + 协程 + kotlinx.serialization，零新第三方依赖），
+          # 依赖 tool-registry（其自身依赖 llm-adapter，一并提供）。
+          SER_PLUGIN=$HOME/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar
+          CLASSPATH="$(find /tmp/apex-libs -name '*.jar' | tr '\n' ':')/tmp/build/tool-registry:/tmp/build/llm-adapter"
+          kotlinc -Xplugin=$SER_PLUGIN -cp "$CLASSPATH" -d /tmp/build/mcp-host \
+            $(find platform/mcp-host/src/main/kotlin -name "*.kt") \
+            -jvm-target 17
+
   app-compile:
     name: App Module Compile (Android SDK + Gradle)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -285,6 +322,16 @@ jobs:
           tail -30 compile.log
           exit 1
 
+      - name: Run app unit tests
+        run: |
+          # app 模块 JVM 单测首次进入 CI：此前该任务从未在远端执行，
+          # 导致 BrowserTracerTest 缺 import / RetryPolicyTest 嵌套 runTest /
+          # SlashCommandParserTest 期望矛盾三类损坏长期隐形（本地 61/61 绿）。
+          ./gradlew :app:testDebugUnitTest \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
       - name: Install proot 5.4 (for T72 E2E + P71 smoke tests)
         # T72: UbuntuRootfsEndToEndIntegrationTest downloads the REAL Ubuntu
         # 24.04.4 amd64 archive and runs REAL proot processes against it
@@ -318,6 +365,19 @@ jobs:
             -Pkotlin.incremental=false \
             --stacktrace
 
+      - name: Run terminal-emulator + terminal-view unit tests (T88)
+        run: |
+          # T88 缺口修复：terminal-emulator 的 VT 引擎测试（v0.3 234+ 项：
+          # 边距/DECRQM/OSC 10-12/reflow/session 序列化/字符集/DCS/DECALN）
+          # 此前从未进 CI（只在本地 kotlinc+JUnitCore 跑）—— proot -E 事故的
+          # 教训是"没进 CI 的验证等于不存在"。terminal-view（T88 新模块，Termux
+          # 级 View 渲染层）的 148 项纯 JVM 逻辑测试（滚动模型/选区/手势/键映射/
+          # 调色板解析/样式折叠/网格几何）同批纳入。
+          ./gradlew :terminal-emulator:testDebugUnitTest :terminal-view:testDebugUnitTest \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
       - name: Compile platform:terminal instrumentation tests (P70 real-JNI PTY)
         run: |
           # P70: NativePtyJniInstrumentationTest exercises the real forkpty/JNI
@@ -334,6 +394,26 @@ jobs:
           # A68.1 — Task Execution Orchestrator state-machine + loop + timeout +
           # cancellation tests. Pure JVM (no Android), uses FakeLlmClient + FakeToolExecutor.
           ./gradlew :core:agent-engine:test \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
+      - name: Run core:code-tools unit tests (Coding 模式工具集)
+        run: |
+          # Coding 模式 v0.2：code_* 工具 + 诊断引擎（#148 进程内 LSP 诊断回注
+          # 的 CodeDiagnostics / 5 Provider / CodeCheckTool / 编辑回注链路）。
+          # Pure JVM。本地 kotlinc+JUnitCore 已验证 37/37；进 CI 防回归。
+          ./gradlew :core:code-tools:test \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
+      - name: Run core:code-engine unit tests (Coding 模式引擎)
+        run: |
+          # Coding 模式 v0.2：#147 子代理（SubAgentRunner 事件收集/超时/并发
+          # 闸门 + CodeTaskTool 参数解析 + allowedToolIds 通道规格断言）。
+          # Pure JVM（脚本化假引擎，无 Android 依赖）。
+          ./gradlew :core:code-engine:test \
             --no-daemon \
             -Pkotlin.incremental=false \
             --stacktrace
@@ -396,6 +476,15 @@ jobs:
 
       - name: Generate Gradle wrapper
         run: gradle wrapper --gradle-version 8.10
+
+      - name: Stage bundled Ubuntu rootfs (T83 内置交付)
+        run: |
+          # T83：Ubuntu rootfs 随 APK 内置（应用内下载安装已移除）。
+          # 构建期拉取 → 双重 SHA-256 校验 → 暂存为 jniLibs 伪 .so。
+          # 失败即阻断构建 —— 绝不打包指纹不符的 rootfs。
+          # T84：PR CI 只验证 arm64 打包链（--arch）—— tag 发布（universal，
+          # 全 3 ABI）在 apk.yml 走全量路径；每 PR 省 2/3 rootfs 流量。
+          scripts/fetch_rootfs.sh --arch arm64-v8a
 
       - name: Prewarm dependencies (retry on JitPack flakiness)
         run: |

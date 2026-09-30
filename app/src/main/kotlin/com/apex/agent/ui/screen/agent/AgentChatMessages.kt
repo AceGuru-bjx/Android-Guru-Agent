@@ -6,7 +6,9 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,11 +22,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,15 +40,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -51,38 +61,106 @@ import androidx.compose.ui.unit.dp
 import com.apex.agent.ui.component.MarkdownText
 import com.apex.agent.ui.component.MessageAttachmentList
 import com.apex.agent.ui.theme.LocalShowTimestamps
+import kotlinx.coroutines.delay
 import java.time.format.DateTimeFormatter
+import java.util.Locale
+import com.apex.agent.R
 
 // ═══ 消息组件 ═══
 
+/**
+ * 单条消息渲染入口（按 AgentUiMessage 类型分发到对应气泡 / 卡片）。
+ */
 @Composable
 internal fun AgentMessageItem(
     message: AgentUiMessage,
     vm: AgentChatViewModel,
+    // UX-1：消息操作菜单门禁（流式生成中禁用删除/重生成，复制仍可用）。
+    actionsEnabled: Boolean = true,
+    // #169：Plan 模式当前执行步骤（锁定计划卡高亮用；-1 = 非步骤执行中）。
+    currentStepIndex: Int = -1,
     onImageClick: (MessageAttachment) -> Unit = {},
-    onFileClick: (MessageAttachment) -> Unit = {}
+    onFileClick: (MessageAttachment) -> Unit = {},
+    // 多模态输出：Agent 回复 markdown 里的生成图片点击 → Lightbox（URL/data URI）。
+    onMarkdownImageClick: (String) -> Unit = {},
+    // 任务总结卡显隐（设置 showRunSummary；false 时 RunSummary 完全不渲染、不占位）。
+    showRunSummary: Boolean = true,
+    // HTML 产物预览：工具卡预览钮回调（宿主绝对路径）→ 应用内 WebView。
+    onPreviewHtml: (String) -> Unit = {}
 ) {
     when (message) {
-        is AgentUiMessage.User -> UserBubble(message, onImageClick, onFileClick)
+        is AgentUiMessage.User -> UserBubble(
+            message = message,
+            actionsEnabled = actionsEnabled,
+            onDelete = { vm.deleteMessage(message.id) },
+            onDeleteFrom = { vm.deleteMessagesFrom(message.id) },
+            onImageClick = onImageClick,
+            onFileClick = onFileClick
+        )
         is AgentUiMessage.Agent -> AgentBubble(
             message = message,
-            onOrganize = { text -> vm.organizeToMemory(text) }
+            actionsEnabled = actionsEnabled,
+            onOrganize = { text -> vm.organizeToMemory(text) },
+            onRegenerate = { vm.regenerateResponse(message.id) },
+            onDelete = { vm.deleteMessage(message.id) },
+            onDeleteFrom = { vm.deleteMessagesFrom(message.id) },
+            onImageClick = onMarkdownImageClick
         )
-        is AgentUiMessage.ToolCall -> ToolCallCard(
-            toolCall = message,
-            onRetry = retryLastUser(vm)
-        )
+        is AgentUiMessage.ToolCall -> {
+            // HTML 产物检测：成功写入 .html 的调用给卡头挂「预览」钮（一次解析，按卡缓存）。
+            val htmlPath = remember(message.id, message.success) {
+                HtmlArtifactDetector.extractHtmlPath(message.toolName, message.args)
+                    ?.let { vm.resolveHtmlPreviewPath(it) }
+            }
+            ToolCallCard(
+                toolCall = message,
+                onRetry = retryLastUser(vm),
+                // UX-1 同款门禁：流式生成中重试会取消在途轮次（旧工具卡悬挂 + 部分回复丢失）
+                retryEnabled = actionsEnabled,
+                htmlPreviewPath = htmlPath,
+                onPreviewHtml = onPreviewHtml
+            )
+        }
         is AgentUiMessage.System -> SystemMessage(message.text)
         is AgentUiMessage.PipelineBanner -> PipelineBannerCard(message)
         is AgentUiMessage.StepMarker -> StepMarkerCard(message)
-        is AgentUiMessage.RunSummary -> RunSummaryCard(message)
+        // 任务总结卡：默认隐藏（showRunSummary=false 时完全不渲染，不占空间）
+        // 收尾新增复制入口：一键复制本轮最后一条 Agent 回复（无回复时回退总结文本）。
+        is AgentUiMessage.RunSummary -> if (showRunSummary) {
+            val clipboard = LocalClipboardManager.current
+            val context = LocalContext.current
+            val copiedToast = stringResource(R.string.chat_copied)
+            RunSummaryCard(
+                summary = message,
+                onCopy = {
+                    val lastAgentText = vm.uiState.value.messages
+                        .asSequence()
+                        .takeWhile { it.id != message.id }
+                        .filterIsInstance<AgentUiMessage.Agent>()
+                        .lastOrNull { !it.isPartial }
+                        ?.text
+                        ?: message.summary
+                    if (lastAgentText.isNotBlank()) {
+                        clipboard.setText(AnnotatedString(lastAgentText))
+                        Toast.makeText(context, copiedToast, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
         is AgentUiMessage.Error -> ErrorBlock(
             message = message.message,
             canRetry = message.canRetry,
-            onRetry = retryLastUser(vm)
+            onRetry = retryLastUser(vm),
+            // UX-1 同款门禁：菜单项有门禁而重试 Chip 没有 —— 流式中可点，
+            // 取消在途轮次后旧错误卡仍残留、引擎上下文重复收到同一用户文本
+            retryEnabled = actionsEnabled
         )
-        is AgentUiMessage.ThinkingMessage -> ThinkingBubble(message.thought, finished = true)
-        is AgentUiMessage.PlanMessage -> PlanCard(message.plan)
+        is AgentUiMessage.ThinkingMessage -> ThinkingBubble(
+            text = message.thought,
+            finished = true,
+            durationMs = message.durationMs
+        )
+        is AgentUiMessage.PlanMessage -> PlanCard(message.plan, currentStepIndex = currentStepIndex)
         is AgentUiMessage.SpecMessage -> SpecCard(message.spec)
         is AgentUiMessage.ReflectionReviewMessage -> ReflectionReviewBlock(message.text)
     }
@@ -98,9 +176,14 @@ internal fun retryLastUser(vm: AgentChatViewModel): () -> Unit = {
     lastUser?.let { vm.retry(it.text, it.attachments) }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun UserBubble(
     message: AgentUiMessage.User,
+    // UX-1：消息操作菜单（门禁 + 回调；默认空实现保持既有调用兼容）。
+    actionsEnabled: Boolean = true,
+    onDelete: () -> Unit = {},
+    onDeleteFrom: () -> Unit = {},
     onImageClick: (MessageAttachment) -> Unit = {},
     onFileClick: (MessageAttachment) -> Unit = {}
 ) {
@@ -111,6 +194,9 @@ internal fun UserBubble(
                 .toLocalDateTime()
         )
     }
+    // UX-1：气泡菜单状态。入口两处：头部（非文本区域）长按 + 头部 overflow 钮；
+    // 文本区长按仍归 SelectionContainer 选择，互不冲突。
+    var menuExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End
@@ -121,11 +207,16 @@ internal fun UserBubble(
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                // 角色标识 + 时间戳
+                // 角色标识 + 时间戳 + overflow 菜单入口（长按本行 = 非文本区域长按）
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.padding(bottom = 6.dp)
+                    modifier = Modifier
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = { menuExpanded = true }
+                        )
+                        .padding(bottom = 6.dp)
                 ) {
                     Text(
                         text = "YOU",
@@ -142,6 +233,29 @@ internal fun UserBubble(
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
+                        )
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { menuExpanded = true },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = stringResource(R.string.chat_cd_message_actions),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        MessageActionsMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                            copyText = message.text,
+                            showRegenerate = false,
+                            actionsEnabled = actionsEnabled,
+                            onRegenerate = {},
+                            onDelete = onDelete,
+                            onDeleteFrom = onDeleteFrom
                         )
                     }
                 }
@@ -171,13 +285,26 @@ internal fun UserBubble(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun AgentBubble(
     message: AgentUiMessage.Agent,
     onOrganize: (String) -> Unit,
+    // UX-1：消息操作菜单（门禁 + 回调；默认空实现保持既有调用兼容）。
+    actionsEnabled: Boolean = true,
+    onRegenerate: () -> Unit = {},
+    onDelete: () -> Unit = {},
+    onDeleteFrom: () -> Unit = {},
+    // 多模态输出：markdown 生成图片点击 → Lightbox。
+    onImageClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    // i18n：Toast 文案在组合内预取（onClick 非组合上下文，不能直接 stringResource）
+    val copiedToast = stringResource(R.string.chat_copied)
+    // UX-1：气泡菜单状态。入口两处：头部（非文本区域）长按 + 头部 overflow 钮；
+    // 文本区长按仍归 SelectionContainer 选择，互不冲突。
+    var menuExpanded by remember { mutableStateOf(false) }
     val timeStr = remember(message.timestamp) {
         DateTimeFormatter.ofPattern("HH:mm").format(
             java.time.Instant.ofEpochMilli(message.timestamp)
@@ -186,7 +313,12 @@ internal fun AgentBubble(
         )
     }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            // v1.4.4 #8 无障碍：完成回复的 liveRegion —— TalkBack 在新气泡出现时
+            // 主动播报（流式增量不设 liveRegion，避免每 token 一次的爆音轰炸；
+            // 完成态整条播报一次即足够的上下文）。
+            .semantics { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.Start
     ) {
         val outlineVariant = MaterialTheme.colorScheme.outlineVariant
@@ -196,19 +328,35 @@ internal fun AgentBubble(
             modifier = Modifier
                 .widthIn(max = 340.dp)
                 .drawBehind {
-                    drawRoundRect(
+                    // 精修：描边逐角匹配气泡 shape (4,18,18,18)（原统一 14dp 圆角，顶部小角处描边悬空）
+                    drawPath(
+                        path = Path().apply {
+                            addRoundRect(
+                                RoundRect(
+                                    left = 0f, top = 0f, right = size.width, bottom = size.height,
+                                    topLeftCornerRadius = CornerRadius(4.dp.toPx()),
+                                    topRightCornerRadius = CornerRadius(18.dp.toPx()),
+                                    bottomRightCornerRadius = CornerRadius(18.dp.toPx()),
+                                    bottomLeftCornerRadius = CornerRadius(18.dp.toPx())
+                                )
+                            )
+                        },
                         color = outlineVariant,
-                        style = Stroke(width = 1.dp.toPx()),
-                        cornerRadius = CornerRadius(14.dp.toPx())
+                        style = Stroke(width = 1.dp.toPx())
                     )
                 }
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                // 头像 + 角色标识 + 时间戳
+                // 头像 + 角色标识 + 时间戳 + overflow 菜单入口（长按本行 = 非文本区域长按）
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(bottom = 6.dp)
+                    modifier = Modifier
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = { menuExpanded = true }
+                        )
+                        .padding(bottom = 6.dp)
                 ) {
                     Surface(
                         color = MaterialTheme.colorScheme.primaryContainer,
@@ -240,14 +388,37 @@ internal fun AgentBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Box {
+                        IconButton(
+                            onClick = { menuExpanded = true },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = stringResource(R.string.chat_cd_message_actions),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        MessageActionsMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                            copyText = message.text,
+                            showRegenerate = true,
+                            actionsEnabled = actionsEnabled,
+                            onRegenerate = onRegenerate,
+                            onDelete = onDelete,
+                            onDeleteFrom = onDeleteFrom
+                        )
+                    }
                 }
 
-                // 正文（Markdown 渲染：支持代码块 / 行内代码 / 粗体 / 列表）
+                // 正文（Markdown 渲染：支持代码块 / 行内代码 / 粗体 / 列表 / 图片 / 视频 / 链接）
                 SelectionContainer {
-                    MarkdownText(markdown = message.text)
+                    MarkdownText(markdown = message.text, onImageClick = onImageClick)
                 }
 
-                // 操作行：复制 / 整理到记忆（UI 占位，暂未接入 CS-Mem 后端）
+                // 操作行：复制 / 整理到记忆（已接入 CS-Mem 后端）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -258,27 +429,27 @@ internal fun AgentBubble(
                     IconButton(
                         onClick = {
                             clipboard.setText(AnnotatedString(message.text))
-                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, copiedToast, Toast.LENGTH_SHORT).show()
                         },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "复制",
+                            contentDescription = stringResource(R.string.chat_cd_copy),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp)
                         )
                     }
                     IconButton(
                         onClick = {
-                            Toast.makeText(context, "已整理到记忆", Toast.LENGTH_SHORT).show()
+                            // 修复：整理入记忆不再“发起即报成功”——结果反馈由 VM 异步链路决定（原失败也提示已整理）
                             onOrganize(message.text)
                         },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Psychology,
-                            contentDescription = "整理到记忆",
+                            contentDescription = stringResource(R.string.chat_cd_organize_memory),
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp)
                         )
@@ -290,7 +461,11 @@ internal fun AgentBubble(
 }
 
 @Composable
-internal fun StreamingResponseBubble(text: String) {
+internal fun StreamingResponseBubble(
+    text: String,
+    // 多模态输出：流式期间生成的图片点击 → Lightbox（与完成态行为一致）。
+    onImageClick: (String) -> Unit = {}
+) {
     val pulse by rememberInfiniteTransition(label = "stream-cursor").animateFloat(
         initialValue = 0.25f,
         targetValue = 1f,
@@ -305,10 +480,21 @@ internal fun StreamingResponseBubble(text: String) {
             modifier = Modifier
                 .widthIn(max = 340.dp)
                 .drawBehind {
-                    drawRoundRect(
+                    // 精修：描边逐角匹配气泡 shape (4,18,18,18)（原统一 14dp 圆角，顶部小角处描边悬空）
+                    drawPath(
+                        path = Path().apply {
+                            addRoundRect(
+                                RoundRect(
+                                    left = 0f, top = 0f, right = size.width, bottom = size.height,
+                                    topLeftCornerRadius = CornerRadius(4.dp.toPx()),
+                                    topRightCornerRadius = CornerRadius(18.dp.toPx()),
+                                    bottomRightCornerRadius = CornerRadius(18.dp.toPx()),
+                                    bottomLeftCornerRadius = CornerRadius(18.dp.toPx())
+                                )
+                            )
+                        },
                         color = outlineVariant,
-                        style = Stroke(width = 1.dp.toPx()),
-                        cornerRadius = CornerRadius(14.dp.toPx())
+                        style = Stroke(width = 1.dp.toPx())
                     )
                 }
         ) {
@@ -342,7 +528,7 @@ internal fun StreamingResponseBubble(text: String) {
                 }
 
                 SelectionContainer {
-                    MarkdownText(markdown = text)
+                    MarkdownText(markdown = text, onImageClick = onImageClick)
                 }
                 Text(
                     text = "▍",
@@ -355,9 +541,36 @@ internal fun StreamingResponseBubble(text: String) {
     }
 }
 
+/** 秒数展示格式：①12.3s ②1m 02s（超过 60s）；0ms 兼容显示 0.0s。 */
+internal fun formatThinkingSeconds(durationMs: Long): String {
+    val totalSeconds = durationMs / 1000.0
+    return if (durationMs >= 60_000) {
+        val m = durationMs / 60_000
+        val s = (durationMs % 60_000) / 1000.0
+        String.format(Locale.US, "%dm %04.1fs", m, s)
+    } else {
+        String.format(Locale.US, "%.1fs", totalSeconds)
+    }
+}
+
 @Composable
-internal fun ThinkingBubble(text: String, finished: Boolean = false) {
+internal fun ThinkingBubble(
+    text: String,
+    finished: Boolean = false,
+    durationMs: Long = 0,
+    liveStartElapsed: Long = 0
+) {
     var expanded by remember { mutableStateOf(finished) }
+
+    // 流式思考中：实时秒数计时器（每 200ms 刷新，低于重组节流频率，几乎无开销）。
+    val liveSeconds = if (!finished && liveStartElapsed > 0) {
+        produceState(initialValue = 0L, key1 = liveStartElapsed) {
+            while (true) {
+                value = android.os.SystemClock.elapsedRealtime() - liveStartElapsed
+                delay(200)
+            }
+        }.value
+    } else 0L
 
     val tertiaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f)
     Surface(
@@ -395,21 +608,36 @@ internal fun ThinkingBubble(text: String, finished: Boolean = false) {
                 }
                 Text(
                     text = when {
-                        expanded -> "思考过程"
-                        finished -> "思考完成 · 点击查看"
-                        else -> "推理中…"
+                        expanded -> stringResource(R.string.chat_thinking_process)
+                        finished -> stringResource(R.string.chat_thinking_done_tap)
+                        else -> stringResource(R.string.chat_reasoning_in_progress)
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                     modifier = Modifier.weight(1f)
                 )
+                // 每一轮模型思考的秒数：流式中实时跳动，完成后定格实测值。
+                val secondsText = if (finished) {
+                    formatThinkingSeconds(durationMs)
+                } else if (liveStartElapsed > 0) {
+                    formatThinkingSeconds(liveSeconds)
+                } else null
+                if (secondsText != null) {
+                    Text(
+                        text = secondsText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
                 Icon(
                     imageVector = if (expanded) {
                         Icons.Default.KeyboardArrowUp
                     } else {
                         Icons.Default.KeyboardArrowDown
                     },
-                    contentDescription = if (expanded) "折叠思考内容" else "展开思考内容",
+                    contentDescription = if (expanded) stringResource(R.string.chat_cd_collapse_thinking)
+                    else stringResource(R.string.chat_cd_expand_thinking),
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.onTertiaryContainer
                 )
@@ -430,16 +658,22 @@ internal fun ThinkingBubble(text: String, finished: Boolean = false) {
 
 /**
  * 错误提示块：区别于灰色 System 行，使用红色高亮卡片 + 图标 + 可选重试。
+ *
+ * @param retryEnabled 重试门禁（流式生成中置 false —— 点重试会取消在途轮次；
+ *   与消息菜单同款门禁口径，旧实现菜单有门禁而 Chip 没有）。
  */
 @Composable
 internal fun ErrorBlock(
     message: String,
     canRetry: Boolean = false,
-    onRetry: () -> Unit = {}
+    onRetry: () -> Unit = {},
+    retryEnabled: Boolean = true
 ) {
     val errorColor = MaterialTheme.colorScheme.error
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    // i18n：Toast 文案在组合内预取（onClick 非组合上下文）
+    val copiedErrorToast = stringResource(R.string.chat_copied_error)
     Surface(
         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f),
         shape = RoundedCornerShape(12.dp),
@@ -465,7 +699,7 @@ internal fun ErrorBlock(
                     modifier = Modifier.size(20.dp)
                 )
                 Text(
-                    text = "执行出错",
+                    text = stringResource(R.string.chat_execution_error),
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.error
@@ -475,19 +709,19 @@ internal fun ErrorBlock(
                 IconButton(
                     onClick = {
                         clipboard.setText(AnnotatedString(message))
-                        Toast.makeText(context, "已复制错误信息", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, copiedErrorToast, Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
-                        contentDescription = "复制错误信息",
+                        contentDescription = stringResource(R.string.chat_cd_copy_error),
                         tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(15.dp)
                     )
                 }
                 if (canRetry) {
-                    RetryChip(onRetry = onRetry)
+                    RetryChip(onRetry = onRetry, enabled = retryEnabled)
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -550,7 +784,7 @@ internal fun ReflectionReviewBlock(text: String) {
                     )
                 }
                 Text(
-                    text = "评审意见",
+                    text = stringResource(R.string.chat_review_opinion),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                     modifier = Modifier.weight(1f)

@@ -9,6 +9,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
@@ -25,9 +26,12 @@ import com.apex.agent.core.tools.builtin.browser.BrowserScript
 import com.apex.agent.core.tools.builtin.browser.DomParser
 import com.apex.agent.core.tools.builtin.browser.PageSnapshot
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,6 +43,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.concurrent.CopyOnWriteArraySet
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -75,6 +80,17 @@ class BrowserEngine @Inject constructor(
     var currentState: BrowserSessionState = BrowserSessionState.HIDDEN
         private set
 
+    // P1 fix（生命周期竞态，两轮混沌审查同题合并）：旧实现 onPermissionRequest 等
+    // WebChromeClient 回调里直接 new 裸 CoroutineScope(Dispatchers.Main).launch ——
+    // 无 SupervisorJob/异常处理器（enterHandoffMode 未捕获异常直接杀进程）且每次
+    // 网页权限请求都产生无主协程抢 stateMutex，连点即堆积、永不取消。改用引擎
+    // 单例持有的常驻 mainScope：Main.immediate + 异常记录不崩溃。
+    private val mainScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { _, e ->
+            android.util.Log.w("BrowserEngine", "main-scope task failed", e)
+        }
+    )
+
     private val stateMutex = Mutex()
 
     // ───────── UI 回调（浮窗等可视层订阅状态变更） ─────────
@@ -84,7 +100,7 @@ class BrowserEngine @Inject constructor(
     }
 
     @Volatile
-    private var uiCallbacks = mutableSetOf<BrowserUiCallback>()
+    private var uiCallbacks = CopyOnWriteArraySet<BrowserUiCallback>()
 
     /** 浮窗注册自己为状态订阅者（支持多订阅者：霓虹球 + 接管面板） */
     fun addUiCallback(cb: BrowserUiCallback) {
@@ -100,6 +116,8 @@ class BrowserEngine @Inject constructor(
     private fun setState(next: BrowserSessionState) {
         currentState = next
         val tab = activeTab()
+        // P1 fix（生命周期竞态）：uiCallbacks 可能被主线程 add/remove 的同时被 IO 线程
+        // （Agent 工具）遍历 —— CopyOnWriteArraySet 保证迭代器快照语义，不会 CME
         uiCallbacks.forEach { it.onStateChanged(next, tab?.url, tab?.title) }
     }
 
@@ -261,7 +279,7 @@ class BrowserEngine @Inject constructor(
                     lastDialog = "permission: 网页请求敏感权限(摄像头/麦克风/地理)，已默认拒绝并进入人工接管；" +
                         "如需授权请用 browser_show 在真实页面操作"
                     // 进入人工接管，由用户在真实页面上通过浏览器原生对话框授权
-                    CoroutineScope(Dispatchers.Main).launch { enterHandoffMode() }
+                    mainScope.launch { enterHandoffMode() }
                     request.deny() // 隐私最小化：不自动授予敏感权限
                 } else {
                     request.deny()
@@ -316,6 +334,56 @@ class BrowserEngine @Inject constructor(
     @Volatile var lastDialog: String? = null
         private set
 
+    /*
+     * ── chrome 人用界面层的增量接口（P2，全部纯增量、默认行为零变化）──
+     * 供 browser/chrome（浮窗完整浏览器 UI）读写引擎状态；
+     * Agent 自动化路径（BrowserAgentTools）不受任何影响。
+     */
+
+    /** 人/Agent 裁决 JS 弹窗后回写文本（保持「snapshot 注入 Agent 上下文」语义，
+     *  接管链式 WebChromeClient 后替代旧自动 confirm 内的 lastDialog 赋值）。 */
+    fun reportDialogForContext(text: String?) {
+        lastDialog = text
+    }
+
+    /** chrome 层下载入队后回写（保持 browser_download_list 工具可读）。 */
+    fun reportDownload(fileName: String, url: String, dmId: Long) {
+        lastDownload = DownloadRecord(fileName, url, dmId)
+    }
+
+    /** 标签结构只读快照（id, url, title），chrome 层 TabStrip/标签总览的数据源。 */
+    fun tabsSnapshot(): List<Triple<Int, String, String>> =
+        tabs.map { Triple(it.key, it.value.url, it.value.title) }
+
+    /** 浏览历史尾部（地址栏 HISTORY 联想数据源；URL-only）。 */
+    fun recentHistory(limit: Int): List<String> {
+        val list = history.toList()
+        return if (limit >= list.size) list else list.takeLast(limit)
+    }
+
+    /**
+     * 关闭全部标签（chrome 层「关闭全部」命令；逐个销毁与 closeTab 同路）。
+     * 引擎全部标签被关后回到无活动页（activeTabId=0），下次 navigate 自动建页。
+     */
+    fun closeAllTabs() {
+        tabs.keys.toList().forEach { closeTab(it) }
+    }
+
+    /**
+     * 主线程同步建页（chrome UI 命令路径直调；与 suspend [newTab] 行为一致）。
+     * 注意：与 newTab 相同，需在主线程调用。
+     */
+    fun newTabImmediate(url: String?): Int {
+        val id = newTabSync()
+        activeTabId = id
+        url?.let {
+            // 带 URL 建页 = 浏览器被使用（网页搜索/自动化），驱动霓虹球按需出现
+            markBrowserActiveFromHidden()
+            loadUrlInternal(it)
+        }
+        return id
+    }
+
     private fun newTabSync(): Int {
         val id = nextTabId++
         val wv = createWebView()
@@ -353,6 +421,34 @@ class BrowserEngine @Inject constructor(
         // 交还瞬间自动补一次快照，结果由 Agent 下一次 snapshot 直接获得
     }
 
+    /**
+     * 结束浏览器会话：状态回落 [BrowserSessionState.HIDDEN]。
+     *
+     * 供「霓虹球长按关闭」等入口使用 —— 球只随浏览器被调用出现（见
+     * [CyberNeonBallManager]），用户长按球即代表"这次浏览完了"：状态回到
+     * HIDDEN 后球自动收起、BrowserOverlay（若在展开）自动收起。
+     * RECOVERING 期间不介入（渲染进程正在重建，下一次 navigate 会重新驱动）。
+     */
+    suspend fun releaseBrowser() = stateMutex.withLock {
+        if (currentState == BrowserSessionState.RECOVERING) return@withLock
+        setState(BrowserSessionState.HIDDEN)
+    }
+
+    /**
+     * 标记"浏览器已被使用"：HIDDEN → AGENT_DRIVING。
+     *
+     * 调用方须已在主线程。状态机此前只在人工接管握手时变更 —— 纯后台
+     * navigate（如网页搜索）永远停留在 HIDDEN，可视层无从感知。现在任何
+     * 导航/带 URL 建页都会把会话标记为 Agent 驾驶中，霓虹球据此**按需出现**
+     * （不再是 App 一启动就常驻）。已是 AGENT_DRIVING / WAITING_HUMAN /
+     * RECOVERING 时不动（保留人工接管锁与重建语义）。
+     */
+    private fun markBrowserActiveFromHidden() {
+        if (currentState == BrowserSessionState.HIDDEN) {
+            setState(BrowserSessionState.AGENT_DRIVING)
+        }
+    }
+
     /** 所有 AgentTool 执行前必须调用的守卫 */
     fun assertAgentControl() {
         if (currentState == BrowserSessionState.WAITING_HUMAN) {
@@ -363,10 +459,7 @@ class BrowserEngine @Inject constructor(
     // ═════════ 标签页管理 ═════════
 
     suspend fun newTab(url: String? = null): Int = withContext(Dispatchers.Main) {
-        val id = newTabSync()
-        activeTabId = id
-        url?.let { loadUrlInternal(it) }
-        id
+        newTabImmediate(url)
     }
 
     fun activeTab(): Tab? = tabs[activeTabId]
@@ -399,6 +492,9 @@ class BrowserEngine @Inject constructor(
         onProgress: ((percent: Int, phase: String) -> Unit)? = null,
     ): NavResult = withContext(Dispatchers.Main) {
         val u = if (url.startsWith("http")) url else "https://$url"
+        // 导航即"浏览器被使用"：HIDDEN → AGENT_DRIVING，霓虹球据此按需出现
+        // （不是 App 启动就常驻；用户长按球或 releaseBrowser 后回到 HIDDEN 即收起）
+        markBrowserActiveFromHidden()
         // P2 #15：长会话内存维护——导航次数超阈值时重建当前 WebView
         if (++navigationCount > MAX_NAVIGATIONS_BEFORE_REBUILD) {
             navigationCount = 0
@@ -449,6 +545,153 @@ class BrowserEngine @Inject constructor(
         return runCatching {
             evaluateJson(wv, BrowserScript.waitForSelectorJs(selector)) == "true"
         }.getOrDefault(false)
+    }
+
+    // ═════════ 独立条件等待 + 页面类型推断（网页自动化完善）═════════
+
+    /** [waitForCondition] 的结果。 */
+    data class WaitOutcome(
+        val matched: Boolean,
+        val detail: String,
+        val elapsedMs: Long
+    )
+
+    /**
+     * 独立条件等待（`browser_wait_for` 工具的引擎面）。
+     *
+     * [BrowserEngine.navigate] 的 waitForSelector 只覆盖「导航后」窗口；
+     * 点击/提交后的异步内容到达（SPA 局部刷新、搜索结果、登录跳转）没有
+     * 等待手段——旧方案只能盲 sleep 或反复 snapshot 轮询。本方法补齐三态：
+     *  - `selector`：CSS 选择器出现（同步检查 + 轮询，不经 Promise——
+     *    evaluateJavascript 不等待 Promise 完成，异步形态拿到的恒为 null）；
+     *  - `text`：页面可见文本包含子串；
+     *  - `url`：当前 URL 包含子串（跳转完成判定）。
+     *
+     * 轮询 [pollMs]（默认 300ms）+ 总超时 [timeoutMs]（默认 10s，上限 60s
+     * 防呆）；在 Main dispatcher 执行（WebView 约束），每次检查为一次
+     * evaluateJavascript（毫秒级），不阻塞渲染。
+     */
+    suspend fun waitForCondition(
+        mode: String,
+        value: String,
+        timeoutMs: Long = 10_000,
+        pollMs: Long = 300
+    ): WaitOutcome = withContext(Dispatchers.Main) {
+        val tab = activeTab()
+            ?: return@withContext WaitOutcome(false, "no active tab", 0)
+        if (mode != "selector" && mode != "text" && mode != "url") {
+            return@withContext WaitOutcome(false, "unknown mode '$mode' (use selector|text|url)", 0)
+        }
+        val effectiveTimeout = timeoutMs.coerceIn(500, 60_000)
+        val start = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - start < effectiveTimeout) {
+            val hit = when (mode) {
+                "selector" -> runCatching {
+                    evaluateBoolean(tab.webView, selectorCheckJs(value))
+                }.getOrDefault(false)
+                "text" -> runCatching {
+                    evaluateBoolean(tab.webView, textContainsJs(value))
+                }.getOrDefault(false)
+                else -> tab.webView.url?.contains(value, ignoreCase = true) == true
+            }
+            if (hit) return@withContext WaitOutcome(true, "matched $mode", SystemClock.uptimeMillis() - start)
+            delay(pollMs.coerceIn(100, 2000))
+        }
+        WaitOutcome(
+            false,
+            "timeout (${effectiveTimeout}ms) waiting for $mode '$value'",
+            SystemClock.uptimeMillis() - start
+        )
+    }
+
+    /** 同步选择器存在性检查（无 Promise——evaluateJavascript 回调不等 Promise）。 */
+    private fun selectorCheckJs(selector: String): String {
+        val escaped = selector.replace("\\", "\\\\").replace("'", "\\'")
+        return "(function(){try{return !!document.querySelector('$escaped');" +
+            "}catch(e){return false;}})()"
+    }
+
+    /** 可见文本包含检查（body.innerText，大小写不敏感由调用方预处理）。 */
+    private fun textContainsJs(text: String): String {
+        val escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+        return "(function(){try{var b=document.body;return !!b && " +
+            "b.innerText.indexOf('$escaped')>=0;}catch(e){return false;}})()"
+    }
+
+    /** [pageType] 的推断结果。 */
+    data class PageTypeInfo(
+        val type: String,
+        val hint: String,
+        val signals: Map<String, Int>
+    )
+
+    /**
+     * 页面类型推断（gap audit「缺失 H」的 Agent 框架层落点）。
+     *
+     * 一次 JS 采集页面形态信号（输入框/密码框/按钮/链接/正文/视频/列表项/
+     * 搜索框/导航/文本量），Kotlin 侧按优先级分类，返回「类型 + 该类型的
+     * 典型动作建议」——帮模型在 snapshot 全量元素前先建立页面心智模型，
+     * 决定 focus 策略（表单页抓 FORM_FIELDS、文章页抓 CONTENT_SUMMARY）。
+     */
+    suspend fun pageType(): PageTypeInfo = withContext(Dispatchers.Main) {
+        val tab = activeTab()
+            ?: return@withContext PageTypeInfo("unknown", "无激活标签页", emptyMap())
+        val raw = runCatching { evaluateJson(tab.webView, PAGE_TYPE_JS) }.getOrDefault("null")
+        val signals = parsePageSignals(raw)
+        classifyPage(signals)
+    }
+
+    /** 防御式解析信号 JSON：任何形状异常返回空表（分类退化到 generic）。 */
+    private fun parsePageSignals(raw: String): Map<String, Int> {
+        if (raw.isEmpty() || raw == "null") return emptyMap()
+        val json = Json.parseToJsonElement(raw)
+        if (json !is JsonObject) return emptyMap()
+        val out = LinkedHashMap<String, Int>()
+        for ((key, value) in json) {
+            val v = runCatching { value.jsonPrimitive.content.toInt() }.getOrNull() ?: continue
+            out[key] = v
+        }
+        return out
+    }
+
+    /** 信号 → 类型（优先级从高到低：认证 > 视频 > 表单 > 文章 > 列表/搜索 > 门户）。 */
+    private fun classifyPage(s: Map<String, Int>): PageTypeInfo {
+        val inputs = s["inputs"] ?: 0
+        val password = s["password"] ?: 0
+        val buttons = s["buttons"] ?: 0
+        val links = s["links"] ?: 0
+        val articles = s["articles"] ?: 0
+        val videos = s["videos"] ?: 0
+        val listItems = s["listItems"] ?: 0
+        val searchBox = s["searchBox"] ?: 0
+        val nav = s["nav"] ?: 0
+        val textLen = s["textLen"] ?: 0
+        return when {
+            password > 0 -> PageTypeInfo(
+                "auth", "登录/注册页：先 browser_snapshot(focus=form) 找输入框，凭据类操作注意确认", s
+            )
+            videos > 0 && textLen < 6000 -> PageTypeInfo(
+                "video", "视频/播放页：控件多为自定义 DOM，建议 browser_snapshot 后按 ref 点击", s
+            )
+            inputs >= 4 && buttons >= 1 -> PageTypeInfo(
+                "form", "表单页：browser_snapshot(focus=form) 拿全字段，逐项 browser_input/select/date_input", s
+            )
+            articles > 0 && textLen > 1500 -> PageTypeInfo(
+                "article", "文章/详情页：browser_snapshot(focus=content) 抓正文；交互元素通常在评论区", s
+            )
+            searchBox > 0 && links >= 8 -> PageTypeInfo(
+                "search", "搜索/结果页：可在搜索框继续输入，结果项用列表 ref 定位", s
+            )
+            links >= 20 && listItems >= 15 -> PageTypeInfo(
+                "list", "列表/信息流页：元素多且分页，建议 focus 策略 + scroll 翻页", s
+            )
+            nav > 0 && links >= 10 -> PageTypeInfo(
+                "portal", "门户/首页：导航入口为主，先想清楚目标路径再点击", s
+            )
+            else -> PageTypeInfo(
+                "generic", "普通页面：browser_snapshot 全量观察后再决策", s
+            )
+        }
     }
 
     suspend fun goBack(): Boolean = withContext(Dispatchers.Main) {
@@ -631,11 +874,15 @@ class BrowserEngine @Inject constructor(
     // ═════════ 文件上传（P0 #5 / #14 基础） ═════════
 
     /** 由 Agent 指定本地文件路径完成上传；无挂起回调时返回 false（需人工接管） */
-    fun respondFileChooser(uri: android.net.Uri): Boolean {
-        val cb = pendingFileChooser ?: return false
+    // P0 fix（生命周期竞态）：本函数由 Agent 工具在 Dispatchers.IO 上调用（ToolRegistry
+    // flowOn(Dispatchers.IO)），而 onShowFileChooser 在主线程写入 pendingFileChooser，
+    // 且 WebView 的 ValueCallback 契约要求必须在主线程回调 onReceiveValue —— 旧实现在
+    // IO 线程读-置空-回调，既存在数据竞争，也可能触发 Chromium 线程断言 native 崩溃。
+    // 现收敛到主线程执行，与 onShowFileChooser 同线程串行化，竞态消失。
+    suspend fun respondFileChooser(uri: android.net.Uri): Boolean = withContext(Dispatchers.Main) {
+        val cb = pendingFileChooser ?: return@withContext false
         pendingFileChooser = null
-        cb.onReceiveValue(arrayOf(uri))
-        return true
+        runCatching { cb.onReceiveValue(arrayOf(uri)) }.isSuccess
     }
 
     // ═════════ 滚动（含无限滚动检测，P0 #10 增强） ═════════
@@ -685,6 +932,22 @@ class BrowserEngine @Inject constructor(
             return@withContext null
         }
         onProgress?.invoke(50, "正在渲染视口截图…")
+        // P1-4（6-c）：后台（未 attach/layout）WebView 尚未布局时 width/height 均为 0，
+        // Bitmap.createBitmap(0,0) 必抛 IllegalArgumentException。先手动 measure/layout
+        // 撑起内容尺寸（宽 1080 基准 + 页面内容比推高度，4096 封顶）；仍失败则抛带
+        // 明确信息的异常（SafeAgentTool 兜底转错误串，而非晦涩的 native 崩溃）。
+        if (wv.width <= 0 || wv.height <= 0) {
+            val ratio = if (wv.contentHeight > 0) wv.contentHeight.toFloat() / wv.width.coerceAtLeast(1) else 1.5f
+            val safeHeight = Math.min(4096, (1080f * ratio).toInt()).coerceAtLeast(1)
+            wv.measure(
+                View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(safeHeight, View.MeasureSpec.AT_MOST)
+            )
+            wv.layout(0, 0, wv.measuredWidth, wv.measuredHeight)
+        }
+        check(wv.width > 0 && wv.height > 0) {
+            "无法截图：WebView 尺寸为 0（页面尚未完成布局，请先 browser_show 展开浮窗或稍后重试）"
+        }
         val bmp = Bitmap.createBitmap(wv.width, wv.height, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
         wv.draw(canvas)
@@ -785,6 +1048,32 @@ class BrowserEngine @Inject constructor(
         private const val MAX_HISTORY = 100
         /** 导航次数阈值：超过后下次 navigate 前重建 WebView（P2 #15） */
         private const val MAX_NAVIGATIONS_BEFORE_REBUILD = 50
+
+        /**
+         * 页面形态信号采集（[pageType] 用）：一次 JS 拿全部计数，返回 JSON 字符串。
+         * 纯同步（无 Promise——evaluateJavascript 回调不等待 Promise 完成）；
+         * querySelectorAll 的广义选择器在老旧内核上可能抛错，逐项 try 兜底。
+         */
+        private val PAGE_TYPE_JS = """
+            (function(){
+              try {
+                var q = function(s){ try { return document.querySelectorAll(s).length; } catch(e){ return 0; } };
+                var b = document.body;
+                return JSON.stringify({
+                  inputs: q('input,select,textarea'),
+                  password: q('input[type=password]'),
+                  buttons: q('button,input[type=submit],input[type=button],[role=button]'),
+                  links: q('a[href]'),
+                  articles: q('article,[itemprop=articleBody],.article-content,main h1'),
+                  videos: q('video,iframe[src*=youtube],iframe[src*=bilibili],iframe[src*=vimeo],[class*=player]'),
+                  listItems: q('li'),
+                  searchBox: q('input[type=search],input[placeholder*=搜],input[placeholder*=search],input[name*=search]'),
+                  nav: q('nav,[role=navigation]'),
+                  textLen: b ? b.innerText.length : 0
+                });
+              } catch(e) { return '{}'; }
+            })();
+        """.trimIndent()
 
         /**
          * 反检测隐身 JS（#13 轻量版）：隐藏自动化痕迹，降低被反爬识别概率。

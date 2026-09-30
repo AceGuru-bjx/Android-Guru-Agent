@@ -7,8 +7,10 @@ import com.apex.agent.platform.terminal.policy.TerminalPolicy
 import com.apex.agent.platform.terminal.policy.TerminalPolicyImpl
 import com.apex.agent.platform.terminal.compat.LegacyTerminalManager
 import com.apex.agent.platform.terminal.linux.CpuArchitecture
+import com.apex.agent.platform.terminal.linux.RootfsProvider
 import com.apex.agent.platform.terminal.proot.LinuxPRootBackend
 import com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider
+import com.apex.agent.platform.terminal.proot.PRootBinaryProvider
 import com.apex.agent.platform.terminal.proot.PRootHostEnvironment
 import com.apex.agent.platform.terminal.runtime.ExecutionBackendRegistry
 import com.apex.agent.platform.terminal.runtime.LocalShellBackend
@@ -16,7 +18,8 @@ import com.apex.agent.platform.terminal.runtime.TerminalRuntime
 import com.apex.agent.platform.terminal.persistence.SessionMetadataStore
 import com.apex.agent.platform.terminal.runtime.TerminalRuntimeImpl
 import com.apex.agent.platform.terminal.tools.*
-import com.apex.agent.platform.terminal.ubuntu.OfficialUbuntuRootfsSource
+import com.apex.agent.platform.terminal.ubuntu.BundledRootfsSource
+import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
 import com.apex.agent.platform.terminal.ubuntu.ProvisionedRootfsProvider
 import com.apex.agent.platform.terminal.ubuntu.RootfsConfigurator
 import com.apex.agent.platform.terminal.ubuntu.RootfsHealthInspector
@@ -29,6 +32,11 @@ import com.apex.agent.platform.terminal.ubuntu.UbuntuBootstrapManager
 import com.apex.agent.platform.terminal.ubuntu.UbuntuSourcesList
 import com.apex.agent.platform.terminal.ubuntu.BasePackageProfile
 import com.apex.agent.platform.terminal.ubuntu.BootstrapStateStore
+import com.apex.agent.platform.terminal.bridge.GuestBridgeService
+import com.apex.agent.platform.terminal.environment.ProxyConfig
+import com.apex.agent.platform.terminal.fs.GuestFilesystem
+import com.apex.agent.platform.terminal.proot.SharedStorageBridge
+import com.apex.agent.platform.terminal.proot.SystemBindProfile
 import com.apex.agent.platform.terminal.workspace.AbsolutePath
 import com.apex.agent.platform.terminal.workspace.GuestUserHome
 import com.apex.agent.platform.terminal.workspace.LinuxWorkspaceManager
@@ -58,9 +66,47 @@ object TerminalModule {
     @Singleton
     fun provideNativePty(): NativePty = JniNativePty()
 
+    /**
+     * 终端策略接线（设置页黑白名单 → LINE 写入策略层）。
+     *
+     * TerminalViewModel 的设置页把用户黑白名单写入 "apex_terminal" prefs
+     * （键 cmd_blacklist / cmd_whitelist，值 = 命令头 token 的小写集合）。
+     * 此前该配置**从未被任何执行路径消费**（设置页是纯装饰）—— 这里通过
+     * [TerminalPolicyImpl] 的 dynamicPolicy 每次检查时实时读取 prefs 接入：
+     *
+     * - 用户名单为空 → 默认 [CommandPolicy]（DEFAULT_DENYLIST + ALLOW_ALL）
+     * - 有黑名单 → 黑名单 **并集** 内置默认危险命令（shutdown/reboot/mkfs/dd/
+     *   halt/poweroff 仍被拦截，用户自定义名单是叠加而非替换）
+     * - 有白名单（非空）→ ALLOWLIST_ONLY：仅白名单内的命令头允许；复杂命令
+     *   （管道/&&/sh -c 等）按 Spec §6 保守拒绝
+     *
+     * 用户在设置页增删条目后无需重启 —— dynamicPolicy 每次检查重新读 prefs。
+     */
     @Provides
     @Singleton
-    fun provideTerminalPolicy(): TerminalPolicy = TerminalPolicyImpl()
+    fun provideTerminalPolicy(@ApplicationContext context: Context): TerminalPolicy {
+        val prefs = context.getSharedPreferences("apex_terminal", Context.MODE_PRIVATE)
+        return TerminalPolicyImpl(
+            dynamicPolicy = {
+                val blacklist = prefs.getStringSet("cmd_blacklist", emptySet()).orEmpty()
+                val whitelist = prefs.getStringSet("cmd_whitelist", emptySet()).orEmpty()
+                if (blacklist.isEmpty() && whitelist.isEmpty()) {
+                    null // 未配置 → 构造期默认 CommandPolicy()
+                } else {
+                    com.apex.agent.platform.terminal.policy.CommandPolicy(
+                        mode = if (whitelist.isNotEmpty())
+                            com.apex.agent.platform.terminal.policy.CommandPolicyMode.ALLOWLIST_ONLY
+                        else
+                            com.apex.agent.platform.terminal.policy.CommandPolicyMode.ALLOW_ALL,
+                        allowlist = whitelist,
+                        // 并集默认危险命令：用户的黑名单叠加内置名单（更安全），
+                        // 用户没配置时这里不会到达（null 分支已回退默认）。
+                        denylist = com.apex.agent.platform.terminal.policy.DefaultCommandPolicy.DEFAULT_DENYLIST + blacklist
+                    )
+                }
+            }
+        )
+    }
 
     /** Persistence store for crash recovery (Spec §39). Stores session JSON in app files dir. */
     @Provides
@@ -87,8 +133,9 @@ object TerminalModule {
         )
 
     /**
-     * 设备架构 → rootfs 目标。注意诚实性：Ubuntu Base 24.04 只发布 arm64/amd64 ——
-     * ARM32 设备返回 ARM32，OfficialUbuntuRootfsSource.resolve 会如实失败
+     * 设备架构 → rootfs 目标。注意诚实性：Ubuntu Base 24.04 官方只发布
+     * arm64/amd64/armhf —— 三者均已内置打包（BundledRootfsSource 注册表）；
+     * 其余架构（x86/riscv64）返回真实值，BundledRootfsSource.resolve 会如实失败
      * （UNSUPPORTED_ARCHITECTURE），绝不静默装一个跑不起来的 rootfs。
      */
     @Provides
@@ -100,39 +147,84 @@ object TerminalModule {
         return RootfsTarget(distribution = "ubuntu", version = "24.04", architecture = arch)
     }
 
-    /** T72 生产 provisioner：真实下载 + SHA-256 + 原子解压 + 配置 + 健康检查 + 阶段证据。 */
+    /** T83/T84：内置档案源单例 —— provisioner 的 source 与协调器的注册表指纹
+     *  端口（warmUp 新鲜度迁移）共用同一实例/同一注册表。档案本体：APK jniLibs
+     *  伪 .so（libubuntu-rootfs.so，安装时解出到 nativeLibraryDir；构建期由
+     *  scripts/fetch_rootfs.sh 拉取并双重校验 —— 运行时下载安装流程已随产品
+     *  决策移除，基础环境零网络）。 */
+    @Provides
+    @Singleton
+    fun provideBundledRootfsSource(
+        @ApplicationContext context: Context
+    ): BundledRootfsSource = BundledRootfsSource(
+        nativeLibraryDir = context.applicationInfo.nativeLibraryDir ?: ""
+    )
+
+    /** T82（Termux 基线 §3.5/§3.6/§9.2）：DNS 注入（Android LinkProperties —— 此前
+     *  DI 未传，public-DNS fallback 在 DNS 受限网络直接失败）；locale.gen（zh_CN/
+     *  en_US —— locales 包 postinst 自动生成）；timezone（Android 当前时区写入
+     *  /etc/timezone，tzdata postinst 生效）。
+     *
+     *  P1（DNS 快照刷新）：抽为独立 Provider —— 协调器的 dnsRefreshFn 端口需要
+     *  同一实例（ensureReady 短路前对宿主 DNS，切网自愈；见
+     *  RootfsConfigurator.refreshDnsIfChanged）。 */
+    @Provides
+    @Singleton
+    fun provideRootfsConfigurator(
+        @ApplicationContext context: Context
+    ): RootfsConfigurator = RootfsConfigurator(
+        dnsServers = { resolveAndroidDnsServers(context) },
+        localeGen = listOf("zh_CN.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"),
+        timezone = java.util.TimeZone.getDefault().id
+    )
+
     @Provides
     @Singleton
     fun provideRootfsProvisioner(
         @ApplicationContext context: Context,
-        target: RootfsTarget
+        target: RootfsTarget,
+        bundledSource: BundledRootfsSource,
+        configurator: RootfsConfigurator
     ): RootfsProvisioner {
         val layout = RootfsInstallLayout.under(
             AbsolutePath(File(context.filesDir, "rootfs/ubuntu").absolutePath)
         )
         return RootfsProvisionerImpl(
-            source = OfficialUbuntuRootfsSource(),
+            source = bundledSource,
             validator = null,                       // 布局校验由 health inspector 承担（T72）
             layout = layout,
             metadataStore = RootfsMetadataStore(File(layout.metadataFile.value)),
-            configurator = RootfsConfigurator(),
+            configurator = configurator,
             healthCheck = RootfsHealthInspector(expectedArch = target.architecture)
         )
     }
 
-    /** RootfsProvider 门面（LinuxPRootBackend 的只读视图；见 ProvisionedRootfsProvider §21）。 */
+    /** T82：Android 系统 DNS（ConnectivityManager LinkProperties；无权限/无网络 → 空 → 兑底链）。 */
+    private fun resolveAndroidDnsServers(context: Context): List<String> =
+        runCatching {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val linkProps = cm?.activeNetwork?.let { cm.getLinkProperties(it) }
+            linkProps?.dnsServers?.mapNotNull { it.hostAddress } ?: emptyList()
+        }.getOrDefault(emptyList())
+
+    /** RootfsProvider 门面（LinuxPRootBackend 的只读视图；见 ProvisionedRootfsProvider §21）。
+     *  T81 CI fix: 返回接口类型 —— Dagger 需要接口绑定（LinuxExecutionContextFactory 等
+     *  注入点依赖 RootfsProvider 抽象，此前只有具体类绑定 → MissingBinding）。 */
     @Provides
     @Singleton
     fun provideRootfsProvider(
         provisioner: RootfsProvisioner
-    ): ProvisionedRootfsProvider = ProvisionedRootfsProvider(provisioner)
+    ): RootfsProvider = ProvisionedRootfsProvider(provisioner)
 
-    /** libproot.so 定位 + ELF 架构校验（字节级）+ --version 探测（诊断性，不阻断）。 */
+    /** libproot.so 定位 + ELF 架构校验（字节级）+ --version 探测（诊断性，不阻断）。
+     *  T81 CI fix: 返回接口类型（PRootBinaryProvider）—— 与 RootfsProvider 同理，
+     *  LinuxExecutionContextFactory / UbuntuAptPackageManager / LinuxPRootBackend 均
+     *  依赖接口注入，具体类绑定无法满足。 */
     @Provides
     @Singleton
     fun providePRootBinaryProvider(
         hostEnv: PRootHostEnvironment
-    ): NativeLibraryPRootBinaryProvider = NativeLibraryPRootBinaryProvider(
+    ): PRootBinaryProvider = NativeLibraryPRootBinaryProvider(
         hostEnv = hostEnv,
         supportedAbis = { Build.SUPPORTED_ABIS.toList() }
     )
@@ -167,18 +259,35 @@ object TerminalModule {
     @Provides
     @Singleton
     fun provideLinuxPRootBackend(
-        binaryProvider: NativeLibraryPRootBinaryProvider,
-        rootfsProvider: ProvisionedRootfsProvider,
+        binaryProvider: PRootBinaryProvider,
+        rootfsProvider: RootfsProvider,
         workspaces: LinuxWorkspaceManager,
         userHome: GuestUserHome,
-        hostEnv: PRootHostEnvironment
+        hostEnv: PRootHostEnvironment,
+        sharedStorage: SharedStorageBridge
     ): LinuxPRootBackend = LinuxPRootBackend(
         binaryProvider = binaryProvider,
         rootfsProvider = rootfsProvider,
         workspaces = workspaces,
         userHome = userHome,
-        hostEnv = hostEnv
+        hostEnv = hostEnv,
+        // T82：系统级 bind（/proc /dev /sys，proot-distro 语义 —— procps 在 guest 内
+        // 真实可用）+ 共享存储桥（授权可用时 → guest /sdcard；不可用 → 不 bind）。
+        systemBinds = SystemBindProfile.STANDARD,
+        sharedStorage = sharedStorage
     )
+
+    /**
+     * T82：共享存储桥（termux-setup-storage 等价物）。Android 无权限时
+     * `/storage/emulated/0` 不可列 → [SharedStorageBridge] 返回 null bind ——
+     * 诚实降级，绝不伪造空目录。
+     */
+    @Provides
+    @Singleton
+    fun provideSharedStorageBridge(): SharedStorageBridge =
+        SharedStorageBridge(
+            hostDirProvider = { File("/storage/emulated/0").takeIf { it.isDirectory } }
+        )
 
     /** 后端注册表：local（默认，golden 行为）+ linux-ubuntu。 */
     @Provides
@@ -200,12 +309,18 @@ object TerminalModule {
         policy: TerminalPolicy,
         store: SessionMetadataStore,
         backends: ExecutionBackendRegistry,
-        workspaceBinder: LinuxWorkspaceManager
+        workspaceBinder: LinuxWorkspaceManager,
+        provisioner: RootfsProvisioner
     ): TerminalRuntime = TerminalRuntimeImpl(
         native, policy,
         backendRegistry = backends,
         persistenceStore = store,
-        workspaceBinder = workspaceBinder
+        workspaceBinder = workspaceBinder,
+        // T81 (U-10)：rootfs 活跃会话绑定（provisioner.remove 门禁）。
+        rootfsBinder = com.apex.agent.platform.terminal.ubuntu.RootfsUsageBinderImpl(provisioner),
+        // T82：Shell Marker Protocol —— 每个前台 job 携带 OSC 633 marker（真实
+        // 退出码 + jobId）；prompt 启发式降级为 fallback。生产默认开启。
+        enableShellMarkers = true
     )
 
     /** Compat facade: old TerminalManager API → new Runtime (settle-time DELETED). Spec §35. */
@@ -238,10 +353,163 @@ object TerminalModule {
             hostEnv.hostEnv()
         })
 
-    /** T76: LinuxEnvironmentManager —— 三层 env 模型（host/proot/guest）+ apt env 变体。 */
+    /** T76: LinuxEnvironmentManager —— 三层 env 模型（host/proot/guest）+ apt env 变体。
+     *
+     *  T82（基线 §9.3）：Android 系统代理（JVM system properties —— 部分 ROM/WiFi
+     *  代理下发在此）注入 guest http(s)_proxy；未设置 → null（直连，历史行为）。 */
     @Provides
     @Singleton
-    fun provideLinuxEnvironmentManager(): LinuxEnvironmentManager = LinuxEnvironmentManager()
+    fun provideLinuxEnvironmentManager(): LinuxEnvironmentManager {
+        val proxyHost = System.getProperty("http.proxyHost")
+        val proxyPort = System.getProperty("http.proxyPort")?.toIntOrNull()
+        val proxy = if (!proxyHost.isNullOrBlank() && proxyPort != null && proxyPort > 0) {
+            ProxyConfig(host = proxyHost, port = proxyPort)
+        } else null
+        return LinuxEnvironmentManager(proxy = proxy)
+    }
+
+    /** T81 (D-6/§34)：Linux 执行上下文工厂 —— 交互会话与 apt 共享的单一解析点。 */
+    @Provides
+    @Singleton
+    fun provideLinuxExecutionContextFactory(
+        binaryProvider: PRootBinaryProvider,
+        rootfsProvider: RootfsProvider,
+        workspaces: LinuxWorkspaceManager,
+        userHome: GuestUserHome,
+        hostEnv: PRootHostEnvironment,
+        environment: LinuxEnvironmentManager
+    ): com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory =
+        com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory(
+            binaryProvider, rootfsProvider, workspaces, userHome, hostEnv, environment
+        )
+
+    /** T81 (D-7/§29)：环境能力真实探测（which + --version，TTL 缓存）。 */
+    @Provides
+    @Singleton
+    fun provideLinuxCapabilityProbe(
+        contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory,
+        executor: ProotExecutor
+    ): com.apex.agent.platform.terminal.environment.LinuxCapabilityProbe =
+        com.apex.agent.platform.terminal.environment.LinuxCapabilityProbe(contextFactory, executor)
+
+    /** T81 (D-7/§30)：单轮自动修复编排（detect → repair once → verify）。 */
+    @Provides
+    @Singleton
+    fun provideEnvironmentRepairService(
+        health: LinuxEnvironmentHealth,
+        linuxPackageManager: com.apex.agent.platform.terminal.pkg.LinuxPackageManager,
+        provisioner: RootfsProvisioner,
+        capabilityProbe: com.apex.agent.platform.terminal.environment.LinuxCapabilityProbe
+    ): com.apex.agent.platform.terminal.health.EnvironmentRepairService =
+        com.apex.agent.platform.terminal.health.EnvironmentRepairService(
+            health, linuxPackageManager, provisioner, capabilityProbe
+        )
+
+    /**
+     * T82: Ubuntu 产品级生命周期编排器 —— Install → Bootstrap → Capability → READY
+     * 的单一产品入口。App 启动 warmUp（恢复，绝不下载）；Agent/UI ensureReady（按需拉起）。
+     *
+     * bootstrap/probe/repair 以函数端口注入（适配既有单例，不建第二套抽象）：
+     *  - bootstrapFn ← UbuntuBootstrapManager.bootstrap（幂等/续跑/Busy 语义原样透传）
+     *  - bootstrapStateFn ← UbuntuBootstrapManager.state().name
+     *  - probeFn ← LinuxCapabilityProbe.probeAll()
+     *  - repairFn ← EnvironmentRepairService.autoRepair()
+     */
+    @Provides
+    @Singleton
+    fun provideUbuntuLifecycleCoordinator(
+        provisioner: RootfsProvisioner,
+        bootstrap: UbuntuBootstrapManager,
+        capabilityProbe: com.apex.agent.platform.terminal.environment.LinuxCapabilityProbe,
+        repairService: com.apex.agent.platform.terminal.health.EnvironmentRepairService,
+        bundledSource: BundledRootfsSource,
+        configurator: RootfsConfigurator,
+        target: RootfsTarget
+    ): UbuntuLifecycleCoordinator {
+        return UbuntuLifecycleCoordinator(
+            provisioner = provisioner,
+            bootstrapFn = { force, timeoutMs ->
+                when (val r = bootstrap.bootstrap(force, timeoutMs)) {
+                    is UbuntuBootstrapManager.BootstrapResult.Ready ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.READY, "READY"
+                        )
+                    is UbuntuBootstrapManager.BootstrapResult.AlreadyReady ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.ALREADY_READY, r.state.name
+                        )
+                    is UbuntuBootstrapManager.BootstrapResult.InProgress ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.IN_PROGRESS, r.state.name
+                        )
+                    is UbuntuBootstrapManager.BootstrapResult.Failed ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.FAILED,
+                            r.partialState.name, r.failedStage, r.error.message
+                        )
+                    is UbuntuBootstrapManager.BootstrapResult.Cancelled ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.CANCELLED, r.partialState.name
+                        )
+                    is UbuntuBootstrapManager.BootstrapResult.Busy ->
+                        UbuntuLifecycleCoordinator.BootstrapStageResult(
+                            UbuntuLifecycleCoordinator.BootstrapOutcome.BUSY, null, null, r.message
+                        )
+                }
+            },
+            bootstrapStateFn = { bootstrap.state().name },
+            bootstrapProgressFn = {
+                bootstrap.progress().let { flow ->
+                    kotlinx.coroutines.flow.flow {
+                        flow.collect { e ->
+                            emit(
+                                UbuntuLifecycleCoordinator.BootstrapProgressEvent(
+                                    stage = e.stage,
+                                    message = when (e) {
+                                        is UbuntuBootstrapManager.BootstrapProgress.StageStarted -> e.message
+                                        is UbuntuBootstrapManager.BootstrapProgress.StageCompleted -> "stage completed (${e.durationMs}ms)"
+                                        is UbuntuBootstrapManager.BootstrapProgress.StageFailed -> e.reason
+                                        is UbuntuBootstrapManager.BootstrapProgress.OverallCompleted -> "bootstrap completed (${e.state.name})"
+                                    }
+                                )
+                            )
+                        }
+                    }
+                }
+            },
+            probeFn = {
+                capabilityProbe.probeAll().map { r ->
+                    UbuntuLifecycleCoordinator.CapabilityEntry(
+                        name = r.capability,
+                        status = r.status.name,
+                        version = r.version,
+                        aptPackage = r.aptPackage,
+                        detail = r.detail
+                    )
+                }
+            },
+            repairFn = { repairService.autoRepair().let { rr ->
+                UbuntuLifecycleCoordinator.RepairOutcome(
+                    actions = rr.repaired.map { "${it.dimension}: ${it.action} → ${it.outcome}" },
+                    verifiedHealthy = rr.verifiedHealthy,
+                    detail = rr.verification?.summary
+                )
+            } },
+            // removeRootfs() 后复位 bootstrap.json —— 防重装时 ALREADY_READY 短路跳过引导。
+            bootstrapResetFn = { bootstrap.reset().getOrThrow() },
+            // T84：注册表指纹端口 —— warmUp 新鲜度迁移（APK 换档案 → 删旧装新，
+            // 防 AlreadyReady 短路把旧 rootfs 永久钉死）。
+            bundledChecksumFn = { bundledSource.registryChecksumFor(target) },
+            // P1（DNS 快照刷新）：ensureReady 短路前对一次宿主 DNS，切网自愈
+            //（resolv.conf 是安装时刻快照，不刷新则切网后 guest DNS 全灭）。
+            dnsRefreshFn = {
+                provisioner.current()?.location?.let { loc ->
+                    configurator.refreshDnsIfChanged(java.io.File(loc.value))
+                } ?: false
+            },
+            target = target
+        )
+    }
 
     /** T76: PackageOperationLock —— apt/dpkg 写串行化（进程内 Mutex + 跨实例 OS 文件锁）。 */
     @Provides
@@ -257,13 +525,14 @@ object TerminalModule {
     @Singleton
     fun provideUbuntuAptPackageManager(
         executor: ProotExecutor,
-        binaryProvider: NativeLibraryPRootBinaryProvider,
-        rootfsProvider: ProvisionedRootfsProvider,
+        binaryProvider: PRootBinaryProvider,
+        rootfsProvider: RootfsProvider,
         userHome: GuestUserHome,
         hostEnv: PRootHostEnvironment,
         workspaces: LinuxWorkspaceManager,
         environment: LinuxEnvironmentManager,
-        lock: PackageOperationLock
+        lock: PackageOperationLock,
+        contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory
     ): UbuntuAptPackageManager = UbuntuAptPackageManager(
         executor = executor,
         binaryProvider = binaryProvider,
@@ -272,7 +541,8 @@ object TerminalModule {
         hostEnv = hostEnv,
         workspaces = workspaces,
         environment = environment,
-        lock = lock
+        lock = lock,
+        contextFactory = contextFactory
     )
 
     /** 把 [UbuntuAptPackageManager] 暴露为 [LinuxPackageManager] 接口（工具层依赖抽象）。 */
@@ -284,7 +554,7 @@ object TerminalModule {
     @Provides
     @Singleton
     fun provideLinuxNetworkProbe(
-        rootfsProvider: ProvisionedRootfsProvider,
+        rootfsProvider: RootfsProvider,
         aptManager: LinuxPackageManager,
         target: RootfsTarget
     ): LinuxNetworkProbe = LinuxNetworkProbe(
@@ -356,5 +626,76 @@ object TerminalModule {
         workspaceManager = workspaceManager,
         guestUserHome = guestUserHome,
         rootfsHealthInspector = RootfsHealthInspector(expectedArch = target.architecture)
+    )
+
+    // ───────── P83 (T4): Ubuntu 开发环境闭环 —— Project → Analyzer → Ubuntu → Toolchain ─────────
+
+    /**
+     * P83: ProjectEnvironmentAnalyzer —— workspace 标记文件扫描（python/node/jdk/cpp/
+     * rust/go profile → requirements）。PR#66 以来首次接入生产 DI。
+     */
+    @Provides
+    @Singleton
+    fun provideProjectEnvironmentAnalyzer(): com.apex.agent.platform.terminal.environment.ProjectEnvironmentAnalyzer =
+        com.apex.agent.platform.terminal.environment.DefaultProjectEnvironmentAnalyzer(
+            com.apex.agent.platform.terminal.environment.BuiltInProfileRegistry()
+        )
+
+    /**
+     * P83: ProjectEnvironmentCoordinator —— Ubuntu 就绪 → 项目分析 → 能力探测 →
+     * 缺失工具链批量 apt install → 复测。Agent 入口：terminal.workspace.environment。
+     */
+    @Provides
+    @Singleton
+    fun provideProjectEnvironmentCoordinator(
+        analyzer: com.apex.agent.platform.terminal.environment.ProjectEnvironmentAnalyzer,
+        capabilityProbe: com.apex.agent.platform.terminal.environment.LinuxCapabilityProbe,
+        packageManager: LinuxPackageManager,
+        ubuntuLifecycle: com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator,
+        workspaceManager: LinuxWorkspaceManager
+    ): com.apex.agent.platform.terminal.environment.ProjectEnvironmentCoordinator =
+        com.apex.agent.platform.terminal.environment.ProjectEnvironmentCoordinator(
+            analyzer = analyzer,
+            probe = capabilityProbe,
+            packageManager = packageManager,
+            lifecycle = ubuntuLifecycle,
+            workspaces = workspaceManager
+        )
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // T82: Terminal 全能力增强 —— guest fs API + apexctl 桥（Termux 基线 §4.8/§11）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * T82: GuestFilesystem —— 结构化 guest 文件操作（base64 二进制安全 +
+     * 写沙箱）。与 apt/交互会话共享 rootfs/workspace/home（同 contextFactory）。
+     */
+    @Provides
+    @Singleton
+    fun provideGuestFilesystem(
+        contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory,
+        executor: ProotExecutor
+    ): GuestFilesystem = GuestFilesystem(
+        contextFactory = contextFactory,
+        executor = executor
+    )
+
+    /**
+     * T82: GuestBridgeService —— apexctl 桥宿主（guest 脚本 ↔ Android 能力）。
+     * 桥根目录落在持久化 home bind 下（host `<filesDir>/linux/home/.apex/bridge`
+     * = guest `/root/.apex/bridge`）—— 复用既有 bind，不引入新 bind 面。
+     * Android 侧 handler 见 [com.apex.agent.bridge.AndroidBridgeHandlers]。
+     */
+    @Provides
+    @Singleton
+    fun provideGuestBridgeService(
+        @ApplicationContext context: Context,
+        userHome: GuestUserHome
+    ): GuestBridgeService = GuestBridgeService(
+        bridgeRoot = java.io.File(userHome.hostDir(), ".apex/bridge"),
+        handlers = com.apex.agent.bridge.AndroidBridgeHandlers.all(context),
+        scope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default
+        )
     )
 }

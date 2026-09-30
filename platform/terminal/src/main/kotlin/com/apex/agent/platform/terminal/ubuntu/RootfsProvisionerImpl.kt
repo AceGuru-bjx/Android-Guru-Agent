@@ -6,11 +6,13 @@ import com.apex.agent.platform.terminal.linux.RootfsState
 import com.apex.agent.platform.terminal.linux.RootfsVerification
 import com.apex.agent.platform.terminal.proot.RootfsValidator
 import com.apex.agent.platform.terminal.workspace.AbsolutePath
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -63,20 +65,31 @@ class RootfsProvisionerImpl(
     private val _progress = MutableSharedFlow<ProvisioningProgress>(extraBufferCapacity = 64)
     override fun progress(): Flow<ProvisioningProgress> = _progress.asSharedFlow()
 
-    // §19: in-use flag for remove() protection.
-    @Volatile private var inUse: Boolean = false
+    // §19: in-use 保护（T81：引用计数化 —— 多个并发 LINUX 会话各自 bind/unbind，
+    // 原布尔实现第一个会话 unbind 即解除保护，后续会话运行中 remove() 可删整个 rootfs）。
+    private val activeSessions = java.util.concurrent.atomic.AtomicInteger(0)
+    private val inUse: Boolean get() = activeSessions.get() > 0
 
-    fun markInUse() { inUse = true }
-    fun markIdle() { inUse = false }
+    fun markInUse() { activeSessions.incrementAndGet() }
+    fun markIdle() { activeSessions.decrementAndGet() }
+
+    /** T81 (U-1)：运行中 install 的协程 Job —— cancel() 借此真正停止下载/解压。 */
+    @Volatile private var activeInstallJob: kotlinx.coroutines.Job? = null
 
     // ─── §24: install() ───
     override suspend fun install(target: RootfsTarget, force: Boolean): ProvisioningResult {
         // Already READY? (unless force) — T72: 版本迁移修正：仅当 current 与
         // target 同分布/同架构/版本前缀匹配时才短路（装 26.04 不能被 24.04 挡）。
+        // T84: 追加**注册表新鲜度**防线 —— 版本前缀相同但指纹不同（APK 升级换代
+        // 内置档案：骨架 → 完整 rootfs）时绝不可短路，否则旧 rootfs 被永久钉死。
+        // resolve 失败（如无内置档案的开发构建）→ 保守沿用旧行为（短路）。
         if (!force) {
             val existing = current()
             if (existing != null && _state.value == ProvisioningState.READY && matchesTarget(existing, target)) {
-                return ProvisioningResult.AlreadyReady(existing)
+                val expectedSha = runCatching { source.resolve(target).getOrNull()?.sha256 }.getOrNull()
+                if (expectedSha == null || existing.checksum == expectedSha) {
+                    return ProvisioningResult.AlreadyReady(existing)
+                }
             }
         }
 
@@ -90,12 +103,22 @@ class RootfsProvisionerImpl(
             return ProvisioningResult.Busy("Another provisioner instance holds ${layout.baseDir.value}/.provision.lock")
         }
 
+        // T81 (U-1)：记录 install 协程 Job —— cancel() 可真正停止运行中的
+        // 下载/解压（downloader/extractor 的每个循环已带 ensureActive 检查点）。
+        activeInstallJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
         return try {
-            doInstall(target)
-        } catch (e: kotlinx.coroutines.CancellationException) {
+            // T84：install 全链是阻塞文件 IO（本地拷贝 / SHA / 解压 / 原子激活），
+            // 统一切 IO —— 调用方若在主线程（VM 的 viewModelScope=Main.immediate）
+            // 直接吃满 Main，完整 rootfs（~300MB+ 档，解压 2-5 分钟）必 ANR。
+            // 工具路径 flowOn(IO) 是重复进入，零额外代价。
+            withContext(Dispatchers.IO) { doInstall(target) }
+        } catch (ce: kotlinx.coroutines.CancellationException) {
             _state.value = ProvisioningState.CANCELLED
             emit(ProvisioningState.CANCELLED, 0, "Cancelled")
-            ProvisioningResult.Cancelled(_state.value)
+            // P2 fix（审计 6-b）：CancellationException 必须重抛（保留上方状态发射与
+            // finally 清理）—— 原实现吞掉后调用方 Job 已被取消却看到 install()
+            // “正常返回 Cancelled”，结构化取消传播失效。
+            throw ce
         } catch (e: Throwable) {
             _state.value = ProvisioningState.FAILED
             val code = extractErrorCode(e)
@@ -105,6 +128,7 @@ class RootfsProvisionerImpl(
                 _state.value
             )
         } finally {
+            activeInstallJob = null
             runCatching { fileLock.close() }
             installLock.release()
         }
@@ -131,13 +155,20 @@ class RootfsProvisionerImpl(
         // ── §26: storage preflight ──
         val available = File(layout.baseDir.value).let {
             var f = it
-            while (!f.exists() && f.parentFile != null) f = f.parentFile
+            while (!f.exists()) f = f.parentFile ?: break   // 向上找到第一个存在的祖先，根仍不存在则用原始路径
             if (f.exists()) f.usableSpace else it.usableSpace
         }
         val preflight = ProvisioningStoragePreflight(
             requiredDownloadSpace = artifact.expectedSize ?: 0,
-            requiredExtractSpace = (artifact.expectedSize ?: 0) * 20,   // ~20x tar expansion
-            safetyMargin = 100L * 1024 * 1024,
+            // T84：优先用构建期实测的解压后字节数（随指纹一并钉入注册表）；
+            // 未知时退回压缩档 ×4 启发式（tar.gz rootfs 实测扩张比）。旧系数 ×20
+            // 是 ~30MB 时代的拍脑袋值 —— 对 ~300MB+ 完整 rootfs 会虚报 6GB+
+            // 空闲需求，把正常设备拒之门外（INSUFFICIENT_STORAGE 假阳性）。
+            requiredExtractSpace = artifact.expectedUnpackedSize
+                ?: (artifact.expectedSize ?: 0) * 4,
+            // 保证金随档体积缩放：小档 ~100MB（与旧行为等价），
+            // 300MB+ 档 ~130-150MB（覆盖 metadata/bootstrap 写入/workspace）。
+            safetyMargin = 100L * 1024 * 1024 + (artifact.expectedSize ?: 0) / 10,
             availableSpace = available
         )
         if (!preflight.sufficient) {
@@ -203,9 +234,12 @@ class RootfsProvisionerImpl(
         val staging = File(layout.stagingDir.value)
         staging.deleteRecursively()   // §16: clean any stale staging
         staging.mkdirs()
-        val exResult = extractor.extractTarGz(archiveFile, staging) { done, total ->
-            val pct = if (total > 0) ((done * 100) / total).toInt() else 0
-            emit(ProvisioningState.EXTRACTING, pct, "Extracted $done bytes", done, total)
+        // T84：进度分母用解压后字节数（构建期实测）；未知时退回档案尺寸 ——
+        // 压缩字节分母会在 ~30% 处提前撞 100%（扩张比 ~3-4×），长解压期进度条假死。
+        val extractTotal = artifact.expectedUnpackedSize ?: archiveFile.length()
+        val exResult = extractor.extractTarGz(archiveFile, staging) { done, _ ->
+            val pct = if (extractTotal > 0) ((done * 100) / extractTotal).toInt().coerceAtMost(100) else 0
+            emit(ProvisioningState.EXTRACTING, pct, "Extracted $done bytes", done, extractTotal)
         }.getOrElse {
             staging.deleteRecursively()
             throw provisioningException(
@@ -305,6 +339,13 @@ class RootfsProvisionerImpl(
         emit(ProvisioningState.ACTIVATING, 100, "Activated ${artifact.id}")
         // 成功后才清理被顶替的旧版本（失败路径已回滚）
         displaced?.deleteRecursively()
+        // T84：BUNDLED 源的档案本体永久驻留 nativeLibraryDir（安装器解出），
+        // archives/ 的缓存副本在激活成功后删除 —— 省一份压缩档（~300MB+）的
+        // 常驻磁盘。重装/repair 时 downloader 会从 nativeLibraryDir 重新本地
+        // 拷贝（同盘几秒），语义不变；OFFICIAL/HTTP 源保留缓存供离线 repair。
+        if (artifact.sourceKind == RootfsSourceKind.BUNDLED) {
+            runCatching { archiveFile.delete() }
+        }
 
         // ── §14/§23: persist final metadata（含全部证据）──
         val now = System.currentTimeMillis()
@@ -398,7 +439,11 @@ class RootfsProvisionerImpl(
     }
 
     // ─── §16: reconcile() — crash recovery ───
-    override suspend fun reconcile(): ReconciliationResult {
+    override suspend fun reconcile(): ReconciliationResult = withContext(Dispatchers.IO) {
+        reconcileInternal()
+    }
+
+    private suspend fun reconcileInternal(): ReconciliationResult {
         val activeRootfs = current()
         val staging = File(layout.stagingDir.value)
         val staleStaging = staging.exists() && staging.isDirectory && staging.listFiles().orEmpty().isNotEmpty()
@@ -459,6 +504,16 @@ class RootfsProvisionerImpl(
             else -> { /* NONE or FRESH_INSTALL_REQUIRED — caller decides */ }
         }
 
+        // ── P1（进程重启状态回灌）──
+        // current() 非 null ⇔ metadata.state == READY（见上方判定），但内存 _state
+        // 在进程重启后恒 IDLE —— install() 的 AlreadyReady 短路条件是
+        // `_state.value == READY`，漏回灌导致降级引导/离线首装用户**每次冷启动都
+        // 全量重装 rootfs**（300MB+ 拷贝 + SHA + 解压，分钟级 IO、双倍磁盘抖动）。
+        // reconcile 只在启动路径调用一次，此处回灌语义与 repair():551 的回灌一致。
+        if (activeRootfs != null && _state.value == ProvisioningState.IDLE) {
+            _state.value = ProvisioningState.READY
+        }
+
         return ReconciliationResult(
             activeRootfs = activeRootfs,
             state = if (activeRootfs != null) ProvisioningState.READY else ProvisioningState.IDLE,
@@ -469,10 +524,30 @@ class RootfsProvisionerImpl(
         )
     }
 
+    private companion object {
+        /** T81 (U-10)：可恢复错误码集合（重试/repair 可自愈）。 */
+        val RECOVERABLE_ERROR_CODES = setOf(
+            com.apex.agent.platform.terminal.ubuntu.ProvisioningErrorCode.CHECKSUM_MISMATCH,
+            com.apex.agent.platform.terminal.ubuntu.ProvisioningErrorCode.NETWORK_FAILURE,
+            com.apex.agent.platform.terminal.ubuntu.ProvisioningErrorCode.DOWNLOAD_FAILED,
+            com.apex.agent.platform.terminal.ubuntu.ProvisioningErrorCode.INSUFFICIENT_STORAGE
+        )
+    }
+
     // ─── §8: cancel() ───
+    // T81 (U-1)：真取消 —— 原实现只置状态 + 删 staging（运行中的下载/解压继续跑，
+    // 且删 staging 与运行中 extractor 竞态；install 协程随后还会覆写 _state）。
+    // 现在：有运行中 install → cancel 其协程（downloader/extractor 的 ensureActive
+    // 检查点响应，走 install 的 CancellationException 分支 → CANCELLED + 有序清理）。
     override suspend fun cancel(): Result<Unit> = runCatching {
-        _state.value = ProvisioningState.CANCELLED
-        File(layout.stagingDir.value).deleteRecursively()
+        val job = activeInstallJob
+        if (job != null && job.isActive) {
+            job.cancel()
+        } else {
+            // 无运行中 install：仅置状态 + 清 staging（原语义保留）
+            _state.value = ProvisioningState.CANCELLED
+            File(layout.stagingDir.value).deleteRecursively()
+        }
     }
 
     // ─── §18: repair() ───
@@ -516,12 +591,16 @@ class RootfsProvisionerImpl(
         try {
             _state.value = ProvisioningState.REMOVING
             emit(ProvisioningState.REMOVING, 0, "Removing")
-            val cleaned = mutableListOf<String>()
-            listOf(layout.versionsDir.value, layout.stagingDir.value, layout.archivesDir.value).forEach {
-                if (File(it).deleteRecursively()) cleaned.add(it)
+            // T84：删除 1GB+ 版本目录是重 IO —— 切离调用方线程（Main 调用必 ANR）。
+            val cleaned = withContext(Dispatchers.IO) {
+                val cleanedDirs = mutableListOf<String>()
+                listOf(layout.versionsDir.value, layout.stagingDir.value, layout.archivesDir.value).forEach {
+                    if (File(it).deleteRecursively()) cleanedDirs.add(it)
+                }
+                if (File(layout.currentMarker.value).delete()) cleanedDirs.add(layout.currentMarker.value)
+                metadataStore.delete()
+                cleanedDirs
             }
-            if (File(layout.currentMarker.value).delete()) cleaned.add(layout.currentMarker.value)
-            metadataStore.delete()
             _state.value = ProvisioningState.REMOVED
             emit(ProvisioningState.REMOVED, 100, "Removed (${cleaned.size} paths)")
             // T72: 语义正确的终态（P69 曾返回 Ready("removed")）
@@ -529,7 +608,12 @@ class RootfsProvisionerImpl(
         } finally {
             runCatching { fileLock.close() }
             installLock.release()
-            _state.value = ProvisioningState.IDLE
+            // P3 fix（审计 6-b）：REMOVED 是终态 —— finally 无条件回 IDLE 会立即
+            // 覆盖它（观测者只能看到 IDLE，误判“从未安装过”）。仅在未到达 REMOVED
+            //（异常/提前退出）时才回 IDLE 供重试。
+            if (_state.value != ProvisioningState.REMOVED) {
+                _state.value = ProvisioningState.IDLE
+            }
         }
     }
 

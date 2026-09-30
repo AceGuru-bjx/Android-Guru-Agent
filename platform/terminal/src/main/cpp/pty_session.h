@@ -63,7 +63,7 @@ public:
 
     int id() const { return id_; }
     int masterFd() const { return masterFd_.load(std::memory_order_acquire); }
-    pid_t pid() const { return pid_; }
+    pid_t pid() const { return pid_.load(std::memory_order_relaxed); }
 
     bool isAlive();
     bool write(const char* data, size_t len);
@@ -81,12 +81,53 @@ public:
     bool hasData();
     bool waitForData(int timeoutMs);
     bool sendSignal(int sig);
+
+    /**
+     * T82：只向控制终端的前台进程组（tcgetpgrp）发信号 —— **不碰 shell 自己的组**。
+     *
+     * 与 [sendSignal]（killProcessGroup：前台组 + 会话组，用于取消/关闭）互补：
+     * 本方法面向「打断当前命令但保留 shell」的语义（Termux 基线 §2.3 —— Ctrl-C
+     * 语义：杀前台命令，shell 活着回到 prompt）。
+     *
+     * 返回 false 的情况（调用方应退化到 session 级信号）：
+     *   - 无前台作业（fg == shell pid —— shell 自身在前台，即空闲 prompt）；
+     *   - tcgetpgrp 失败 / master fd 已关；
+     *   - kill(-fg) 失败（ESRCH —— 组已消失）。
+     */
+    bool signalForegroundGroup(int sig);
+
     void resize(int rows, int cols);
     void close();
-    int exitCode() const { return exitCode_; }
+    int exitCode() const { return exitCode_.load(std::memory_order_relaxed); }
+
+    /**
+     * T87（exec 失败诚实上报）：构造期 execv 失败的确切原因（errno → 人类可读）。
+     * 空串 = exec 成功（或尚未检测）。构造函数内的阻塞 read 保证构造返回时
+     * 结论已定 —— 无 TOCTOU 窗口。
+     *
+     * 背景：proot 会话在真机上可能因 exec 失败而「创建成功、进程即死」——
+     * 旧链路对 Kotlin 只返回一个 id，之后每次 write 都 EIO →
+     * 用户只看到「输入失败」，根因（如 ENOENT/ELIBBAD/EACCES）永远不可见。
+     */
+    std::string spawnError() const { return spawnError_; }
+
+    /** exec 是否失败（spawnError_ 非空的便捷判定）。 */
+    bool spawnFailed() const { return !spawnError_.empty(); }
 
 private:
     void reapChild();
+
+    /** T81 (N-2)：waitpid status → exitCode_ 单一解析出口（reapChild/close 共用）。 */
+    void applyExitStatus(int status);
+
+    /**
+     * T81 (N-4/N-5)：有界等待子进程退出 —— 轮询 reapChild（WNOHANG），
+     * [timeoutMs] 内退出返回 true。替代 close() 中原先后果更差的两件套：
+     *   a) 固定 usleep(50ms/100ms) —— 进程早退时白白阻塞；
+     *   b) 阻塞 waitpid(..., 0) —— SIGKILL 后进程处于 D-state 时会把
+     *      JNI 调用线程永久挂死。
+     */
+    bool waitExitBounded(int timeoutMs);
 
     /**
      * 向整个进程组发送信号（Spec PR #51 §1）。
@@ -100,13 +141,20 @@ private:
     bool killProcessGroup(int sig);
 
     int id_;
+    // T87：execv 失败原因（构造期确定；空 = 成功）。immutable after constructor。
+    std::string spawnError_;
     // P70 生命周期加固：masterFd_ 会被 close()（可能来自另一个线程）置 -1，
     // 与 readEx/write 并发读写 —— 用 atomic 消除数据竞争（fd 关闭后 read/write
     // 返回 EBADF → ERROR_，由上层按状态语义处理，而非 UB）。
     std::atomic<int> masterFd_{-1};
-    pid_t pid_ = -1;
+    // T81 (N-3 补强)：pid_ 由构造线程写、close() 写 -1、reapChild/readEx 的
+    // EOF 分支（持 ioMutex_）并发读 —— atomic 消除数据竞争（operator= 即
+    // store / 隐式转换即 load，调用点语法不变）。
+    std::atomic<pid_t> pid_{-1};
     std::atomic<bool> alive_{false};
-    int exitCode_ = -1;
+    // T81 (N-3)：exitCode_ 由 reapChild（任意调用 isAlive 的线程）写、
+    // exitCode()（JNI 线程）读 —— relaxed atomic 消除数据竞争 UB。
+    std::atomic<int> exitCode_{-1};
     std::mutex ioMutex_;
 };
 

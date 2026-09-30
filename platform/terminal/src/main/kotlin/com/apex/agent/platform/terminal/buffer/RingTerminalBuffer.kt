@@ -35,7 +35,10 @@ class RingTerminalBuffer(
     }
 
     override fun append(chunk: OutputChunk) {
-        require(chunk.endCursor == writePos.get() + 0L || chunk.startCursor == writePos.get()) {
+        // T85（R-5）：只允许 startCursor == writePos —— 旧条件第一个析取项
+        //（endCursor == writePos）会放行「终点对齐」的错位/重复 chunk：随后按当前
+        // 位置写入并 addAndGet(n)，造成数据错位 + totalCursor 虚增而非报错。
+        require(chunk.startCursor == writePos.get()) {
             "cursor discontinuity: chunk=${chunk.startCursor}..${chunk.endCursor}, totalCursor=${writePos.get()}"
         }
         synchronized(lock) {
@@ -123,7 +126,11 @@ class RingTerminalBuffer(
 
     override val retainedBytes: Int
         get() = synchronized(lock) {
-            minOf(writePos.get().toInt(), capacityBytes)
+            // P1 fix（边界值，两轮混沌审查同题确认）：writePos 是历史累计写入字节数（Long）。
+            // 旧实现先 toInt() 再 minOf —— 累计输出超过 2^31（≈2GB，yes 长跑即可达）时
+            // Int 回绕为负，minOf(负数, capacity) 返回负的 retainedBytes，破坏水位计算。
+            // 先在 Long 域取 min 再收窄，结果恒为 [0, capacityBytes]。
+            minOf(writePos.get(), capacityBytes.toLong()).toInt()
         }
 
     companion object {

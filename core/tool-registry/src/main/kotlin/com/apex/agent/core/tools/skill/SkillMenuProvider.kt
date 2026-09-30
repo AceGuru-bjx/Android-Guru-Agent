@@ -29,7 +29,14 @@ class SkillMenuProvider(
     }
 
     /**
-     * 获取内置模板（未安装但可安装的）
+     * 获取内置模板（未安装但可安装的）。
+     *
+     * Issue #166 历史兼容保留：v1.1 起内置优质技能改由 APK assets
+     * （assets/skills 目录，见 SkillRegistry.installBundled 与 SkillModule 首启释放）
+     * 提供并自动预装；本硬编码模板清单仅为兼容旧版「模板安装」入口与
+     * MarketInstallManager.installSkillTemplate 通道而原样保留，不再扩充。
+     * 注意：两者 id 命名空间已隔离（本清单为 web_scraper 等 5 个旧 id，
+     * assets 侧为 commit-message 等新 id，无冲突）。
      */
     fun getBuiltinTemplates(): List<SkillMenuItem> {
         val installedIds = skillRegistry.getInstalled().map { it.manifest.id }.toSet()
@@ -49,18 +56,21 @@ class SkillMenuProvider(
     companion object {
         // 公开给市场页（MarketScreen）复用同一份清单，避免与斜杠菜单两处漂移
         val BUILTIN_TEMPLATES = listOf(
-            BuiltinTemplate("web_scraper", "网页数据爬取", "从网页提取结构化数据"),
-            BuiltinTemplate("file_organizer", "文件自动整理", "按类型/日期自动分类整理文件"),
-            BuiltinTemplate("code_runner", "代码运行器", "编写并运行代码，自动修复错误"),
-            BuiltinTemplate("data_analyzer", "数据分析", "分析 CSV/JSON 数据，生成统计报告"),
-            BuiltinTemplate("coding_principles", "编码原则 (Karpathy)", "AI 编程协作九原则，约束 Agent 编码行为")
+            BuiltinTemplate("web_scraper", "网页数据爬取", "从网页提取结构化数据", "WEB", listOf("web", "scrape", "extract")),
+            BuiltinTemplate("file_organizer", "文件自动整理", "按类型/日期自动分类整理文件", "FILE", listOf("file", "organize", "automation")),
+            BuiltinTemplate("code_runner", "代码运行器", "编写并运行代码，自动修复错误", "SHELL", listOf("code", "execute", "python")),
+            BuiltinTemplate("data_analyzer", "数据分析", "分析 CSV/JSON 数据，生成统计报告", "UTILITY", listOf("data", "analysis", "csv")),
+            BuiltinTemplate("coding_principles", "编码原则 (Karpathy)", "AI 编程协作九原则，约束 Agent 编码行为", "AGENT", listOf("prompt", "coding", "principles"))
         )
     }
 
     data class BuiltinTemplate(
         val id: String,
         val name: String,
-        val description: String
+        val description: String,
+        /** 市场分类（镜像 ToolCategory 枚举名）。 */
+        val category: String? = null,
+        val tags: List<String> = emptyList()
     )
 }
 

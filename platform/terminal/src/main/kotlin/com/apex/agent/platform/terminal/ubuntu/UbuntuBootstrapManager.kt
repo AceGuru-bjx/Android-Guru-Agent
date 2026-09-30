@@ -4,13 +4,17 @@ import com.apex.agent.platform.terminal.errors.LinuxEnvironmentError
 import com.apex.agent.platform.terminal.linux.RootfsDescriptor
 import com.apex.agent.platform.terminal.network.LinuxNetworkProbe
 import com.apex.agent.platform.terminal.pkg.LinuxPackageManager
+import com.apex.agent.platform.terminal.pkg.PackageInstallOptions
 import com.apex.agent.platform.terminal.pkg.PackageSpec
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -36,9 +40,10 @@ import java.io.RandomAccessFile
  *    同时首次访问 Ubuntu → 只有一个执行 bootstrap，其余等待并共享结果。
  *  - **崩溃恢复**（T76 §18 / §27）：阶段进度持久化到 [BootstrapStateStore]。App
  *    重启后 [reconcile] 检测 IN_PROGRESS 状态 → 重新执行未完成阶段。绝不假报 READY。
- *  - **取消正确**（T76 §36）：CancellationException 重抛，状态置 FAILED（可 retry），
- *    锁释放。
- *  - **超时**（T76 §37）：bootstrap 整体可配超时；内部 apt 操作各自超时。
+ *  - **取消正确**（T76 §36）：CancellationException 重抛（P2 fix：原实现吞掉），
+ *    状态置 FAILED（可 retry），锁释放。
+ *  - **超时**（T76 §37 / P2 fix）：bootstrap 整体可配超时，超时返回 InProgress
+ *   （已完成阶段证据持久化，重试可续跑）；内部 apt 操作各自超时。
  */
 class UbuntuBootstrapManager(
     private val provisioner: RootfsProvisioner,
@@ -109,15 +114,41 @@ class UbuntuBootstrapManager(
         if (st == BootstrapState.READY && !force) {
             return BootstrapResult.AlreadyReady(st)
         }
+        // P3 fix（审计 6-b）：rootfs 未安装（hostDir==null）→ 明确的 ROOTFS_NOT_READY
+        // 结构化错误 —— 原实现 acquireOsLock 对 null hostDir 同样返回 null，被误报成
+        // Busy（“另一实例持锁”），Agent 会徒劳地稍后重试而非先去安装 rootfs。
+        if (rootfsHostDirProvider() == null) {
+            return BootstrapResult.Failed(
+                LinuxEnvironmentError.rootfsNotReady(
+                    "rootfs host dir unavailable — call terminal.ubuntu.install first"
+                ),
+                BootstrapState.CHECKING.name,
+                BootstrapState.NOT_STARTED
+            )
+        }
         // 并发：拿不到锁说明另一 bootstrap 在进行
         val osLock = acquireOsLock()
             ?: return BootstrapResult.Busy("another bootstrap instance holds the OS lock")
         return try {
             mutex.withLock {
-                runBootstrapInternal(force, timeoutMs)
+                // P2 fix（审计 6-b / T76 §37）：timeoutMs 实际生效 —— 原实现参数完全
+                // 未使用，超时永不发生（InProgress 结果永不产生，调用方无限等待）。
+                // 超时返回 InProgress：已完成的阶段证据已持久化，重试可续跑。
+                // T84：withContext(IO) —— apt/dpkg 子进程是 ProcessBuilder 阻塞等待，
+                // 协调器 → VM（Main.immediate）路径曾把整个 bootstrap 压在主线程。
+                withTimeoutOrNull(timeoutMs) {
+                    withContext(Dispatchers.IO) { runBootstrapInternal(force, timeoutMs) }
+                }
+                    ?: BootstrapResult.InProgress(
+                        currentState,
+                        "bootstrap timed out after ${timeoutMs}ms — progress persisted, retry to resume"
+                    )
             }
         } catch (ce: CancellationException) {
-            BootstrapResult.Cancelled(currentState)
+            // T76 §36 契约（P2 fix）：状态置 FAILED（可 retry）后重抛 ——
+            // 原实现吞掉 CancellationException，结构化取消传播失效。
+            currentState = BootstrapState.FAILED
+            throw ce
         } catch (e: Exception) {
             val err = LinuxEnvironmentError.unknown("bootstrap crashed: ${e.message}", e)
             BootstrapResult.Failed(err, currentState.name, currentState)
@@ -168,8 +199,15 @@ class UbuntuBootstrapManager(
         // ── 2. CONFIGURING：sources.list + env ──
         if (force || !evidence.containsKey(BootstrapState.CONFIGURING.name)) {
             stageStart(BootstrapState.CONFIGURING, "configuring sources.list + env")
-            val rootfs = provisioner.current()!!
-            val rootfsDir = File(rootfs.location!!.value)
+            // T81 (U-3)：NPE 修复 —— 原实现 `provisioner.current()!!` + `location!!`：
+            // CHECKING 阶段可被上一进程的 stageEvidence 短路跳过，此后 rootfs 被
+            // invalidate/remove → `!!` 抛 NPE → 泛型 catch 吞成
+            // "bootstrap crashed: null"（错误信息无语义）。
+            val rootfs = provisioner.current()
+                ?: return stageFail(BootstrapState.CONFIGURING, "rootfs disappeared between stages — re-install (terminal.ubuntu.install)")
+            val rootfsLocation = rootfs.location
+                ?: return stageFail(BootstrapState.CONFIGURING, "rootfs has no location — re-install (terminal.ubuntu.install)")
+            val rootfsDir = File(rootfsLocation.value)
             val arch = rootfs.architecture
             val sourcesResult = sourcesList.ensure(rootfsDir, arch)
             if (!sourcesResult.written && sourcesResult.actions.any { it.contains("skipped") }) {
@@ -192,21 +230,113 @@ class UbuntuBootstrapManager(
             stageDone(BootstrapState.NETWORK_CHECK)
         }
 
+        // ── T84: 完整 rootfs 离线短路 —— essential 全部已预装时跳过 apt 阶段 ──
+        // 完整 rootfs（scripts/build_full_rootfs.sh 构建产物）把 essential 全集
+        // 在构建期装进档案；对已装包再跑 apt update + install 是纯网络仪式，且
+        // BASE_PACKAGES 的磁盘预检（100MB + N×250MB）会对全预装虚报 ~6GB 需求。
+        // dpkg-query 批量探测只读 dpkg 数据库（零网络，单次 exec）；全部已装 →
+        // 两阶段直接记 evidence（诚实标注 skipped-preinstalled），bootstrap 全程
+        // 离线完成 —— 终端开箱即用，不落下「apt 引导未完成」的降级注记。
+        if (force ||
+            (!evidence.containsKey(BootstrapState.APT_UPDATE.name) &&
+             !evidence.containsKey(BootstrapState.BASE_PACKAGES.name))
+        ) {
+            val preinstalled = aptManager.batchInstalledStatus(baseProfile.essential)
+            if (preinstalled != null && preinstalled.values.all { it }) {
+                stageStart(
+                    BootstrapState.APT_UPDATE,
+                    "essential 全部预装于内置完整 rootfs — 跳过 apt update（离线就绪）"
+                )
+                stageDone(BootstrapState.APT_UPDATE)
+                stageStart(
+                    BootstrapState.BASE_PACKAGES,
+                    "基础包校验已预装（${baseProfile.essential.size} 个，无需 apt）"
+                )
+                stageDone(BootstrapState.BASE_PACKAGES)
+            }
+        }
+
         // ── 4. APT_UPDATE ──
+        // ★ 镜像自动 fallback（用户反馈「每次都会显示 APT 引导未完成」的根因之一）：
+        // 默认官方源（ports/archive.ubuntu.com）在大陆网络下普遍超时/被墙 →
+        // apt update 失败 → bootstrap FAILED → 降级 READY + bootstrapNote，
+        // 且 ensureReady 的 READY 短路让引导永不重试（见 Coordinator 侧修复）。
+        // 修复：官方源失败后依次尝试 TUNA → USTC → Aliyun（重写 sources 后重试），
+        // 任一成功即完成本阶段并记录所用镜像；全部失败才如实 stageFail。
         if (force || !evidence.containsKey(BootstrapState.APT_UPDATE.name)) {
             stageStart(BootstrapState.APT_UPDATE, "running apt-get update")
-            val updateResult = aptManager.update()
+            // 记录初始 sources 内容：镜像链全失败时恢复，避免 sources 永久停留在
+            // 最后一个镜像（官方源永不再被验证，海外/网络恢复用户可能更慢或被墙）
+            val rootfsDesc0 = provisioner.current()
+            val rootfsDir0 = rootfsDesc0?.location?.let { File(it.value) }
+            val originalSources: String? = rootfsDir0?.let { dir ->
+                runCatching { File(dir, "etc/apt/sources.list").readText() }.getOrNull()
+            }
+            var updateResult = aptManager.update()
+            var usedMirror: String? = null
             if (updateResult.state != com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED) {
-                val reason = updateResult.error?.message ?: updateResult.result?.stderr?.take(500) ?: "apt update failed"
+                val rootfsDesc = provisioner.current()
+                val rootfsDir = rootfsDesc?.location?.let { File(it.value) }
+                if (rootfsDir != null && rootfsDir.isDirectory) {
+                    for (mirrorId in MIRROR_FALLBACK_ORDER) {
+                        _progress.tryEmit(BootstrapProgress.StageStarted(
+                            BootstrapState.APT_UPDATE.name,
+                            "官方源 apt update 失败 — 切换镜像 $mirrorId 重试"
+                        ))
+                        val applied = sourcesList.apply(
+                            rootfsDir, rootfsDesc.architecture, mirrorId, force = true
+                        )
+                        if (!applied.written && applied.actions.any { it.startsWith("SourcesError") }) {
+                            continue
+                        }
+                        updateResult = aptManager.update()
+                        if (updateResult.state ==
+                            com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED
+                        ) {
+                            usedMirror = mirrorId
+                            break
+                        }
+                    }
+                    // P2（镜像回滚）：全部镜像失败 → 恢复原 sources（含官方源），
+                    // 下次重试从官方源重新起步而非钉死在 aliyun。
+                    if (usedMirror == null && originalSources != null && rootfsDir != null) {
+                        runCatching {
+                            File(rootfsDir, "etc/apt/sources.list").writeText(originalSources)
+                        }
+                    }
+                }
+            }
+            if (updateResult.state != com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED) {
+                val reason = updateResult.error?.message
+                    ?: updateResult.result?.stderr?.take(500)
+                    ?: "apt update failed (official + ${MIRROR_FALLBACK_ORDER.joinToString("/")} mirrors all failed)"
                 return stageFail(BootstrapState.APT_UPDATE, reason)
             }
-            stageDone(BootstrapState.APT_UPDATE)
+            if (usedMirror != null) {
+                evidence["APT_UPDATE_MIRROR"] = System.currentTimeMillis()
+                _progress.tryEmit(BootstrapProgress.StageCompleted(
+                    BootstrapState.APT_UPDATE.name,
+                    System.currentTimeMillis() - started
+                ))
+                completedStages.add("${BootstrapState.APT_UPDATE.name}@mirror=$usedMirror")
+                // P2（幂等）：镜像成功路径同样写入 APT_UPDATE 阶段证据 ——
+                // 旧实现漏写，超时/崩溃恢复时本阶段会被无意义地重跑（分钟级）。
+                evidence[BootstrapState.APT_UPDATE.name] = System.currentTimeMillis()
+            } else {
+                stageDone(BootstrapState.APT_UPDATE)
+            }
         }
 
         // ── 5. BASE_PACKAGES ──
         if (force || !evidence.containsKey(BootstrapState.BASE_PACKAGES.name)) {
             stageStart(BootstrapState.BASE_PACKAGES, "installing base packages: ${baseProfile.essential}")
-            val installResult = aptManager.install(baseProfile.essential.map { PackageSpec(it) })
+            // --no-install-recommends：essential 已显式列出 24 个包；默认带 recommends
+            // 时 python3/git 的推荐依赖会把下载量从 ~100MB 拉到 200-500MB，在慢网络
+            // （大陆 → 官方源）下几乎必然拖垮 bootstrap。推荐包留给 Agent/用户显式安装。
+            val installResult = aptManager.install(
+                baseProfile.essential.map { PackageSpec(it) },
+                PackageInstallOptions(noInstallRecommends = true)
+            )
             if (installResult.state != com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED) {
                 val reason = installResult.error?.message ?: installResult.result?.stderr?.take(500) ?: "base package install failed"
                 return stageFail(BootstrapState.BASE_PACKAGES, reason)
@@ -359,7 +489,18 @@ class UbuntuBootstrapManager(
     }
 
     companion object {
-        const val DEFAULT_BOOTSTRAP_TIMEOUT_MS: Long = 600_000L  // 10 min
+        /**
+         * T84：从 10 分钟提到 15 分钟 —— 完整 rootfs 的慢网络 apt 引导（本已少见：
+         * essential 预装时被离线短路）+ dpkg 配置队列在低端机的余量。
+         */
+        const val DEFAULT_BOOTSTRAP_TIMEOUT_MS: Long = 900_000L
         const val LOCK_FILENAME = ".bootstrap.lock"
+
+        /**
+         * ★ APT_UPDATE 失败时的镜像自动 fallback 顺序（AptMirrorRegistry id）。
+         * TUNA/USTC/Aliyun 均为大陆环境下 ports.ubuntu.com 的实际可用替代；
+         * 全球用户不受影响 —— 仅在官方源失败后才尝试。
+         */
+        val MIRROR_FALLBACK_ORDER: List<String> = listOf("tuna", "ustc", "aliyun")
     }
 }

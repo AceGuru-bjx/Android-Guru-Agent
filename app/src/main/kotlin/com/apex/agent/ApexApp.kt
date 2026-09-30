@@ -6,16 +6,29 @@ import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import com.apex.agent.attachment.AttachmentCleanupManager
 import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.diagnostics.LogFileSink
+import com.apex.agent.net.NetworkMonitor
+import com.apex.agent.notify.ApexNotifications
+import com.apex.agent.notify.ForegroundTracker
+import com.apex.agent.platform.EnvironmentStateUpdater
 import com.apex.agent.platform.csmem.actor.MemoryWriterActor
 import com.apex.agent.platform.csmem.dream.DreamRenderer
+import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
 import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.core.logging.LogLevel
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.SvgDecoder
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 import javax.inject.Inject
 
 @HiltAndroidApp
-class ApexApp : Application(), Configuration.Provider {
+class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
 
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
@@ -33,20 +46,150 @@ class ApexApp : Application(), Configuration.Provider {
     @Inject
     lateinit var dreamRenderer: DreamRenderer
 
+    // T82→T85: Ubuntu 产品级生命周期 —— App 启动时恢复现场（reconcile + 状态派生），
+    // T85 内置交付语义：rootfs 随 APK 内置（完整 Ubuntu ~300MB+ 档），解包**纯离线**，
+    // 因此启动即自动预备（无需用户同意下载 —— 没有任何下载）。首次启动约 2~5 分钟
+    // 后台解包 + 引导；进度经 stateFlow/progressFlow 供终端页 / 环境中心订阅。
+    @Inject
+    lateinit var ubuntuLifecycle: UbuntuLifecycleCoordinator
+
+    // Tool System v3：环境能力遥测桥（无障碍连接态 → 环境门控与 prompt 快照；
+    // 可编辑焦点事件 → keyboard_active TTL 信号）。
+    @Inject
+    lateinit var environmentStateUpdater: EnvironmentStateUpdater
+
+    /** T82：apexctl 桥（guest 脚本 ↔ Android 能力，经持久化 home bind 的文件队列）。 */
+    @Inject
+    lateinit var guestBridgeService: com.apex.agent.platform.terminal.bridge.GuestBridgeService
+
+    // ★ #173 逆向 MCP Host：触发 @Singleton 创建 —— enabled 时 App 启动即自启
+    //（见 McpHostManager.init；未启用则零网络副作用）。
+    @Inject
+    lateinit var mcpHostManager: com.apex.agent.mcphost.McpHostManager
+
+    // ═══ v1.4.4：诊断 / 通知 / 网络 —— 启动即初始化的三个单例 ═══
+
+    /** #7 日志落盘管道：AppLogger INFO+ 事件 → filesDir/logs/（日切 + 保留 7 天）。 */
+    @Inject
+    lateinit var logFileSink: LogFileSink
+
+    /** #4 前台跟踪：ActivityLifecycleCallbacks 计数器（任务完成通知的静音判定）。 */
+    @Inject
+    lateinit var foregroundTracker: ForegroundTracker
+
+    /** #4 通知中心：建双渠道（任务完成 HIGH / 通用 DEFAULT）。 */
+    @Inject
+    lateinit var notifications: ApexNotifications
+
+    /** #6 网络监测：ConnectivityManager 仲裁式状态源（离线横幅/后续重试策略共用）。 */
+    @Inject
+    lateinit var networkMonitor: NetworkMonitor
+
+    /** 后台启动任务专用 scope（SupervisorJob：单任务失败不殊及兄弟任务）。 */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
             .build()
 
+    // #174 模型品牌图标：SimpleIcons CDN 提供的是 SVG，需在全局 ImageLoader
+    // 注册 SvgDecoder（Coil 2.x 经 ImageLoaderFactory 接管默认加载器；
+    // 附件预览/Markdown 图片等其他 Coil 调用点不受影响，仅多一种解码能力）。
+    override fun newImageLoader(): ImageLoader =
+        ImageLoader.Builder(this)
+            .components { add(SvgDecoder.Factory()) }
+            .crossfade(true)
+            .build()
+
     override fun onCreate() {
         super.onCreate()
         installGlobalCrashHandler()
+        // ═══ v1.4.4：启动即初始化（顺序有意为之）═══
+        // 前台跟踪最先注册：后续任何路径的 isForeground 判定都可靠；
+        // 日志落盘紧随 crash handler —— 启动期日志也能留痕（重启后可查）；
+        // 通知渠道幂等创建（targetSdk 28 在 Android 13+ 由系统自动弹授权对话框）；
+        // 网络监测注入即回调注册（StateFlow 初值同步探测）。
+        runCatching { foregroundTracker.register(this) }
+        runCatching { logFileSink.start() }
+        runCatching { notifications.ensureChannels(this) }
+        runCatching { networkMonitor.isOnline.value } // 触发单例创建 + 回调注册
         initShizuku()
         // attachmentCleanupManager 字段已通过 Hilt @Inject 触发单例创建，
         // schedulePeriodicCleanup() 已在 AttachmentModule 的 @Provides apply block 中调用。
 
         // 启动 CS-Mem 记忆写入管道与后台梦境整理（见报告 P0：初始化缺口）。
         initCsMem()
+
+        // T85: Ubuntu 生命周期恢复 + 内置 rootfs 自动预备（见 initUbuntuLifecycleRecovery）。
+        initUbuntuLifecycleRecovery()
+
+        // Tool System v3：环境能力遥测桥（accessibility_ready / keyboard_active）。
+        initEnvironmentTelemetry()
+
+        // T82：启动 apexctl 桥轮询（幂等 —— 目录 + 脚本在启动时 ensure；Handler 已在
+        // DI 注册）。guest 侧 rootfs 安装后即可 `apexctl <action>` 调用 Android 能力。
+        runCatching { guestBridgeService.start() }
+            .onFailure { Log.w("ApexAgent", "guest bridge start failed: ${it.message}") }
+    }
+
+    /**
+     * Tool System v3 环境遥测：无障碍可用性 StateFlow → ToolEnvironmentState。
+     * 桥接失败不阻断启动（未知态 = fail-open，门控行为退回 v1）。
+     */
+    private fun initEnvironmentTelemetry() {
+        runCatching {
+            environmentStateUpdater.start()
+        }.onFailure {
+            Log.w("ApexAgent", "EnvironmentStateUpdater start failed: ${it.message}")
+        }
+    }
+
+    /**
+     * T85: App 启动后的 Ubuntu 状态收敛 + **自动预备**。
+     *
+     * warmUp 语义（UbuntuLifecycleCoordinator）：
+     * - rootfs 安装中断 → 清 stale staging / 孤儿 temp（provisioner.reconcile）；
+     * - bootstrap 中断态 → 状态机如实标记（下次 ensureReady 续跑未完成阶段）；
+     * - 已 READY → 秒级确认，零副作用。
+     *
+     * T85 自动预备（下载时代 → 内置时代的语义切换）：
+     * - warmUp 后 phase == NOT_INSTALLED → 直接后台 ensureReady（离线解包内置
+     *   rootfs，无网络消耗 —— 「用户没同意流量」的老顾虑已不存在）；
+     * - phase == ROOTFS_READY → 引导增强也顺手补齐（bootstrap 失败自动降级，
+     *   不阻塞可用性）；
+     * - FAILED → 不自动重试（用户在终端页/环境中心手动重试，保留失败现场）。
+     *
+     * 用户体验目标：安装 APK → 打开 App → 无需任何点击，Ubuntu 在后台就绪；
+     * 进终端页时看到的是实时进度而非「未解包」等待用户行动的横幅。
+     */
+    private fun initUbuntuLifecycleRecovery() {
+        appScope.launch {
+            runCatching { ubuntuLifecycle.warmUp() }
+                .onSuccess { report ->
+                    Log.i("ApexAgent", "Ubuntu lifecycle warmUp: action=${report.action} " +
+                        "staleStaging=${report.staleStaging} phase=${report.phaseAfter.name}")
+                }
+                .onFailure {
+                    Log.w("ApexAgent", "Ubuntu lifecycle warmUp failed: ${it.message}")
+                }
+            // T85：内置 rootfs 自动预备（幂等单飞 —— 终端页/Agent 并发 ensureReady
+            // 只会共享同一次编排）。IO 调度：ensureReady 链含文件解压与子进程探测。
+            val phase = ubuntuLifecycle.stateFlow.value.phase
+            if (phase == UbuntuLifecycleCoordinator.Phase.NOT_INSTALLED ||
+                phase == UbuntuLifecycleCoordinator.Phase.ROOTFS_READY
+            ) {
+                val r = runCatching {
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        ubuntuLifecycle.ensureReady()
+                    }
+                }.getOrNull()
+                Log.i(
+                    "ApexAgent",
+                    "Ubuntu auto-provision: ${r?.let { it::class.simpleName } ?: "failed"}"
+                )
+            }
+        }
     }
 
     /**
