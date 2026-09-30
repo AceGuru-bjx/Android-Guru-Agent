@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═══ #197 模板工坊（Template Studio）═══ -->
+    <string name="templates_tab_agent">Agent 模板</string>
+    <string name="templates_tab_coding">Coding 模板</string>
+    <string name="templates_agent_list_title">Agent 提示词模板</string>
+    <string name="templates_agent_list_subtitle">翻译/总结/写作等通用任务 —— 服务 Agent 屏</string>
+    <string name="templates_coding_list_title">Coding 提示词模板</string>
+    <string name="templates_coding_list_subtitle">代码评审/提交信息等开发任务 —— 服务 Coding 屏</string>
+    <string name="templates_create">新建</string>
+    <string name="templates_builtin">内置（复制后可改）</string>
+    <string name="templates_edit">编辑</string>
+    <string name="templates_duplicate">复制</string>
+    <string name="templates_delete">删除</string>
+    <string name="templates_editor_new">新建模板</string>
+    <string name="templates_editor_edit">编辑模板</string>
+    <string name="templates_field_name">名称</string>
+    <string name="templates_field_description">说明</string>
+    <string name="templates_field_content">正文（支持 {{变量}} 占位符）</string>
+    <string name="templates_content_hint">在这里编写提示词…用 {{变量}} 做占位符</string>
+    <string name="templates_vars_detected">检测到变量：%1$s</string>
+    <string name="templates_save">保存</string>
+    <string name="templates_cancel">取消</string>
+</resources>

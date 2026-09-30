@@ -52,6 +52,9 @@ class CodeAgentEngine(
     /** 全局规则文本（设置层 AgentSettings.globalRules 的引擎侧缓存）。 */
     private var globalRules: String = ""
 
+    /** #197 「小圆环」会话上下文附加段（coding 工位独占，见 [updateSessionExtras]）。 */
+    private var sessionExtras: String? = null
+
     /**
      * 当前思考档位（coding 专属七档枚举）：引擎侧缓存，refreshContext 时取
      * 对应编码特化指令。引擎配置层的通用画像由 delegate.patchConfig 的
@@ -141,6 +144,46 @@ class CodeAgentEngine(
      */
     fun updateGlobalRules(rules: String) {
         globalRules = rules
+    }
+
+    /**
+     * #197 切换执行模式（Coding 屏的 Build/Plan 双档）：
+     * PLAN = 先出完整计划、用户确认后逐步执行；BUILD = 边想边做。
+     * patchConfig 即时生效（下一轮请求携带新模式）。
+     */
+    fun updateMode(mode: com.apex.agent.core.engine.AgentMode) {
+        delegate.patchConfig { cfg -> cfg.copy(mode = mode) }
+    }
+
+    /**
+     * #197 计划确认/驳回（PLAN 模式人控门）：透传给 delegate。
+     * confirmed=true 时可携带步骤勾选与重排（原 index 口径）。
+     */
+    fun submitPlanConfirmation(
+        confirmed: Boolean,
+        enabledSteps: List<Int>? = null,
+        order: List<Int>? = null
+    ) {
+        delegate.submitPlanConfirmation(confirmed, enabledSteps, order)
+    }
+
+    /**
+     * #197 「小圆环」会话上下文附加段（coding 工位独占）：
+     * 网络搜索/时间感知/结构化输出/用户规则的组装文本，refreshContext
+     * 时追加在编码身份段之后（JIT 语义：存字段，下轮生效）。
+     */
+    fun updateSessionExtras(extras: String?) {
+        sessionExtras = extras?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * #197 强制函数调用（v4 语义）：forcedToolIds 非空 = 本轮只暴露
+     * 选中工具且 tool_choice=required；exposeAllTools = 全量暴露。
+     */
+    fun updateForcedTools(forcedToolIds: Set<String>, exposeAll: Boolean) {
+        delegate.patchConfig { cfg ->
+            cfg.copy(forcedToolIds = forcedToolIds, exposeAllTools = exposeAll)
+        }
     }
 
     /**
@@ -239,6 +282,9 @@ class CodeAgentEngine(
                 ?.let { rulesProvider.formatProjectRules(it) }
                 ?.let { segments += it }
         }
+
+        // #197 小圆环会话上下文（coding 工位独占）：附加在末尾
+        sessionExtras?.let { segments += it }
 
         val context = segments.joinToString("\n\n")
         delegate.patchConfig { cfg ->

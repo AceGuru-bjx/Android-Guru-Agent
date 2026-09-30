@@ -171,6 +171,8 @@ fun ApexDrawerContent(
                         DrawerDestination.Agent,
                         // Coding 模式：与 Agent 平级的独立工作流页，导航紧随其后
                         DrawerDestination.Code,
+                        // #197 模板工坊：Agent/Coding 双层模板 + Agent 角色详细设置
+                        DrawerDestination.Templates,
                         DrawerDestination.Terminal,
                         DrawerDestination.Market,
                         DrawerDestination.Memory,

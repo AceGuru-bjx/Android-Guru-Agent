@@ -23,6 +23,13 @@ data class CodeUiState(
     val error: String? = null,
     val pendingQuestion: String? = null,
 
+    // ── #197 执行模式（Coding 屏 Build/Plan 双档）──
+    val mode: com.apex.agent.core.engine.AgentMode = com.apex.agent.core.engine.AgentMode.BUILD,
+
+    // ── #197 PLAN 模式计划确认（人控门）──
+    val plan: com.apex.agent.core.engine.ExecutionPlan? = null,
+    val awaitingPlanConfirmation: Boolean = false,
+
     // ── Todo（code_todo 快照）──
     val todos: List<CodeTodoTool.Todo> = emptyList(),
 

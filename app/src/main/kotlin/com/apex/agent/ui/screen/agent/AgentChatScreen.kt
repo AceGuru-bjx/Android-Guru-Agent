@@ -27,6 +27,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.History
@@ -59,6 +61,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.EntryPointAccessors
@@ -70,8 +73,6 @@ import com.apex.agent.ui.component.AttachButton
 import com.apex.agent.ui.component.AttachmentPreviewBar
 import com.apex.agent.ui.component.FeedbackSeverity
 import com.apex.agent.ui.component.FileOpener
-import com.apex.agent.ui.component.GithubIconButton
-import com.apex.agent.ui.component.GithubTokenDialog
 import com.apex.agent.ui.component.HtmlPreviewDialog
 import com.apex.agent.ui.component.ImageLightbox
 import com.apex.agent.ui.component.LocalFeedbackController
@@ -84,9 +85,9 @@ import com.apex.agent.ui.component.rememberSlashMenuProvider
 import com.apex.agent.ui.glass.GlassCard
 import com.apex.agent.ui.glass.GlassFloatingButton
 import com.apex.agent.ui.glass.GlassStyle
-import com.apex.agent.ui.screen.agent.toolkit.OutputFormat
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
+import androidx.compose.ui.text.font.FontWeight
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -120,14 +121,7 @@ fun AgentChatScreen(
     // Spec §5/§8/§10：输入栏与悬浮操作悬浮于内容之上，真实 backdrop 采样 + 模糊。
     val glassState = remember { HazeState() }
 
-    // ═══ "小大脑" + "小圆环"菜单状态收集 ═══
-    val toolkit = viewModel.toolkitStore
-    val webSearchEnabled by toolkit.webSearchEnabled.collectAsStateWithLifecycle()
-    val timeEnabled by toolkit.timeEnabled.collectAsStateWithLifecycle()
-    val selectedFunctionIds by toolkit.selectedFunctionIds.collectAsStateWithLifecycle()
-    val outputFormat by toolkit.outputFormat.collectAsStateWithLifecycle()
-    val customSchema by toolkit.customSchema.collectAsStateWithLifecycle()
-    val rules by toolkit.rules.collectAsStateWithLifecycle()
+    // ═══ "小大脑"菜单状态收集（#197：小圆环工具菜单已迁至 Coding 屏）═══
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val providers by viewModel.providers.collectAsStateWithLifecycle()
     val currentProfileId by viewModel.currentProfileId.collectAsStateWithLifecycle()
@@ -137,14 +131,9 @@ fun AgentChatScreen(
     // ═══ Agent 角色（人设）：当前角色 + 全量列表（顶栏 AgentRoleSelector）═══
     val activeRole by viewModel.activeAgentRole.collectAsStateWithLifecycle()
     val roles by viewModel.agentRoles.collectAsStateWithLifecycle()
-    // ═══ UX-3：LLM 配置状态（未配置 && 空会话时在消息区顶部显示引导卡）═══
+    // ═══ UX-3：LLM 配置状态（未配置 && 空会话时在消息区顶部显示引导卡；
+    // #197：未配置时发送被拦截并弹浮窗引导）═══
     val llmConfigured by viewModel.llmConfigured.collectAsStateWithLifecycle()
-    // 函数调用二级菜单候选工具（注册表快照，v2：含类别/风险元数据）。
-    // 缺陷 6 修复：用 viewModel.toolCount 作 key，
-    // 注册表变更后下次重组即重新读取，避免 remember{} 永久缓存导致新装 Skill/插件不出现。
-    val availableTools = remember(viewModel.toolCount) {
-        viewModel.availableTools()
-    }
 
     // Lightbox 状态：点击附件图片时展开全屏预览
     var lightboxImage by remember { mutableStateOf<Any?>(null) }
@@ -160,29 +149,21 @@ fun AgentChatScreen(
     // ═══ Viro 桌宠情绪：Agent 运行态 → 宠物动画形态（推导见文件尾 viroPetMoodOf）═══
     val viroMood = viroPetMoodOf(uiState, pendingQuestion, taskState)
 
-    // ═══ 自定义模式指令对话框（点击 Custom 模式 chip 时打开）═══
-    var showCustomInstructionDialog by remember { mutableStateOf(false) }
-    val customInstruction by viewModel.customInstruction.collectAsStateWithLifecycle()
-
-    // ═══ #168 CUSTOM 模式预设：当前选中预设（顶栏 chip 展示/点击编辑）═══
-    val activeModePreset by viewModel.activeModePreset.collectAsStateWithLifecycle()
-    var editingPreset by remember { mutableStateOf<com.apex.agent.core.engine.modes.ModePreset?>(null) }
+    // #197 CUSTOM 模式已退役（Agent 屏只剩 Chat/Agent 双模式）：
+    // 自定义指令/预设编辑 UI 一并移除，预设管理统一在「模板工坊」页。
 
     // ═══ #168 模式指南底部弹层（AgentModeSelector 的「?」图标打开）═══
     var showModeGuide by remember { mutableStateOf(false) }
+
+    // ═══ #197 模型 API 未配置浮窗（发送时拦截并提示去配置）═══
+    var showApiMissingNotice by remember { mutableStateOf(false) }
 
     // ═══ 历史对话：会话列表 + 抽屉开关（顶栏「历史」按钮唤起）═══
     val chatSessions by viewModel.chatSessions.collectAsStateWithLifecycle()
     var showHistory by remember { mutableStateOf(false) }
 
-    // ═══ /mcp:github 未连接时的连接对话框 ═══
-    // ViewModel 在路由 /mcp:github 时若发现 GitHub 未连接，会发射 requestGithubConnect
-    // 一次性事件；这里收集后打开复用的 GithubTokenDialog，避免用户必须先点输入栏 GitHub
-    // 图标才能连接 —— 让斜杠命令自身引导完成连接闭环。
-    var showGithubConnectDialog by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        viewModel.requestGithubConnect.collect { showGithubConnectDialog = true }
-    }
+    // #197 GitHub 连接已迁至 Coding 屏（Agent 屏删除 gh 连接入口）：
+    // requestGithubConnect 收集器与 GithubTokenDialog 一并移除。
 
     // 异步动作真实结果反馈（v1.4.4 #6：Toast → 统一反馈层 —— 与全局 Snackbar
     // 视觉一致，支持严重级配色与操作按钮；未包 FeedbackHost 时静默降级）
@@ -307,35 +288,13 @@ fun AgentChatScreen(
                     current = uiState.mode,
                     onSelect = { mode ->
                         viewModel.setMode(mode)
-                        // Custom 模式：有选中预设 → 弹预设编辑（改的是预设本体）；
-                        // 无预设 → 旧单串指令对话框（兼容路径）
-                        if (mode == AgentMode.CUSTOM) {
-                            val preset = activeModePreset
-                            if (preset != null) editingPreset = preset
-                            else showCustomInstructionDialog = true
-                        }
                     },
-                    onOpenGuide = { showModeGuide = true }
+                    onOpenGuide = { showModeGuide = true },
+                    modes = AGENT_SCREEN_MODES
                 )
 
-                // ═══ #168 CUSTOM 模式：当前预设名 chip（选中预设的可见锚点）═══
-                // 让「现在跑的是哪套指令」一眼可见；点击直接编辑该预设。
-                activeModePreset?.let { preset ->
-                    val presetChipCd = stringResource(R.string.chat_mode_preset_cd, preset.name)
-                    androidx.compose.material3.AssistChip(
-                        onClick = { editingPreset = preset },
-                        label = {
-                            Text(
-                                text = preset.name,
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        },
-                        modifier = Modifier
-                            .heightIn(min = 28.dp)
-                            .semantics { contentDescription = presetChipCd }
-                    )
-                }
+                // #197：CUSTOM 模式已随双工位拆分退役（Agent 屏只剩 Chat/Agent），
+                // 预设 chip 编辑入口移除；模板/预设统一在「模板工坊」页管理。
 
                 // ═══ 双级思考控制（RikkaHub 式）：第一级 = 模型原生 reasoning effort（API 参数），
                 // 第二级 = 强制深度思考（提示词层，任何模型生效）═══
@@ -593,27 +552,10 @@ fun AgentChatScreen(
                     onRemove = { viewModel.clearPendingCommand() }
                 )
 
-                // ═══ "小圆环"工具菜单状态标签行（可单独关闭）═══
-                ToolkitChipsRow(
-                    webSearchEnabled = webSearchEnabled,
-                    timeEnabled = timeEnabled,
-                    selectedFunctionIds = selectedFunctionIds,
-                    toolNameOf = { id -> availableTools.firstOrNull { it.id == id }?.name ?: id },
-                    outputFormat = outputFormat,
-                    enabledRulesCount = rules.count { it.enabled },
-                    onCloseWebSearch = { toolkit.setWebSearchEnabled(false) },
-                    onCloseTime = { toolkit.setTimeEnabled(false) },
-                    onRemoveFunction = { toolkit.toggleFunction(it) },
-                    onCloseFormat = { toolkit.setOutputFormat(OutputFormat.NONE) },
-                    onDisableAllRules = { rules.filter { it.enabled }.forEach { r -> toolkit.setRuleEnabled(r.id, false) } }
-                )
+                // #197 「小圆环」函数调用/工具菜单已迁至 Coding 屏（Agent 屏
+                // 保留纯聊天体验：斜杠技能/MCP 选择 + 附件 + 模型小大脑）。
 
                 // ═══ 工具栏行：功能按钮 + 原生思考档位同一行（统一横向滚动）═══
-                // 修复"输入框太高"：旧布局把 5 个 40dp 按钮 + 发送键与输入框挤同一
-                // Row，窄屏（360dp 档）输入框仅剩 ~70dp —— 占位文字逐字换行成竖
-                // 排、多行撑出近半屏高的"大框"。现在按钮与思考 chips 合并为一行
-                // 可横滚工具栏，输入框独占下一行全部剩余宽度，默认 56dp 单行高度
-                //（长内容仍自动扩行 + 双击全屏编辑）。
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -621,27 +563,6 @@ fun AgentChatScreen(
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                 ) {
-                    // ═══ 迷你小圆环：工具菜单（搜索/时间/函数/结构化输出/规则）═══
-                    ToolkitRingButton(
-                        webSearchEnabled = webSearchEnabled,
-                        timeEnabled = timeEnabled,
-                        selectedFunctionIds = selectedFunctionIds,
-                        availableTools = availableTools,
-                        outputFormat = outputFormat,
-                        customSchema = customSchema,
-                        rules = rules,
-                        exposeAllTools = toolkit.exposeAllTools.collectAsStateWithLifecycle().value,
-                        onToggleWebSearch = { toolkit.setWebSearchEnabled(it) },
-                        onToggleTime = { toolkit.setTimeEnabled(it) },
-                        onToggleFunction = { toolkit.toggleFunction(it) },
-                        onToggleExposeAllTools = { toolkit.setExposeAllTools(it) },
-                        onSelectFormat = { toolkit.setOutputFormat(it) },
-                        onSetCustomSchema = { toolkit.setCustomSchema(it) },
-                        onUpsertRule = { toolkit.upsertRule(it) },
-                        onDeleteRule = { toolkit.deleteRule(it) },
-                        onToggleRule = { id, enabled -> toolkit.setRuleEnabled(id, enabled) }
-                    )
-
                     // ═══ / 斜杠指令按钮 ═══
                     // 选中项挂成输入栏迷你胶囊（[</> skill: 名字]），不再裸文本入框；
                     // 解析失败的非管线命令（理论上不存在）回退旧文本插入路径。
@@ -663,11 +584,6 @@ fun AgentChatScreen(
                                 viewModel.updateInputText(merged)
                             }
                         }
-                    )
-
-                    // ═══ GitHub 连接状态按钮 ═══
-                    GithubIconButton(
-                        tokenManager = viewModel.githubTokenManager
                     )
 
                     // ═══ + 旋转附件按钮 ═══
@@ -718,6 +634,12 @@ fun AgentChatScreen(
                             // 发送键行为：send → 回车直接发送；newline → 回车仅换行（设置页可配）
                             sendKeyBehavior = uiSettings.sendKeyBehavior,
                             onSend = {
+                                // #197 模型 API 未配置：拦截发送并弹浮窗引导去配置
+                                // （避免撞 NoOpLlmClient 静默空转，用户无从知晓）。
+                                if (!llmConfigured) {
+                                    showApiMissingNotice = true
+                                    return@AdaptiveInputField
+                                }
                                 // P2-9（6-c）：附件-only 消息同样可发（仅计可用附件；二轮审计 A-1 口径对齐）
                                 // 胶囊-only（输入框空文本）同样可发：VM 拼回 /type:id 走斜杠管线
                                 val hasUsableAttachment = attachments.any { it.status != UploadStatus.ERROR }
@@ -728,6 +650,8 @@ fun AgentChatScreen(
                             placeholder = {
                                 Text(
                                     text = when (uiState.mode) {
+                                        AgentMode.CHAT -> stringResource(R.string.chat_hint_chat)
+                                        AgentMode.AGENT -> stringResource(R.string.chat_hint_agent)
                                         AgentMode.PLAN -> stringResource(R.string.chat_hint_plan)
                                         AgentMode.SPEC -> stringResource(R.string.chat_hint_spec)
                                         AgentMode.REFLECTION -> stringResource(R.string.chat_hint_reflection)
@@ -776,6 +700,11 @@ fun AgentChatScreen(
                     } else {
                         FilledIconButton(
                             onClick = {
+                                // #197 模型 API 未配置：拦截发送并弹浮窗引导去配置。
+                                if (!llmConfigured) {
+                                    showApiMissingNotice = true
+                                    return@FilledIconButton
+                                }
                                 val hasUsableAttachment = attachments.any { it.status != UploadStatus.ERROR }
                                 if (inputText.isNotBlank() || hasUsableAttachment || pendingCommand != null) {
                                     viewModel.sendMessage(inputText.trim())
@@ -825,51 +754,24 @@ fun AgentChatScreen(
         )
     }
 
-    // ═══ /mcp:github 连接对话框（未连接时由 ViewModel 信号触发）═══
-    if (showGithubConnectDialog) {
-        GithubTokenDialog(
-            onDismiss = { showGithubConnectDialog = false },
-            onSubmit = { token -> viewModel.githubTokenManager.validateToken(token) },
-            onSuccess = { token, username ->
-                viewModel.githubTokenManager.saveToken(token, username)
-                showGithubConnectDialog = false
-            }
-        )
-    }
+    // #197 GitHub 连接对话框已随 gh 连接入口一起迁至 Coding 屏。
 
-    // ═══ #168 模式指南底部弹层（六模式行为矩阵 + 思考档位简表）═══
+    // ═══ #168 模式指南底部弹层（双模式行为矩阵 + 思考档位简表）═══
     if (showModeGuide) {
         ModeGuideSheet(onDismiss = { showModeGuide = false })
     }
 
-    // ═══ #168 CUSTOM 模式预设编辑（顶栏 chip /切模式入口打开）═══
-    // 复用设置页同款编辑器（名称 + 多行指令）；保存经 ViewModel upsert
-    // 到 agentSettings，选中即生效（init collector patchConfig）。
-    editingPreset?.let { preset ->
-        com.apex.agent.ui.screen.settings.ModePresetEditorDialog(
-            initial = preset,
-            isNew = false,
-            onDismiss = { editingPreset = null },
-            onSave = { updated ->
-                viewModel.upsertModePreset(updated)
-                editingPreset = null
-            }
-        )
-    }
-
-    // ═══ 自定义模式指令对话框（点击 Custom 模式 chip 时打开）═══
-    if (showCustomInstructionDialog) {
-        CustomInstructionDialog(
-            initial = customInstruction,
-            onDismiss = { showCustomInstructionDialog = false },
-            onSave = { text ->
-                viewModel.setCustomInstruction(text)
-                showCustomInstructionDialog = false
+    // ═══ #197 模型 API 未配置浮窗（发送被拦截时弹出，带「去配置」入口）═══
+    if (showApiMissingNotice) {
+        ApiMissingFloatingNotice(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .zIndex(10f),
+            onOpenSettings = {
+                showApiMissingNotice = false
+                onOpenSettings()
             },
-            onClear = {
-                viewModel.setCustomInstruction("")
-                showCustomInstructionDialog = false
-            }
+            onDismiss = { showApiMissingNotice = false }
         )
     }
 
@@ -889,6 +791,80 @@ fun AgentChatScreen(
             onSearch = { query -> viewModel.applyChatHistorySearch(query) }
         )
     }
+    }
+}
+
+/**
+ * #197 模型 API 未配置浮窗：顶部悬浮卡片（非阻断式）。
+ *
+ * - 入场动画（滑入+淡入），4.5 秒后自动消散（点击任意处/「知道了」立即关闭）；
+ * - 「去配置」→ 跳转设置页模型配置区（与 LlmSetupGuideCard 同一落点）；
+ * - 只在发送被拦截时出现 —— 不占常驻空间，与空会话引导卡互补（那张卡
+ *   只在空会话显示，浮窗覆盖「聊到一半才发现没配」的场景）。
+ */
+@Composable
+private fun ApiMissingFloatingNotice(
+    modifier: Modifier = Modifier,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    // 自动消散：出现 4.5s 后关闭（LaunchedEffect 键控，重组不重置计时）
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(4_500)
+        onDismiss()
+    }
+    androidx.compose.animation.AnimatedVisibility(
+        visible = true,
+        enter = androidx.compose.animation.slideInVertically(initialOffsetY = { -it }) +
+            androidx.compose.animation.fadeIn(),
+        modifier = modifier.padding(top = 8.dp)
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            shape = RoundedCornerShape(14.dp),
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .padding(horizontal = 12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Icon(
+                    Icons.Default.ErrorOutline,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.chat_api_missing_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = stringResource(R.string.chat_api_missing_body),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                androidx.compose.material3.TextButton(onClick = onOpenSettings) {
+                    Text(stringResource(R.string.chat_go_setup))
+                }
+                androidx.compose.material3.IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = stringResource(R.string.code_dismiss),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
     }
 }
 

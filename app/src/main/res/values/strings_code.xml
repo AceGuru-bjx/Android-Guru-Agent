@@ -17,6 +17,8 @@
     <!-- 消息流 / 输入 -->
     <string name="code_working">Working…</string>
     <string name="code_input_hint">Describe a coding task…</string>
+    <string name="code_input_hint_no_api">Model API not configured — open Settings to add one…</string>
+    <string name="code_api_missing_got_it">Got it</string>
     <string name="code_send">Send</string>
     <string name="code_stop">Stop</string>
     <string name="code_dismiss">Dismiss</string>

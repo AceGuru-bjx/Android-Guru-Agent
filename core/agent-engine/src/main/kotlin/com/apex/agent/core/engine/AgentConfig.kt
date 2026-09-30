@@ -2,17 +2,31 @@ package com.apex.agent.core.engine
 
 /**
  * Agent执行模式
+ *
+ * #197 双工位拆分：Agent 聊天屏只暴露 [CHAT] / [AGENT] 两种模式（全能智能体
+ * 工位）；[BUILD] / [PLAN] 保留给 Coding 屏（编码工位）使用，Spec/Reflect/
+ * Assist/Custom 为存量枚举（老配置反序列化兼容，不再出现在任何模式选择 UI）。
  */
 enum class AgentMode(val displayName: String, val description: String) {
     /**
-     * 构建模式：边想边做，实时执行
-     * 适合简单任务、快速响应
+     * 聊天模式（Agent 屏）：纯对话——无工具、无人机协同复杂度，
+     * 人设 + 聊天 Skill 驱动的轻量陪伴/问答体验。
+     */
+    CHAT("Chat", "纯聊天：人设与聊天技能驱动的对话"),
+
+    /**
+     * 智能体模式（Agent 屏）：全能智能体——生活/知识/系统级工具自主调用，
+     * 编程类请求引导用户切换到 Coding 模式（非编程工位）。
+     */
+    AGENT("Agent", "全能智能体：自主调用通用工具完成任务"),
+
+    /**
+     * 构建模式（Coding 屏）：边想边做，实时执行
      */
     BUILD("Build", "边想边做，实时执行"),
 
     /**
-     * 规划模式：先制定完整计划，用户确认后再执行
-     * 适合复杂任务、多步骤操作
+     * 规划模式（Coding 屏）：先制定完整计划，用户确认后再执行
      */
     PLAN("Plan", "先制定完整计划，确认后再执行"),
 
@@ -253,7 +267,14 @@ data class AgentConfig(
     val roleStyle: String = "",
 
     /** 回复语言约束（"" 跟随用户输入 | "zh" | "en"）。 */
-    val roleLanguage: String = ""
+    val roleLanguage: String = "",
+
+    /**
+     * #197 技能作用域（"agent" | "coding" | "all"）：Prompt 型 Skill 注入的
+     * 过滤依据——agent 屏引擎只注入 agent/all 聊天技能，coding 引擎只注入
+     * coding/all 编码技能，两个工位的提示词层完全独立（市场分级同源）。
+     */
+    val skillScope: String = "all"
 ) {
     companion object {
         /** 快速模式：Build + 无思考 */

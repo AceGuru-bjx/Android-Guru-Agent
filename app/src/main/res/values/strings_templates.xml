@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═══ #197 模板工坊（Template Studio）═══ -->
+    <string name="templates_tab_agent">Agent Templates</string>
+    <string name="templates_tab_coding">Coding Templates</string>
+    <string name="templates_agent_list_title">Agent prompt templates</string>
+    <string name="templates_agent_list_subtitle">Translation / summary / writing and other general tasks — injected for the Agent screen</string>
+    <string name="templates_coding_list_title">Coding prompt templates</string>
+    <string name="templates_coding_list_subtitle">Code review / commit messages and other dev tasks — injected for the Coding screen</string>
+    <string name="templates_create">New</string>
+    <string name="templates_builtin">Built-in (copy to edit)</string>
+    <string name="templates_edit">Edit</string>
+    <string name="templates_duplicate">Duplicate</string>
+    <string name="templates_delete">Delete</string>
+    <string name="templates_editor_new">New template</string>
+    <string name="templates_editor_edit">Edit template</string>
+    <string name="templates_field_name">Name</string>
+    <string name="templates_field_description">Description</string>
+    <string name="templates_field_content">Content (supports {{var}} placeholders)</string>
+    <string name="templates_content_hint">Write the prompt here… use {{variable}} for placeholders</string>
+    <string name="templates_vars_detected">Variables detected: %1$s</string>
+    <string name="templates_save">Save</string>
+    <string name="templates_cancel">Cancel</string>
+</resources>

@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -79,6 +80,7 @@ import com.apex.agent.ui.screen.memory.MemoryScreen
 import com.apex.agent.ui.screen.storage.StorageScreen
 import com.apex.agent.ui.screen.tasks.TaskHistoryScreen
 import com.apex.agent.ui.screen.terminal.TerminalScreen
+import com.apex.agent.ui.screen.templates.TemplateStudioScreen
 import com.apex.agent.ui.screen.usage.UsageDashboardScreen
 import com.apex.agent.ui.screen.vault.VaultScreen
 import kotlinx.coroutines.launch
@@ -98,6 +100,8 @@ sealed class DrawerDestination(
     // Coding 模式（与 Agent 模式同级别）：独立引擎实例 + 工作区 + code_* 工具集，
     // 与 Agent 模式共享 ToolRegistry/Skills/MCP/插件 —— 能力互用。
     data object Code : DrawerDestination("code", R.string.drawer_code, Icons.Default.Code)
+    // #197 模板工坊：Agent/Coding 双层模板 + Agent 角色详细设置的独立页面入口。
+    data object Templates : DrawerDestination("templates", R.string.drawer_templates, Icons.AutoMirrored.Filled.ListAlt)
     data object Terminal : DrawerDestination("terminal", R.string.drawer_terminal, Icons.Default.Terminal)
     // Skill 屏已移除 —— 技能的安装/启停统一由「市场 · Skills」页承担，
     // 抽屉里再放一个只读列表是重复入口（两者数据源同一份 SkillRegistry）。
@@ -133,6 +137,7 @@ private val DestinationSaver = Saver<DrawerDestination, String>(
     restore = { route ->
         when (route) {
             DrawerDestination.Code.route -> DrawerDestination.Code
+            DrawerDestination.Templates.route -> DrawerDestination.Templates
             DrawerDestination.Terminal.route -> DrawerDestination.Terminal
             // "skill" route 保留兜底：老用户重建时若停留在原 Skill 页，落到市场
             "skill" -> DrawerDestination.Market
@@ -278,6 +283,7 @@ fun ApexRoot() {
                         DrawerDestination.Code -> CodeScreen(
                             viewModel = hiltViewModel()
                         )
+                        DrawerDestination.Templates -> TemplateStudioScreen()
                         DrawerDestination.Terminal -> TerminalScreen(
                             onOpenNavDrawer = { scope.launch { drawerState.open() } }
                         )

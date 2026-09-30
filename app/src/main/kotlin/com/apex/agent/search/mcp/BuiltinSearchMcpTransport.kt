@@ -49,7 +49,9 @@ object BuiltinSearchMcpServer {
     fun config(): McpServerConfig = McpServerConfig(
         name = ID,
         transport = McpTransport.BUILTIN,
-        enabled = true
+        enabled = true,
+        // #197 市场分级：联网搜索归属 Agent 工位（全能智能体的通识能力）
+        scope = "agent"
     )
 }
 

@@ -25,6 +25,18 @@ enum class TemplateCategory {
 }
 
 /**
+ * #197 工位作用域：模板分层（agent 工位 / coding 工位独立）。
+ * - AGENT：Agent 屏的提示词模板（翻译/总结/写作等通用任务）；
+ * - CODING：Coding 屏的提示词模板（代码评审/提交信息等开发任务）；
+ * 模板工坊页的两个页签各自管理，互不串扰。
+ */
+@Serializable
+enum class TemplateScope {
+    AGENT,
+    CODING
+}
+
+/**
  * 模板声明的变量（表单提示 + 必填校验 + 默认值）。
  *
  * @param name 变量名（与内容里的 {{name}} 对应）
@@ -71,7 +83,12 @@ data class PromptTemplate(
     val isBuiltIn: Boolean = false,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
-    val usageCount: Long = 0
+    val usageCount: Long = 0,
+    /**
+     * #197 工位作用域（缺省按分类推导：CODING 分类 → CODING 工位，
+     * 其余 → AGENT 工位；旧 JSON 无此字段时反序列化自动归位，向后兼容）。
+     */
+    val scope: TemplateScope = if (category == TemplateCategory.CODING) TemplateScope.CODING else TemplateScope.AGENT
 ) {
     /**
      * 扫描 content 实际引用的变量名（规范小写集合；转义占位符不计）。

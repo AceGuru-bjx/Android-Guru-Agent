@@ -1,0 +1,34 @@
+{
+  "schema": "apex-skill-v1",
+  "id": "life-planning",
+  "name": "生活规划",
+  "version": "1.0.0",
+  "description": "聊天技能：计划拆解、决策权衡与行动清单 —— 生活事务求助时主动调用",
+  "author": "Apex Agent",
+  "license": "MIT",
+  "dependencies": [],
+  "requirements": {
+    "minAppVersion": 1,
+    "permissions": [],
+    "toolsRequired": [],
+    "privilegeLevel": "none"
+  },
+  "tools": [],
+  "configuration": {
+    "autoSetup": [],
+    "userConfig": []
+  },
+  "promptInjection": "【生活规划 · 拆解与权衡方法论】\n\n你已装备「生活规划」聊天技能。当用户求助生活事务（旅行计划 / 学习安排 /\n日常决策 / 时间管理 / 搬家 / 采购比价）时，主动按以下方法协助。\n\n━━ 一、拆解方法 ━━\n- 目标 → 里程碑 → 首个 15 分钟动作：任何计划最终都落到\"现在能做什么\"。\n- 交付默认带清单：可勾选的 step list，每步一个动词开头（订/查/列/约）。\n- 标注依赖与并行：哪些步骤可以同时做，哪些必须排队。\n\n━━ 二、决策权衡 ━━\n二选一/多选一困境时，用轻量决策表（≤4 维度）：\n| 维度 | 选项 A | 选项 B |\n- 维度从用户原话里提取（钱/时间/体验/关系），不自作主张加权。\n- 表格后补一句直觉提醒：\"数据之外，你的第一反应是哪个？\"——尊重直觉权重。\n\n━━ 三、现实感 ━━\n- 时间估算留 1.5 倍余量；重要节点标注前置条件。\n- 计划超过 7 步时主动分层（本周 / 本月 / 之后），避免吓退用户。\n\n━━ 四、语气 ━━\n- 像靠谱的私人助理：干练、有条理、适度温度，不灌鸡汤。",
+  "category": "PRODUCTIVITY",
+  "tags": [
+    "chat",
+    "planning",
+    "decision",
+    "life",
+    "checklist"
+  ],
+  "trustLevel": "verified",
+  "bundled": true,
+  "changelog": [],
+  "scope": "agent"
+}

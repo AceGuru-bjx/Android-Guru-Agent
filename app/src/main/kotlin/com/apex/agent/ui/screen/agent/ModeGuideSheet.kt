@@ -261,55 +261,27 @@ private data class ModeGuideEntry(
     val promptRes: Int
 ) {
     companion object {
-        /** 六模式指南（AgentMode 声明序 = 菜单序 = 指南序）。 */
+        /**
+         * #197 双工位拆分后的指南：Agent 屏只保留 Chat/Agent 两模式；
+ * Coding 屏是 Build/Plan（该屏无指南入口，模式胶囊自带说明）。
+         * 存量模式（Spec/Reflect/Assist/Custom）不再出现在指南矩阵。
+         */
         val entries = listOf(
             ModeGuideEntry(
-                mode = AgentMode.BUILD,
-                casesRes = R.string.mode_guide_build_cases,
-                flowRes = R.string.mode_guide_build_flow,
-                toolPolicyRes = R.string.mode_guide_build_tools,
-                humanRes = R.string.mode_guide_build_human,
-                promptRes = R.string.mode_guide_build_prompt
+                mode = AgentMode.CHAT,
+                casesRes = R.string.mode_guide_chat_cases,
+                flowRes = R.string.mode_guide_chat_flow,
+                toolPolicyRes = R.string.mode_guide_chat_tools,
+                humanRes = R.string.mode_guide_chat_human,
+                promptRes = R.string.mode_guide_chat_prompt
             ),
             ModeGuideEntry(
-                mode = AgentMode.PLAN,
-                casesRes = R.string.mode_guide_plan_cases,
-                flowRes = R.string.mode_guide_plan_flow,
-                toolPolicyRes = R.string.mode_guide_plan_tools,
-                humanRes = R.string.mode_guide_plan_human,
-                promptRes = R.string.mode_guide_plan_prompt
-            ),
-            ModeGuideEntry(
-                mode = AgentMode.SPEC,
-                casesRes = R.string.mode_guide_spec_cases,
-                flowRes = R.string.mode_guide_spec_flow,
-                toolPolicyRes = R.string.mode_guide_spec_tools,
-                humanRes = R.string.mode_guide_spec_human,
-                promptRes = R.string.mode_guide_spec_prompt
-            ),
-            ModeGuideEntry(
-                mode = AgentMode.REFLECTION,
-                casesRes = R.string.mode_guide_reflect_cases,
-                flowRes = R.string.mode_guide_reflect_flow,
-                toolPolicyRes = R.string.mode_guide_reflect_tools,
-                humanRes = R.string.mode_guide_reflect_human,
-                promptRes = R.string.mode_guide_reflect_prompt
-            ),
-            ModeGuideEntry(
-                mode = AgentMode.HUMAN_ASSIST,
-                casesRes = R.string.mode_guide_assist_cases,
-                flowRes = R.string.mode_guide_assist_flow,
-                toolPolicyRes = R.string.mode_guide_assist_tools,
-                humanRes = R.string.mode_guide_assist_human,
-                promptRes = R.string.mode_guide_assist_prompt
-            ),
-            ModeGuideEntry(
-                mode = AgentMode.CUSTOM,
-                casesRes = R.string.mode_guide_custom_cases,
-                flowRes = R.string.mode_guide_custom_flow,
-                toolPolicyRes = R.string.mode_guide_custom_tools,
-                humanRes = R.string.mode_guide_custom_human,
-                promptRes = R.string.mode_guide_custom_prompt
+                mode = AgentMode.AGENT,
+                casesRes = R.string.mode_guide_agent_cases,
+                flowRes = R.string.mode_guide_agent_flow,
+                toolPolicyRes = R.string.mode_guide_agent_tools,
+                humanRes = R.string.mode_guide_agent_human,
+                promptRes = R.string.mode_guide_agent_prompt
             )
         )
     }

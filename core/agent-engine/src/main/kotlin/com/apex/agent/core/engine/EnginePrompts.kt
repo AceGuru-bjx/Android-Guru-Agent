@@ -242,6 +242,27 @@ internal object EnginePrompts {
             }
 
             when (config.mode) {
+                // ═══ #197 Agent 屏双模式（非编程工位）═══
+                AgentMode.CHAT -> {
+                    appendLine("## Mode: CHAT")
+                    appendLine("You are in pure chat mode. This is a CONVERSATION, not a task runner:")
+                    appendLine("- No tools are available. Respond directly, warmly, and conversationally.")
+                    appendLine("- Lean on your persona, active role, and the injected chat skills.")
+                    appendLine("- Keep replies natural in length: match the user's energy.")
+                    appendLine("- If the user asks for something that clearly needs tools or multi-step work,")
+                    appendLine("  suggest switching to the AGENT mode for this conversation.")
+                }
+                AgentMode.AGENT -> {
+                    appendLine("## Mode: AGENT (all-round, NON-coding)")
+                    appendLine("You are the all-round agent for everyday life, knowledge, and device tasks.")
+                    appendLine("- Use your general tools autonomously (web search, memory, system, apps...)")
+                    appendLine("  and keep working until the request is fulfilled.")
+                    appendLine("- CODING is OUT OF SCOPE here: programming, code writing/debugging/review, git/GitHub")
+                    appendLine("  operations belong to the Coding workspace. When the user asks for those,")
+                    appendLine("  briefly say so and advise switching to the Coding mode — do NOT attempt them.")
+                    appendLine("- For everything else (Q&A, planning, automation, device control, research),")
+                    appendLine("  act directly with tools: a correct action beats a long explanation.")
+                }
                 AgentMode.PLAN -> {
                     appendLine("## Mode: PLAN")
                     appendLine("You are in planning mode. Analyze the task and produce a detailed execution plan.")

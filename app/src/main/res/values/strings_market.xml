@@ -283,4 +283,18 @@
     <string name="market_plugin_unloaded">Plugin unloaded: %1$s</string>
     <string name="market_modelscope_install_failed">ModelScope install failed: %1$s</string>
     <string name="market_clawhub_install_failed">ClawHub install failed: %1$s</string>
+    <!-- ═══ #197 Market tiering (Agent market / Coding market) + MCP real startup ═══ -->
+    <string name="market_tier_agent">Agent Market</string>
+    <string name="market_tier_coding">Coding Market</string>
+    <string name="market_mcp_startup_title">Starting %1$s (real process)</string>
+    <string name="market_mcp_startup_running">Starting… (real handshake in progress)</string>
+    <string name="market_mcp_startup_hide">Hide</string>
+    <string name="market_mcp_startup_done">Done</string>
+    <string name="market_mcp_stage_env">Environment check</string>
+    <string name="market_mcp_stage_spawn">Process spawned</string>
+    <string name="market_mcp_stage_init_sent">initialize request sent</string>
+    <string name="market_mcp_stage_init_result">Handshake response</string>
+    <string name="market_mcp_stage_initialized">Session ready</string>
+    <string name="market_mcp_stage_tools">Tools discovered</string>
+    <string name="market_mcp_stage_failed">Failed</string>
 </resources>

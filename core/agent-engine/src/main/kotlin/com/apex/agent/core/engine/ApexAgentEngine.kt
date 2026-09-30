@@ -76,7 +76,8 @@ class ApexAgentEngine(
     // internal —— EngineCompressionGate.kt 同包扩展直调（历史压缩触发）。
     internal val memory: ConversationMemory? = null,
     internal val contextCompressor: ContextCompressor? = null,
-    private val skillRegistry: SkillRegistry? = null,
+    internal val skillRegistry: SkillRegistry? = null,
+
     private val privilegeInfoProvider: PrivilegeInfoProvider? = null,
     private val environmentInfoProvider: EnvironmentInfoProvider? = null,
     private val memoryObserver: ExecutionMemoryObserver? = null,
@@ -123,7 +124,7 @@ class ApexAgentEngine(
      * 工具装载。为空时回退 legacy 行为（全部启用技能全量注入），
      * 既有单测与子代理零改动兼容。
      */
-    private val skillActivation: SkillActivationStore? = null
+    internal val skillActivation: SkillActivationStore? = null
 ) : AgentEngine, ConfirmationSink {
 
     /** #165 插桩句柄（null 安全派生；开号时快照当前模式名）。 */
@@ -145,7 +146,7 @@ class ApexAgentEngine(
      * 包裹后携带任务/步骤关联，诊断日志可按任务聚合。
      */
     @Volatile
-    private var executionTags: Pair<String?, String?>? = null
+    internal var executionTags: Pair<String?, String?>? = null
 
     /**
      * 本轮为「会话首条用户消息且纯问候」（SmallTalkDetector 判定）。
@@ -441,6 +442,19 @@ class ApexAgentEngine(
 
             when (config.mode) {
                 AgentMode.BUILD -> {
+                    val iter = executeBuildLoop { event ->
+                        if (event is AgentEvent.ToolCallComplete) totalToolCalls++
+                        if (event is AgentEvent.IterationStart) totalIterations =
+                            maxOf(totalIterations, event.iteration)
+                        AppLogger.instance.logEvent(event)
+                        emit(event)
+                    }
+                    totalIterations = maxOf(totalIterations, iter)
+                }
+                // #197 Agent 屏双模式：CHAT（零工具纯对话）与 AGENT（全能非编程）
+                // 都跑 ReAct 主循环——差异在工具计划（EngineToolPlanner：CHAT=空、
+                // AGENT=剔除编码工具）与提示词模式段（EnginePrompts），复用同一执行器。
+                AgentMode.CHAT, AgentMode.AGENT -> {
                     val iter = executeBuildLoop { event ->
                         if (event is AgentEvent.ToolCallComplete) totalToolCalls++
                         if (event is AgentEvent.IterationStart) totalIterations =
@@ -1113,13 +1127,6 @@ class ApexAgentEngine(
         )
     }
 
-
-    /** T76 — executionTags（taskId/stepId）填入 LlmRequestContext；未接线时原样返回。 */
-    internal fun tagged(ctx: LlmRequestContext): LlmRequestContext {
-        val tags = executionTags ?: return ctx
-        return ctx.copy(taskId = tags.first, stepId = tags.second)
-    }
-
     internal fun buildSystemPrompt(planningPhase: Boolean = false): String = EnginePrompts.buildSystemPrompt(
         config = config,
         currentProfile = thinkingController.profileFor(config),
@@ -1130,14 +1137,8 @@ class ApexAgentEngine(
         toolNameMap = EngineToolPlanner.idToProviderName(currentToolPlan),
         toolsUnavailable = currentToolPlan?.tools?.isEmpty() == true &&
             toolDegradationLevel >= EngineToolPlanner.DEGRADATION_NO_TOOLS,
-        // 技能渐进披露：激活存储注入时双层结构（目录 + 仅激活技能全文），
-        // 否则 legacy 全量注入（单测/子代理零改动）。
-        skillPrompts = if (skillActivation != null) {
-            skillRegistry?.getActivePromptInjections(skillActivation.activeIds.value) ?: emptyList()
-        } else {
-            skillRegistry?.getPromptInjections() ?: emptyList()
-        },
-        skillCatalog = if (skillActivation != null) skillRegistry?.getSkillDigests() ?: emptyList() else emptyList(),
+        skillPrompts = skillPromptInjections, // 解析在 EngineSkillPromptResolver.kt
+        skillCatalog = skillCatalogDigests,
         environmentSummary = environmentInfoProvider?.environmentSummary(),
         connectedServices = connectedServicesProvider?.connectedServicesSummary(),
         // Issue #164：全局规则（Agent 模式通道；coding 实例不设值，见 updateGlobalRules KDoc）

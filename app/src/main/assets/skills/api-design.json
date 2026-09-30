@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "api-design",
   "name": "REST API 设计审查",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "REST 设计八检查单：资源建模 / URL 约定 / 方法语义 / 状态码表 / 游标分页 / 过滤排序 / 错误体结构 / 版本与弃用策略",
   "author": "Apex",
   "license": "MIT",
@@ -34,5 +34,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

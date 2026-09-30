@@ -70,7 +70,12 @@ class McpClient(
      * `runInSandbox` 放宽到 [McpManager.SANDBOX_REQUEST_TIMEOUT_MS] —— npx
      * 首次冷启动要下载包，60s 会在握手阶段就误判超时。HTTP/SSE 不受影响。
      */
-    private val stdioRequestTimeoutMs: Long = HOST_STDIO_REQUEST_TIMEOUT_MS
+    private val stdioRequestTimeoutMs: Long = HOST_STDIO_REQUEST_TIMEOUT_MS,
+    /**
+     * #197 真实启动事件监听（可选）：spawn/initialize/initialized 各阶段
+     * 以真实事件回调（pid/serverInfo 均为实际返回值）。null = 零开销直通。
+     */
+    private val startupListener: McpStartupListener? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val requestId = AtomicInteger(0)
@@ -102,7 +107,16 @@ class McpClient(
     private fun createTransport(): McpTransportHandle = when (config.transport) {
         McpTransport.BUILTIN -> {
             // 惰性构建：握手时才调工厂；未注册则给出明确错误而不是空指针。
-            builtinTransportFactory?.invoke()
+            // #197 真实 spawn 事件：BUILTIN 无子进程，如实标注「进程内」。
+            builtinTransportFactory?.invoke()?.also {
+                startupListener?.onStartupEvent(
+                    McpStartupEvent(
+                        serverName = config.name,
+                        stage = McpStartupStage.SPAWN,
+                        detail = "内置服务器（进程内 transport，无子进程）"
+                    )
+                )
+            }
                 ?: throw McpException("内置 MCP 服务器 '${config.name}' 未注册 transport 工厂（仅 App 预置的内置服务器可连接）")
         }
         McpTransport.STDIO -> {
@@ -112,11 +126,21 @@ class McpClient(
             }
             // Issue #149：宿主未注入沙箱 launcher 时保持原行为（JvmProcessLauncher）。
             // Issue #163：超时经构造参数注入（沙箱连接由 McpManager 放宽）。
+            // #197：onSpawned 回调把真实 pid + argv 报给启动监听（仅在其注入时）。
             McpStdioTransport(
                 command = cmdLine,
                 env = config.env,
                 launcher = processLauncher ?: JvmProcessLauncher,
-                requestTimeoutMs = stdioRequestTimeoutMs
+                requestTimeoutMs = stdioRequestTimeoutMs,
+                onSpawned = if (startupListener != null) {{ pid, argv ->
+                    startupListener.onStartupEvent(
+                        McpStartupEvent(
+                            serverName = config.name,
+                            stage = McpStartupStage.SPAWN,
+                            detail = "子进程已启动 pid=${pid ?: "?"} · ${argv.joinToString(" ")}"
+                        )
+                    )
+                }} else null
             )
         }
         McpTransport.HTTP, McpTransport.SSE -> {
@@ -154,6 +178,16 @@ class McpClient(
                 }
             )
 
+            // #197 真实事件：initialize 请求发出（HTTP/SSE 的传输在 send 内
+            // 惰性创建，spawn 事件由各自 createTransport 路径上报）。
+            startupListener?.onStartupEvent(
+                McpStartupEvent(
+                    serverName = config.name,
+                    stage = McpStartupStage.INITIALIZE_SENT,
+                    detail = "initialize 请求已发出（protocol 2024-11-05）"
+                )
+            )
+
             val response = sendRequest(request)
             val result = response?.get("result")?.jsonObject
             val capabilities = result?.get("capabilities")?.jsonObject
@@ -165,11 +199,56 @@ class McpClient(
             )
             initialized = true
 
+            // #197 真实事件：initialize 响应到达 —— serverInfo 是服务器自报的
+            // 真实身份（名称/版本），capabilities 是它真实宣告的能力面。
+            val serverInfo = result?.get("serverInfo")?.jsonObject
+            val serverName = serverInfo?.get("name")?.jsonPrimitive?.contentOrNull
+            val serverVersion = serverInfo?.get("version")?.jsonPrimitive?.contentOrNull
+            startupListener?.onStartupEvent(
+                McpStartupEvent(
+                    serverName = config.name,
+                    stage = McpStartupStage.INITIALIZE_RESULT,
+                    detail = buildString {
+                        if (!serverName.isNullOrBlank()) {
+                            append("server: $serverName")
+                            if (!serverVersion.isNullOrBlank()) append(" v$serverVersion")
+                        } else {
+                            append("握手成功（serverInfo 未上报）")
+                        }
+                        append(" · capabilities: ")
+                        append(
+                            listOfNotNull(
+                                "tools".takeIf { serverCapabilities?.tools == true },
+                                "resources".takeIf { serverCapabilities?.resources == true },
+                                "prompts".takeIf { serverCapabilities?.prompts == true }
+                            ).joinToString("/").ifBlank { "无" }
+                        )
+                    }
+                )
+            )
+
             // 发送initialized通知
             sendNotification("notifications/initialized", buildJsonObject {})
 
+            // #197 真实事件：initialized 通知已发出（会话就绪）。
+            startupListener?.onStartupEvent(
+                McpStartupEvent(
+                    serverName = config.name,
+                    stage = McpStartupStage.INITIALIZED,
+                    detail = "notifications/initialized 已发送，会话就绪"
+                )
+            )
+
             Result.success(serverCapabilities!!)
         } catch (e: Exception) {
+            // #197 真实事件：失败详情（异常信息原样上报，不做美化）。
+            startupListener?.onStartupEvent(
+                McpStartupEvent(
+                    serverName = config.name,
+                    stage = McpStartupStage.FAILED,
+                    detail = e.message ?: e::class.simpleName ?: "unknown"
+                )
+            )
             Result.failure(e)
         }
     }
@@ -429,6 +508,14 @@ data class McpServerConfig(
 
     // ── 远端：自定义请求头（第三方网关常要求额外鉴权头）──────────────
     val headers: Map<String, String> = emptyMap(),
+
+    /**
+     * #197 工位作用域（"agent" | "coding" | "all"）：市场分级后该服务器
+     * 归属哪个工位可见/可连。默认 "all"（两边都可见，兼容旧配置与用户自建）。
+     * App 预置服务器有明确归属：github / fs-sandbox → coding；
+     * memory / thinking / search / memory-sandbox → agent。
+     */
+    val scope: String = "all",
 ) {
     /** 列表/日志用的一行摘要：stdio 显示命令，远端显示 URL。 */
     fun endpointSummary(): String = when (transport) {
@@ -439,6 +526,10 @@ data class McpServerConfig(
         McpTransport.HTTP, McpTransport.SSE -> url.ifBlank { UNCONFIGURED_URL }
         McpTransport.BUILTIN -> BUILTIN_SUMMARY
     }
+
+    /** #197 该配置是否对某工位可见（scope="all" 双工位都可见）。 */
+    fun visibleToScope(scope: String): Boolean =
+        scope.isBlank() || this.scope == "all" || this.scope == scope
 }
 
 private const val UNCONFIGURED_COMMAND = "(未配置命令)"

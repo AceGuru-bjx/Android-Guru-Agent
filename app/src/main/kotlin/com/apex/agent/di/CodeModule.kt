@@ -178,7 +178,10 @@ object CodeModule {
             maxContextTokens = 128_000,
             maxToolOutputLength = 8_000,
             compressionThreshold = 0.8f,
-            preserveRecentTurns = 6
+            preserveRecentTurns = 6,
+            // #197 工位作用域：coding 引擎只注入 coding/all 编码技能
+            // （与 Agent 屏的聊天技能提示词层完全独立）
+            skillScope = "coding"
         )
         val inner = ApexAgentEngine(
             llmClient = llmClient,

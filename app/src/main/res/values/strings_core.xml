@@ -6,6 +6,8 @@
     <!-- ═══ 抽屉与导航目的地（ApexRoot / ApexDrawerContent）═══ -->
     <string name="drawer_agent">Agent</string>
     <string name="drawer_terminal">Terminal</string>
+<!-- #197 Template Studio -->
+    <string name="drawer_templates">Template Studio</string>
     <string name="drawer_market">Market</string>
     <string name="drawer_memory">Memory</string>
     <string name="drawer_tasks">Tasks</string>

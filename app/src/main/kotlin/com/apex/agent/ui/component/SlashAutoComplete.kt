@@ -35,7 +35,8 @@ fun SlashAutoCompleteHost(
     inputText: String,
     slashMenuProvider: SlashMenuProvider,
     onItemSelected: (SlashMenuItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    scope: String = "agent"
 ) {
     // 用户点击外部关闭后记住被关闭时的文本；继续输入（文本变化）即重新弹出
     var dismissedFor by remember { mutableStateOf<String?>(null) }
@@ -43,7 +44,9 @@ fun SlashAutoCompleteHost(
         !inputText.contains(' ') &&
         inputText != dismissedFor
 
-    val menu by slashMenuProvider.menu.collectAsStateWithLifecycle()
+    val menuRaw by slashMenuProvider.menu.collectAsStateWithLifecycle()
+    // #197 工位作用域过滤（"all" = 不过滤）
+    val menu = remember(menuRaw, scope) { menuRaw.forScope(scope) }
     // 弹出时刷新一次，保证技能/MCP/插件状态是最新
     LaunchedEffect(visible) {
         if (visible) slashMenuProvider.refresh()

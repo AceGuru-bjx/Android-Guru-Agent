@@ -53,7 +53,7 @@ import javax.inject.Singleton
 @Singleton
 class SlashMenuProvider @Inject constructor(
     private val skills: SkillMenuProvider,
-    skillRegistry: SkillRegistry,
+    private val skillRegistry: SkillRegistry,
     private val mcpManager: McpManager,
     private val pluginManager: PluginManager,
     private val connectorRegistry: ConnectorRegistry,
@@ -116,15 +116,19 @@ class SlashMenuProvider @Inject constructor(
     }
 
     // ── Skills：复用已有的 SkillMenuProvider，保持「已启用优先、未安装后置」的排序 ──
+    // #197：逐项携带工位作用域（manifest.scope；缺省 all）——消费方按屏过滤。
     private fun buildSkillsCategory(): SlashMenuCategory {
         val active = skills.getActiveSkills()
         val templates = skills.getBuiltinTemplates()
+        val scopeById = skillRegistry.getInstalled()
+            .associate { it.manifest.id to it.manifest.scope }
         val items = (active + templates).map { skill ->
             SlashMenuItem(
                 label = skill.label,
                 command = skill.command,
                 description = skill.description,
-                status = if (skill.installed) SlashItemStatus.READY else SlashItemStatus.NOT_INSTALLED
+                status = if (skill.installed) SlashItemStatus.READY else SlashItemStatus.NOT_INSTALLED,
+                scope = scopeById[skill.id] ?: "all"
             )
         }
         return SlashMenuCategory(
@@ -138,6 +142,7 @@ class SlashMenuProvider @Inject constructor(
     }
 
     // ── MCP：只展示「已启用」的配置，区分「已连接」与「离线」 ──
+    // #197：逐项携带工位作用域（config.scope）——Agent 屏/Coding 屏各自过滤。
     private fun buildMcpCategory(): SlashMenuCategory {
         val connected = mcpManager.getConnectedServers().toSet()
         val configs = mcpManager.getEnabledConfigs()
@@ -147,7 +152,8 @@ class SlashMenuProvider @Inject constructor(
                 label = cfg.name,
                 command = "/mcp:${cfg.name} ",
                 description = cfg.url,
-                status = if (isConnected) SlashItemStatus.CONNECTED else SlashItemStatus.OFFLINE
+                status = if (isConnected) SlashItemStatus.CONNECTED else SlashItemStatus.OFFLINE,
+                scope = cfg.scope
             )
         }
         val connectedCount = items.count { it.status == SlashItemStatus.CONNECTED }
@@ -246,7 +252,9 @@ data class SlashMenuItem(
     val label: String,
     val command: String,
     val description: String = "",
-    val status: SlashItemStatus = SlashItemStatus.READY
+    val status: SlashItemStatus = SlashItemStatus.READY,
+    /** #197 工位作用域（"agent"/"coding"/"all"）：消费屏按此过滤可见项。 */
+    val scope: String = "all"
 )
 
 data class SlashMenuCategory(
@@ -256,11 +264,27 @@ data class SlashMenuCategory(
     val items: List<SlashMenuItem>,
     val badge: String? = null,
     val hint: String? = null
-)
+) {
+    /** #197 按工位过滤（保留 scope=all 与匹配项）。 */
+    fun forScope(scope: String): SlashMenuCategory = copy(
+        items = items.filter { it.scope == "all" || it.scope == scope }
+    )
+}
 
 data class SlashMenuData(
     val categories: List<SlashMenuCategory>
-)
+) {
+    /**
+     * #197 按工位作用域过滤菜单：Agent 屏传 "agent"（聊天技能 + agent 工位
+     * MCP），Coding 屏传 "coding"（开发技能 + coding 工位 MCP）；scope=all
+     * 的项两边都保留。空类目（过滤后无条目）整段剔除（hint 保留的类目除外）。
+     */
+    fun forScope(scope: String): SlashMenuData = copy(
+        categories = categories
+            .map { it.forScope(scope) }
+            .filter { it.items.isNotEmpty() || it.hint != null }
+    )
+}
 
 // ═══ Compose 侧获取入口 ═══
 

@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "test-writer",
   "name": "测试设计",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "测试设计三表法：等价类 / 边界值 / 异常路径先行设计再写代码；命名规范、断言聚焦、覆盖决策与何时删测试的纪律",
   "author": "Apex",
   "license": "MIT",
@@ -34,5 +34,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

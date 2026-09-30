@@ -25,7 +25,6 @@ import com.apex.agent.notify.ApexNotifications
 import com.apex.agent.notify.ForegroundTracker
 import com.apex.agent.share.SharedIntake
 import com.apex.agent.usage.UsageLedger
-import com.apex.agent.ui.screen.agent.toolkit.ChatToolkitStore
 import com.apex.agent.ui.screen.settings.AgentSettings
 import com.apex.agent.ui.screen.settings.SettingsRepository
 import com.apex.agent.ui.screen.settings.activeModePreset
@@ -60,7 +59,6 @@ class AgentChatViewModel @Inject constructor(
     internal val userQuestionBridge: UserQuestionBridge,
     // v1.4.4 #4：internal —— EventApplier 读 taskCompletionNotify 设置
     internal val settingsRepository: SettingsRepository,
-    private val chatToolkit: ChatToolkitStore,
     // God-file 预算拆分：AgentChatEventApplier 扩展需读工具元数据（classifyTool 路由徽章）
     internal val toolRegistry: ToolRegistry,
     // v1.4.4 #4/#6/#7：internal —— ChatSessionOps/EventApplier 扩展共用；
@@ -145,6 +143,17 @@ class AgentChatViewModel @Inject constructor(
     val lastAdaptiveDecision: StateFlow<String?> = _lastAdaptiveDecision.asStateFlow()
     init {
         viewModelScope.launch { _uiState.update { it.copy(historyDepth = withContext(Dispatchers.IO) { runCatching { memory.count() }.getOrDefault(0) }) } }
+        // ═══ #197 双工位拆分：Agent 屏模式矫正 ═══
+        // 启动快照（AgentModule）可能携带旧档位（build/plan/reflect/...——历史
+        // 用户的持久化 defaultMode），而 Agent 屏现在只认 Chat/Agent。
+        // 引擎模式不在双模式白名单时回退 AGENT（全能智能体，向上兼容），
+        // UI 与引擎保持同相（选择器不出现"不在菜单里的当前值"）。
+        val startupMode = (agentEngine as? ApexAgentEngine)?.currentConfig()?.mode
+        if (startupMode == null || startupMode !in AGENT_SCREEN_MODES) {
+            setMode(AgentMode.AGENT)
+        } else {
+            _uiState.update { it.copy(mode = startupMode) }
+        }
         // P2-8/P3（6-c）：reasoningEffort chip 初始跟随默认 Profile；contextMaxTokens 回填引擎真实值（原恒 1 → 仪表盘 0%/上限1）。
         settingsRepository.profiles.value.firstOrNull { it.isDefault }?.let { p -> _uiState.update { it.copy(reasoningEffort = p.reasoningEffort) } }
         // 双级思考控制第二级：恢复强制深度思考开关（优先读新字段 forceDeepThinking；
@@ -831,17 +840,9 @@ class AgentChatViewModel @Inject constructor(
             files = fileRefs
         )
 
-        // ═══ "小圆环"工具菜单：发送前注入会话上下文 + v4 工具计划参数 ═══
-        // 时间注入在调用时刻生成；规则/结构化输出/网络搜索指令组装为
-        // "## Session Context" 段落；「函数调用」圈选 = 强制调用（tool_choice）；
-        // 不选 = 默认 CORE 工具集 + 目录（直接发送即可用，不再需要手动圈选）。
-        (agentEngine as? ApexAgentEngine)?.patchConfig { cfg ->
-            cfg.copy(
-                additionalSystemContext = chatToolkit.buildSessionContext(),
-                forcedToolIds = chatToolkit.forcedToolIds(),
-                exposeAllTools = chatToolkit.exposeAllToolsEnabled()
-            )
-        }
+        // #197 「小圆环」函数调用/工具菜单已迁至 Coding 屏：Agent 屏发送前不再
+        // 注入 toolkit 会话上下文/强制工具参数（Chat/Agent 模式由提示词层驱动；
+        // AGENT 模式的默认工具计划由 EngineToolPlanner 按模式自动处理）。
 
         try {
             taskController.execute(userInput).collect { event ->
@@ -1039,8 +1040,8 @@ class AgentChatViewModel @Inject constructor(
     val toolCount: Int
         get() = toolRegistry.toolCount
 
-    /** "小圆环"工具菜单状态仓库（UI 直接读写开关/规则/格式）。 */
-    val toolkitStore: ChatToolkitStore = chatToolkit
+    // #197：toolkitStore 已从 Agent 屏移除（函数调用/小圆环迁至 Coding 屏的
+    // CodeViewModel 注入使用）。
 
     // ═══════════════════════════════════════════════════════════
     // 附件处理（缺陷 1 修复：全部异步化）—— 已抽出至 [AttachmentManager]

@@ -2,7 +2,7 @@
   "schema": "apex-skill-v1",
   "id": "commit-message",
   "name": "提交信息生成",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Conventional Commits 提交信息生成：type 判定表、scope 提取、subject 祁使句规范、body 详略判定，配合 code_git_status/diff 工具先取证后落笔",
   "author": "Apex",
   "license": "MIT",
@@ -34,5 +34,6 @@
       "date": "2026-09-25",
       "notes": "首个内置版本：随 APK assets 打包，首启幂等释放安装（Issue #166）。"
     }
-  ]
+  ],
+  "scope": "coding"
 }

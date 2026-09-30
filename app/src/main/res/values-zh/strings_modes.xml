@@ -86,4 +86,15 @@
     <string name="mode_guide_thinking_follow">跟随选档</string>
     <string name="mode_guide_thinking_self_check">工具后+终检</string>
     <string name="mode_guide_thinking_post_tool">工具后自检</string>
+    <!-- ═══ #197 Agent 屏双模式指南（Chat/Agent）═══ -->
+    <string name="mode_guide_chat_cases">闲聊、情绪陪伴、知识问答、创意写作</string>
+    <string name="mode_guide_chat_flow">单轮流式回复；人设 + 聊天技能注入；零工具、零仪式感</string>
+    <string name="mode_guide_chat_tools">无——纯对话；函数调用工具环在 Coding 屏</string>
+    <string name="mode_guide_chat_human">每一轮都由你驱动；不自主执行任何操作</string>
+    <string name="mode_guide_chat_prompt">Mode: CHAT 段——对话式、有温度、跟随你的节奏</string>
+    <string name="mode_guide_agent_cases">日常事务、调研、自动化、设备控制——一切非编程任务</string>
+    <string name="mode_guide_agent_flow">ReAct 循环 + 通用工具（联网搜索/记忆/系统…）；编码工具已剔除</string>
+    <string name="mode_guide_agent_tools">通用 CORE 工具集；code_*/git/github 已移除——编程请求引导去 Coding 模式</string>
+    <string name="mode_guide_agent_human">歧义时 ask_user；无强制函数调用 UI（那是 Coding 屏的）</string>
+    <string name="mode_guide_agent_prompt">Mode: AGENT 段——全能非编程智能体，代码请求引导去 Coding</string>
 </resources>

@@ -51,7 +51,16 @@ data class SkillManifest(
     /** Ed25519 签名 hex（对 manifest 规范化字节的签名）。null = 未签名。 */
     val signature: String? = null,
     /** 版本变更日志。 */
-    val changelog: List<ChangelogEntry> = emptyList()
+    val changelog: List<ChangelogEntry> = emptyList(),
+    /**
+     * #197 工位作用域（"agent" | "coding" | "all"）：
+     * - agent：聊天/全能工位专属（聊天技能、人设增强）；
+     * - coding：编码工位专属（提交信息、代码评审等开发技能）；
+     * - all（默认）：两个工位都注入/可见 —— 旧 manifest 无此字段时保持
+     *   既有行为，向后兼容。
+     * 市场分级（Agent 市场 / Coding 市场）与斜杠菜单、Prompt 注入过滤同源。
+     */
+    val scope: String = "all"
 )
 
 /** 版本变更日志条目。 */
@@ -444,18 +453,45 @@ class SkillRegistry(
     }
 
     /**
+     * #197 按工位作用域获取 Prompt 注入。
+     *
+     * @param scope "agent" | "coding" —— 只返回 `scope` 相同或 "all" 的技能
+     *        文本。null = 不过滤（全量，等价 [getPromptInjections]，兼容旧调用）。
+     */
+    fun getPromptInjections(scope: String?): List<String> {
+        if (scope.isNullOrBlank()) return getPromptInjections()
+        return synchronized(lock) {
+            installedSkills.values
+                .filter { it.enabled }
+                .filter { it.manifest.scope == "all" || it.manifest.scope == scope }
+                .mapNotNull { it.manifest.promptInjection }
+        }
+    }
+
+    /** #197 按工位作用域获取已安装技能清单（市场分级列表/斜杠菜单共用口径）。 */
+    fun getInstalledForScope(scope: String?): List<InstalledSkill> {
+        val all = getInstalled()
+        if (scope.isNullOrBlank()) return all
+        return all.filter { it.manifest.scope == "all" || it.manifest.scope == scope }
+    }
+
+    /**
      * 渐进披露：仅返回「已激活且启用」技能的 Prompt 注入。
      *
      * 技能库扩到 40+ 后全量注入会撞请求体积上限；激活集外的技能只经
      * [getSkillDigests] 目录（一行摘要）暴露，需要时由模型调 skill_activate
      * 或 [SkillAutoActivator] 自动装备。激活 id 里已卸载/禁用的条目自然过滤。
+     *
+     * #197 双工位：[scope] 非空时在激活集上再按工位作用域过滤
+     * （"agent" | "coding"；"all" 技能两工位可见）。null = 不过滤（main 行为）。
      */
-    fun getActivePromptInjections(activeIds: Set<String>): List<String> {
+    fun getActivePromptInjections(activeIds: Set<String>, scope: String? = null): List<String> {
         if (activeIds.isEmpty()) return emptyList()
         return synchronized(lock) {
             activeIds.asSequence()
                 .mapNotNull { installedSkills[it] }
                 .filter { it.enabled }
+                .filter { scope.isNullOrBlank() || it.manifest.scope == "all" || it.manifest.scope == scope }
                 .mapNotNull { it.manifest.promptInjection }
                 .toList()
         }
@@ -465,11 +501,14 @@ class SkillRegistry(
      * 技能目录摘要（全部已安装且启用的技能，含未激活）：
      * 提示词「Skill Catalog」段的渲染源。summary 取 description 首句并截断，
      * 保证目录段体积与技能数量线性且每条 ≤ 一行。
+     *
+     * #197 双工位：[scope] 非空时目录同样按工位作用域过滤。
      */
-    fun getSkillDigests(): List<SkillDigest> {
+    fun getSkillDigests(scope: String? = null): List<SkillDigest> {
         return synchronized(lock) {
             installedSkills.values
                 .filter { it.enabled }
+                .filter { scope.isNullOrBlank() || it.manifest.scope == "all" || it.manifest.scope == scope }
                 .map { skill ->
                     SkillDigest(
                         id = skill.manifest.id,

@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.update
 // 职责边界：本文件只管「运行模式切换 / 思考档位 / 强制深度思考 / Spec 确认」
 // 四组引擎热更新通道；引擎仍经 patchConfig 只改目标字段（P1-1 语义：
 // 绝不重置其余配置）。
+//
+// #197：toolkitStore/函数调用已迁至 Coding 屏（CodeViewModel 注入同一
+// @Singleton ChatToolkitStore——Agent 屏不再消费，无跨屏状态串扰）。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 切换运行模式（BUILD/CHAT/PLAN/SPEC/CUSTOM…）。 */

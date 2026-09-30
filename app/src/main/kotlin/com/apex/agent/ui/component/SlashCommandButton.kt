@@ -47,6 +47,12 @@ import kotlinx.coroutines.flow.StateFlow
  * 菜单数据由 [SlashMenuProvider] 实时提供，覆盖 Skills / MCP / 插件 / 连接器 四类，
  * 并随插件加载状态自动刷新。每个条目附带状态角标（已连接 / 离线 / 未安装 / 示例）。
  *
+ * ## #197 工位作用域
+ *
+ * `scope` 参数（默认 "agent"）：Agent 屏传 "agent"、Coding 屏传 "coding" ——
+ * 菜单在展示前经 [SlashMenuData.forScope] 过滤，两工位各自看到自己的
+ * 技能/MCP 子集（市场分级同源口径）。"all" = 不过滤（调试用）。
+ *
  * ## v4：选中回调携带完整 [SlashMenuItem]
  *
  * 调用方（AgentChatScreen）需要 label（展示名）把选中项挂成输入栏迷你胶囊
@@ -70,7 +76,8 @@ import kotlinx.coroutines.flow.StateFlow
 fun SlashCommandButton(
     slashMenuProvider: SlashMenuProvider,
     onItemSelected: (SlashMenuItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    scope: String = "agent"
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -106,6 +113,7 @@ fun SlashCommandButton(
         if (showMenu) {
             SlashMenuPopup(
                 menuFlow = slashMenuProvider.menu,
+                scope = scope,
                 onRefresh = slashMenuProvider::refresh,
                 onDismiss = { showMenu = false },
                 onItemSelected = { item ->
@@ -126,11 +134,14 @@ fun SlashCommandButton(
 @Composable
 private fun SlashMenuPopup(
     menuFlow: StateFlow<SlashMenuData>,
+    scope: String,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
     onItemSelected: (SlashMenuItem) -> Unit
 ) {
-    val menuData by menuFlow.collectAsStateWithLifecycle()
+    val menuDataRaw by menuFlow.collectAsStateWithLifecycle()
+    // #197 工位作用域过滤（"all" = 不过滤）
+    val menuData = remember(menuDataRaw, scope) { menuDataRaw.forScope(scope) }
     var expandedCategory by remember { mutableStateOf<String?>(null) }
 
     Popup(

@@ -38,6 +38,8 @@ interface McpProcessHandle {
     val stdin: OutputStream
     val stdout: InputStream
     val stderr: InputStream
+    /** #197 真实进程 pid（JVM/PRoot 子进程）；无法获取时 null（如自定义句柄）。 */
+    val pid: Long? get() = null
     fun isAlive(): Boolean
     fun destroy()
 }
@@ -80,6 +82,7 @@ object JvmProcessLauncher : McpProcessLauncher {
         override val stdin: OutputStream get() = process.outputStream
         override val stdout: InputStream get() = process.inputStream
         override val stderr: InputStream get() = process.errorStream
+        override val pid: Long get() = process.pid()
         override fun isAlive(): Boolean = process.isAlive
         override fun destroy() = process.destroy()
     }
@@ -159,9 +162,13 @@ class McpStdioTransport internal constructor(
         env: Map<String, String> = emptyMap(),
         launcher: McpProcessLauncher = JvmProcessLauncher,
         workingDir: File? = null,
-        requestTimeoutMs: Long = 60_000L
+        requestTimeoutMs: Long = 60_000L,
+        onSpawned: ((pid: Long?, argv: List<String>) -> Unit)? = null
     ) : this(
-        handle = launcher.launch(command, env, workingDir),
+        handle = launcher.launch(command, env, workingDir).also { h ->
+            // #197 真实 spawn 事件：进程已 fork，pid/argv 来自真实子进程。
+            onSpawned?.invoke(h.pid, command)
+        },
         requestTimeoutMs = requestTimeoutMs
     )
 
