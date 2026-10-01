@@ -15,10 +15,12 @@ import android.view.inputmethod.ExtractedTextRequest
  *
  * ## 关键决策
  *
- *  - **组合文本直通**：`setComposingText` 的增量实时下发（不缓存整词）——
- *    Gboard/百度/讯飞常把整词拖到空格才提交；旧渲染器实测证明「组合态不下发
- *    = 字打不进去」。提交（commit）时由输入法自然走 `deleteSurroundingText`
- *    + `commitText`，旧组合文本被退格收回 —— 与真实终端一致；
+ *  - **组合文本差分直通**：`setComposingText` 是「替换整个组合区」语义 ——
+ *    Gboard/百度/讯飞每击键上报**全量**组合串（"a"→"ab"→"abc"），直通会
+ *    重复上屏（"aababc"）。以 [sentComposing] 镜像已同步到 PTY 的组合串，
+ *    每次只下发差异（公共前缀 + 退格 + 增量），组合期字符实时上屏（旧渲染
+ *    器实测「组合态不下发 = 字打不进去」），提交（commit）时同理差分替换
+ *    —— 与真实终端输入一致；
  *  - **可编辑缓冲只留 1 行**：不镜像终端滚回 —— IME 只需要光标/删除的语义，
  *    大缓冲会撑爆内存并让 IME 误触发滚动；
  *  - **`\n` 归一为 `\r`**（终端 Enter 语义）；
@@ -36,6 +38,15 @@ class TerminalInputConnection(private val terminalView: TerminalView) :
         Selection.setSelection(this, 0)
     }
 
+    /**
+     * ★ 组合区镜像（IME 替换语义的基准）：setComposingText 的契约是「替换
+     * 整个组合区」而非「追加」—— Gboard/中文 IME 每击键上报**全量**组合串
+     *（"a"→"ab"→"abc"）。旧实现把每份全量都直通 PTY → 终端收到
+     * "aababc"（输入乱码/「打字不进字」的根因）。此处保存上一次已同步到
+     * PTY 的组合串，每次只下发与新版差异（公共前缀之后的增删）。
+     */
+    private var sentComposing: String = ""
+
     override fun getEditable(): Editable {
         // 只返回当前行的小缓冲 —— 绝不镜像终端滚回（内存与 IME 行为双保险）
         return tinyBuffer
@@ -44,7 +55,13 @@ class TerminalInputConnection(private val terminalView: TerminalView) :
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
         val raw = text?.toString() ?: return super.commitText(text, newCursorPosition)
         if (raw.isEmpty()) return true
-        terminalView.handleImeText(raw)
+        // ★ 提交替换组合区（IME 契约）：终端里已存在 sentComposing 个字符，
+        // commitText 会把它们替换成 raw —— 只下发差异（退掉被删的尾部 + 补上
+        // 新增的后缀），避免「组合期直通 + 提交期全量重发」的双份上屏。
+        // Enter 归一（\n→\r，终端回车语义）沿 handleImeText 旧契约。
+        val normalized = raw.replace('\n', '\r')
+        replaceTerminalRegion(sentComposing, normalized)
+        sentComposing = ""
         // 行缓冲同步（IME 期望 commit 后文本进入编辑框）
         tinyBuffer.clear()
         tinyBuffer.append(raw.replace('\n', ' ').replace('\r', ' '))
@@ -54,9 +71,33 @@ class TerminalInputConnection(private val terminalView: TerminalView) :
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
         val raw = text?.toString() ?: return super.setComposingText(text, newCursorPosition)
-        // 组合增量直通（Termux 语义 —— 见类 KDoc「关键决策」）
-        if (raw.isNotEmpty()) terminalView.handleImeCompose(raw)
+        // ★ 差分直通：组合区是「替换」语义 —— 与上一次已同步到 PTY 的内容求
+        // 公共前缀，退掉多删的尾部、只补新增的后缀。IME 发空串（放弃组合）
+        // 时自然退掉全部已上屏组合字符。
+        replaceTerminalRegion(sentComposing, raw)
+        sentComposing = raw
         return true
+    }
+
+    /**
+     * 把终端里 old 文本呈现区替换成 new：公共前缀不变，退掉 (old.len - p)
+     * 个退格，再下发 new 的 (p..end) 增量。两个调用方（组合/提交）共用。
+     */
+    private fun replaceTerminalRegion(old: String, new: String) {
+        if (old == new) return
+        val prefix = commonPrefixLength(old, new)
+        repeat(old.length - prefix) { terminalView.handleImeBackspace() }
+        val added = new.substring(prefix)
+        if (added.isNotEmpty()) {
+            terminalView.handleImeCompose(added)
+        }
+    }
+
+    private fun commonPrefixLength(a: String, b: String): Int {
+        val n = minOf(a.length, b.length)
+        var i = 0
+        while (i < n && a[i] == b[i]) i++
+        return i
     }
 
     override fun setComposingRegion(start: Int, end: Int): Boolean {
@@ -64,12 +105,20 @@ class TerminalInputConnection(private val terminalView: TerminalView) :
         return true
     }
 
+    override fun finishComposingText(): Boolean {
+        // IME 结束组合（不一定紧随 commit）：保留已上屏字符（多数 IME 随后
+        // commitText 会经差分自然对齐；清零镜像会导致提交时重复下发）。
+        return super.finishComposingText()
+    }
+
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
         var before = beforeLength.coerceAtLeast(0)
         var after = afterLength.coerceAtLeast(0)
+        // ★ 组合区已被 IME 用 setComposingText("") 退净；此处只处理真实已
+        // 提交文本的退格（beforeLength 以 IME 眼中的编辑框为准，映射到
+        // tinyBuffer 行缓冲）。行缓冲收缩（IME 的本地视图一致）。
         while (before-- > 0) terminalView.handleImeBackspace()
         while (after-- > 0) terminalView.handleImeDeleteForward()
-        // 行缓冲收缩（IME 的本地视图一致）
         val len = tinyBuffer.length
         if (len > 0) {
             tinyBuffer.clear()

@@ -11,6 +11,7 @@ import com.apex.agent.platform.terminal.proot.PRootCommandBuilderImpl
 import com.apex.agent.platform.terminal.proot.PRootHostEnvironment
 import com.apex.agent.platform.terminal.proot.PRootLaunchRequest
 import com.apex.agent.platform.terminal.proot.ProotExecutor
+import com.apex.agent.platform.terminal.proot.SystemBindProfile
 import com.apex.agent.platform.terminal.workspace.AbsolutePath
 import com.apex.agent.platform.terminal.workspace.GuestUserHome
 import com.apex.agent.platform.terminal.workspace.LinuxWorkspaceManager
@@ -86,7 +87,13 @@ class UbuntuAptPackageManager(
      * 的单一构造点。null → 按上述构造参数内部自建（兼容旧构造；生产 DI 注入
      * 与 LinuxPRootBackend 共享的实例）。
      */
-    private val contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory? = null
+    private val contextFactory: com.apex.agent.platform.terminal.proot.LinuxExecutionContextFactory? = null,
+    /**
+     * ★ apt 执行的系统级 bind 集（/proc /dev /sys）—— 与交互会话
+     * （LinuxPRootBackend）对齐；默认 [SystemBindProfile.STANDARD]。
+     * JVM 测试注入 [SystemBindProfile.NONE] 可回到旧行为（裸 -r）。
+     */
+    private val systemBinds: SystemBindProfile = SystemBindProfile.STANDARD
 ) : LinuxPackageManager {
 
     /** T81 (D-6)：惰性内部工厂（旧构造兼容路径）。 */
@@ -642,7 +649,16 @@ class UbuntuAptPackageManager(
             arguments = arguments,
             workingDirectory = WorkspacePath(GUEST_APT_CWD),
             environment = guestEnv,
-            binds = listOf(PRootBind(AbsolutePath(homeDir.absolutePath), GuestUserHome.GUEST_PATH)),
+            // ★ 系统级 bind 对齐交互会话（LinuxPRootBackend.prepare 用
+            // SystemBindProfile.STANDARD）：/proc /dev /sys 缺失时 dpkg
+            // maintainer script、procps 依赖工具（dpkg-query 探测路径）、
+            // /dev/urandom 熵源（python-ssl/curl）都会出现只在 apt 侧复现的
+            // 诡异失败 —— 两条执行路径 bind 集不一致是环境漂移源。host 路径
+            // 不存在的条目由 toBinds() 诚实过滤。
+            binds = buildList {
+                add(PRootBind(AbsolutePath(homeDir.absolutePath), GuestUserHome.GUEST_PATH))
+                addAll(systemBinds.toBinds())
+            },
             terminalMode = com.apex.agent.platform.terminal.api.TerminalMode.AUTO,
             fakeRoot = true,
             killOnExit = true

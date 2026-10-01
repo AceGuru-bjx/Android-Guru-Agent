@@ -91,7 +91,7 @@ fun TerminalHistorySheet(
             Text(
                 stringResource(R.string.term_history_hint),
                 fontSize = 12.sp,
-                color = Color(0xFF8A9AA0)
+                color = Color(0xFF7E948A)
             )
             Spacer(Modifier.height(12.dp))
 
@@ -107,7 +107,7 @@ fun TerminalHistorySheet(
                         stringResource(R.string.term_history_empty),
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = Color(0xFF5A6270)
+                        color = Color(0xFF7E948A)
                     )
                 }
             } else {

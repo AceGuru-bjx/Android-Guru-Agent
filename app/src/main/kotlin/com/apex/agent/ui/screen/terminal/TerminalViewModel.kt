@@ -162,8 +162,26 @@ class TerminalViewModel @Inject constructor(
                 } else {
                     autoUbuntuSessionPending = true
                     // join 自动预备（幂等单飞；已进行中则等待共享结果）。
-                    withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching { ubuntuLifecycle.ensureReady() }
+                    // ★ 降级兜底（输入失灵根因）：ensureReady 失败/超时且用户仍未
+                    // 手工建过会话时，自动拉起 LOCAL 会话 —— 旧实现停在这里等用户
+                    // 自己发现「点键盘没反应」：终端 View 都没挂上，页面即死区。
+                    // LOCAL 会话零依赖（mksh + PTY）秒建；环境面板仍在后台重试，
+                    // READY 到达后不抢用户已用的会话（autoUbuntuSessionPending
+                    // 已失效，除非用户把 LOCAL 也关了）。
+                    val r = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { ubuntuLifecycle.ensureReady() }.getOrNull()
+                    }
+                    // 仅「明确失败」才降级：InProgress（超时续跑）是环境面板的
+                    // 正常进行态（进度可见 + 「先用 Android Shell」按钮可达）。
+                    val failed = r == null || r is UbuntuLifecycleCoordinator.EnsureResult.Failed
+                    if (failed && autoUbuntuSessionPending &&
+                        _sessions.value.none { it.isAlive }
+                    ) {
+                        autoUbuntuSessionPending = false
+                        val reason = (r as? UbuntuLifecycleCoordinator.EnsureResult.Failed)
+                            ?.message?.take(80)
+                        _notice.value = lang.getString(R.string.term_notice_fallback_session, reason ?: "…")
+                        createMutex.withLock { createSessionInternal(backendId = BACKEND_LOCAL) }
                     }
                 }
             } else {
@@ -868,10 +886,12 @@ class TerminalViewModel @Inject constructor(
     }
 
     private fun loadExtraKeys(): List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey> {
+        // T89：新用户默认空布局（KeyToolbar 主行已覆盖 TAB/^L/粘贴 —— 双行键区
+        // 重复泛滥）。已存储布局的存量用户不受影响（parse 非空即用）。
         val stored = prefs.getString("term_extra_keys", null)
         return com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.parse(stored)
             ?.flatten()
-            ?: com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.DEFAULT_LAYOUT.flatten()
+            ?: com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.EMPTY_LAYOUT.flatten()
     }
 
     private fun persistExtraKeys(keys: List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>) {
@@ -974,13 +994,13 @@ class TerminalViewModel @Inject constructor(
         provisioner.setUseMirror(on)
     }
 
+    /** 依赖安装运行态（runningId = 正在安装的条目 id；log = 安装输出滚动窗）。 */
     data class InstallState(
         val runningId: String? = null,
-        val log: String = "",
-        val useMirror: Boolean = true
+        val log: String = ""
     )
 
-    private val _install = MutableStateFlow(InstallState(useMirror = _useMirror.value))
+    private val _install = MutableStateFlow(InstallState())
     val install: StateFlow<InstallState> = _install.asStateFlow()
 
     private var depSessionId: Long? = null

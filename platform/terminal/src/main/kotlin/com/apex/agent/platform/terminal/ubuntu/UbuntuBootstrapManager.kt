@@ -266,12 +266,21 @@ class UbuntuBootstrapManager(
         if (force || !evidence.containsKey(BootstrapState.APT_UPDATE.name)) {
             stageStart(BootstrapState.APT_UPDATE, "running apt-get update")
             // 记录初始 sources 内容：镜像链全失败时恢复，避免 sources 永久停留在
-            // 最后一个镜像（官方源永不再被验证，海外/网络恢复用户可能更慢或被墙）
+            // 最后一个镜像（官方源永不再被验证，海外/网络恢复用户可能更慢或被墙）。
+            // ★ 修复（回滚 no-op）：UbuntuSourcesList 实际写的是 deb822
+            // etc/apt/sources.list.d/ubuntu.sources —— 旧实现备份/恢复的都是
+            // etc/apt/sources.list（Ubuntu Base 24.04 里根本不存在）→ 全镜像失败后
+            // "恢复"是空操作，sources 永久钉死在最后一个镜像（aliyun）。对齐真实
+            // 写入路径，快照与恢复同一文件；该文件缺失时跳过恢复（首次引导时
+            // sources 由上一阶段 CONFIGURING 生成，正常不会缺失 —— 防御性兜底）。
             val rootfsDesc0 = provisioner.current()
             val rootfsDir0 = rootfsDesc0?.location?.let { File(it.value) }
-            val originalSources: String? = rootfsDir0?.let { dir ->
-                runCatching { File(dir, "etc/apt/sources.list").readText() }.getOrNull()
+            val deb822SourcesFile: File? = rootfsDir0?.let { dir ->
+                File(dir, "${UbuntuSourcesList.SOURCES_D}/${UbuntuSourcesList.UBUNTU_SOURCES_FILE}")
             }
+            val originalSources: String? = deb822SourcesFile
+                ?.takeIf { it.isFile }
+                ?.let { runCatching { it.readText() }.getOrNull() }
             var updateResult = aptManager.update()
             var usedMirror: String? = null
             if (updateResult.state != com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED) {
@@ -299,17 +308,27 @@ class UbuntuBootstrapManager(
                     }
                     // P2（镜像回滚）：全部镜像失败 → 恢复原 sources（含官方源），
                     // 下次重试从官方源重新起步而非钉死在 aliyun。
-                    if (usedMirror == null && originalSources != null && rootfsDir != null) {
+                    // ★ 修复：恢复的也是 deb822 ubuntu.sources（与快照同文件）。
+                    if (usedMirror == null && originalSources != null && deb822SourcesFile != null) {
                         runCatching {
-                            File(rootfsDir, "etc/apt/sources.list").writeText(originalSources)
+                            deb822SourcesFile.writeText(originalSources)
                         }
                     }
                 }
             }
             if (updateResult.state != com.apex.agent.platform.terminal.pkg.PackageOperationState.SUCCEEDED) {
-                val reason = updateResult.error?.message
-                    ?: updateResult.result?.stderr?.take(500)
-                    ?: "apt update failed (official + ${MIRROR_FALLBACK_ORDER.joinToString("/")} mirrors all failed)"
+                // ★ 失败原因可读化：旧实现把 apt stderr 首 500 字符直接塞进
+                // bootstrapNote（UI 橙字三行截断 —— 用户看到一坨日志碎片）。
+                // 优先结构化 error.message；stderr 只提取 E: 开头的错误行
+                //（apt 的 E: 行才是人话，W:/Ign: 是镜像噪音）；兜底镜像链摘要。
+                val reason = updateResult.error?.message?.take(200)
+                    ?: updateResult.result?.stderr?.lineSequence()
+                        ?.filter { it.startsWith("E:") }
+                        ?.take(3)
+                        ?.joinToString("; ")
+                        ?.ifBlank { null }?.take(200)
+                    ?: "apt update failed — official + ${MIRROR_FALLBACK_ORDER.joinToString("/")} mirrors all failed " +
+                        "(network unreachable/DNS or firewall? retry when online)"
                 return stageFail(BootstrapState.APT_UPDATE, reason)
             }
             if (usedMirror != null) {

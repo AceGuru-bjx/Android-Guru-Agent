@@ -140,8 +140,13 @@ class BundledRootfsSource(
             return Result.failure(
                 provisioningException(
                     ProvisioningErrorCode.ARCHIVE_INVALID,
-                    "Bundled rootfs archive missing: ${f.absolutePath} — this build was not " +
-                        "packaged with the Ubuntu bundle (run scripts/fetch_rootfs.sh before assemble)",
+                    // ★ 用户可行动的缺档报错：debug/本地构建未跑 fetch_rootfs.sh 时，
+                    // 旧文案是开发者黑话（"run scripts/fetch_rootfs.sh before assemble"），
+                    // 终端页只会把它塞进 10sp 的错误条里。保留路径（诊断）+
+                    // 明确的下一步（装 Release 版 / 构建前拉档）。
+                    "APK 未内置 Ubuntu 环境（libubuntu-rootfs.so 缺失）— " +
+                        "请安装 Release 版 APK；自行构建需先运行 scripts/fetch_rootfs.sh。" +
+                        " [missing: ${f.name}]",
                     recoverable = false
                 )
             )

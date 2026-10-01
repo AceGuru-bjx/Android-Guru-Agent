@@ -1,6 +1,5 @@
 package com.apex.agent.ui.screen.terminal.scheme
 
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 /**
@@ -8,14 +7,11 @@ import androidx.compose.ui.graphics.Color
  *
  * 设计约束：
  *  - **纯 Kotlin 值**：颜色以 ARGB `Long` 存储（0xFFRRGGBB），不依赖任何
- *    Android/Compose 类型 —— [TerminalColorSchemeDefs]/[TerminalAnsiRemapper]
- *    因此可以在纯 JVM 单测里直接断言（app 单测零 Robolectric）。
- *  - **16 色 ANSI 全集**：0-7 基本色 + 8-15 亮色。VT 引擎把 SGR 索引色转成
- *    ARGB 时使用内置标准 16 色板（[com.apex.agent.terminalemulator.TerminalColor.BASIC_16]，
- *    C++ NativeVtCore 同板 —— 奇偶校验测试锁定）—— 渲染层用
- *    [TerminalAnsiRemapper] 把「引擎标准板颜色」重映射为当前 scheme 的对应槽位，
- *    RGB truecolor（SGR 38;2）原样透传。这样 Kotlin/C++ 双引擎无需任何改动
- *    即可获得完整换肤能力。
+ *    Android/Compose 类型 —— [TerminalColorSchemeDefs] 因此可以在纯 JVM
+ *    单测里直接断言（app 单测零 Robolectric）。
+ *  - **16 色 ANSI 全集**：0-7 基本色 + 8-15 亮色。T88 渲染已下放
+ *    :terminal-view Canvas 直绘（调色板经 TerminalPalette 注入），
+ *    旧 LazyColumn 链路的 TerminalAnsiRemapper 已随渲染器删除。
  *  - **语义色**：background/foreground/cursor/selection 独立于 ANSI 16 色
  *    （scheme 自身决定光标与选区颜色，Termux properties 同款）。
  */
@@ -81,19 +77,3 @@ data class TerminalColorScheme(
         const val FALLBACK_ID = "apex-mint"
     }
 }
-
-/**
- * 渲染树内传递当前 scheme（[TerminalGrid] 读取；宿主以
- * `CompositionLocalProvider(LocalTerminalColorScheme provides scheme) { … }` 注入）。
- * staticCompositionLocal —— scheme 切换整树重组，单屏终端完全可接受。
- */
-val LocalTerminalColorScheme = staticCompositionLocalOf<TerminalColorScheme> {
-    TerminalColorSchemeRegistry.byId(TerminalColorScheme.FALLBACK_ID)
-}
-
-/**
- * bold-as-bright（xterm 传统：FLAG_BOLD + 基础 8 色 → 亮色槽位）。
- * bash/ls 等彩色输出大量依赖该约定（目录=bold blue 等）；Termux 默认开启。
- * 与 scheme 一起由渲染树注入（同一处 CompositionLocalProvider）。
- */
-val LocalTerminalBoldAsBright = staticCompositionLocalOf { true }
