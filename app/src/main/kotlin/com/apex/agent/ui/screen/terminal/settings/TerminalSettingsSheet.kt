@@ -92,7 +92,7 @@ fun TerminalSettingsDrawer(
 
             // ═══ 1. 终端外观与交互 ═══
             SettingsCard(Icons.Default.Settings, stringResource(R.string.term_appearance)) {
-                LabeledNumber(stringResource(R.string.term_font_size), settings.fontSize, 8, 32) { onSettings { copy(fontSize = it) } }
+                LabeledNumber(stringResource(R.string.term_font_size), settings.fontSize, TerminalViewModel.TerminalSettings.MIN_FONT_SIZE, TerminalViewModel.TerminalSettings.MAX_FONT_SIZE) { onSettings { copy(fontSize = it) } }
                 ToggleRow(stringResource(R.string.term_monochrome), settings.monochrome) { onSettings { copy(monochrome = it) } }
                 ToggleRow(stringResource(R.string.term_keybar), settings.showKeybar) { onSettings { copy(showKeybar = it) } }
             }

@@ -65,6 +65,7 @@ import com.apex.agent.vault.VaultEntry
 import com.apex.agent.vault.VaultEvent
 import com.apex.agent.vault.VaultOrigin
 import com.apex.agent.vault.VaultViewModel
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,6 +100,15 @@ fun VaultScreen(
         if (currentEvent != null) {
             snackbarText = eventText
             viewModel.consumeEvent()
+        }
+    }
+
+    // v1.4.4 UX 审查：反馈自动消隐（对齐 StorageScreen 既有模式）——
+    // 旧实现 snackbarText 永不超时清理，常驻屏底遮挡 FAB 列表末项。
+    LaunchedEffect(snackbarText) {
+        if (snackbarText != null) {
+            delay(4000)
+            snackbarText = null
         }
     }
 
@@ -500,6 +510,13 @@ private fun VaultEditorDialog(
     )
 }
 
+// v1.4.4 UX 审查：SimpleDateFormat 提升为复用实例（旧实现 formatDate 每行调用
+// new 一个，长列表滚动高频分配；对齐 LogViewerScreen 既有模式）
+private val vaultDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+
 /** 本地化时间格式（minSdk 26；Locale.getDefault 随系统语言）。 */
-private fun formatDate(epochMs: Long): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(epochMs))
+private fun formatDate(epochMs: Long): String {
+    synchronized(vaultDateFormat) {
+        return vaultDateFormat.format(Date(epochMs))
+    }
+}

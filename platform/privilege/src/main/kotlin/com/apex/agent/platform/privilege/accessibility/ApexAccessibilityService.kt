@@ -32,7 +32,10 @@ class ApexAccessibilityService : AccessibilityService() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val eventListeners = mutableListOf<(AccessibilityEvent) -> Unit>()
+    // v1.4.4 UX 审查：改为 COW 列表 —— 主线程 onAccessibilityEvent 迭代 vs
+    // EnvironmentStateUpdater 在 Dispatchers.Default 协程里 add/remove，
+    // 普通 ArrayList 极端时序可抛 ConcurrentModificationException 崩掉无障碍服务。
+    private val eventListeners = java.util.concurrent.CopyOnWriteArrayList<(AccessibilityEvent) -> Unit>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()

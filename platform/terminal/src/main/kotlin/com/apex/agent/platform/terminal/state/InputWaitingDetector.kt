@@ -42,6 +42,12 @@ internal val interactivePrograms = setOf(
 
 class InputWaitingDetector {
 
+    private companion object {
+        // PTY 输出热路径：PtyOutputPumpImpl 对每个输出 chunk 调一次 detect()，
+        // 每次 Pattern.compile 开销不容忽视（cat 大文件时每秒数百次）→ 提为常量。
+        private val WHITESPACE = Regex("\\s+")
+    }
+
     /**
      * HIGH_CONFIDENCE patterns: screen last-line ends with one of these.
      * Each pattern is a regex matched against the trimmed last visible line.
@@ -99,7 +105,7 @@ class InputWaitingDetector {
 
         // Weaker signal: known interactive program running + prompt-ish last line.
         if (foregroundCommand != null) {
-            val cmd = foregroundCommand.trim().split(Regex("\\s+")).firstOrNull() ?: ""
+            val cmd = foregroundCommand.trim().split(WHITESPACE).firstOrNull() ?: ""
             val baseName = cmd.substringAfterLast('/')
             if (baseName in interactivePrograms) {
                 // ends with $ > # or : — likely a REPL/prompt
@@ -126,7 +132,7 @@ class InputWaitingDetector {
             if (rx.matches(lastLine)) return Confidence.HIGH_CONFIDENCE
         }
         if (foregroundCommand != null) {
-            val baseName = foregroundCommand.trim().substringAfterLast('/').split(Regex("\\s+")).firstOrNull() ?: ""
+            val baseName = foregroundCommand.trim().substringAfterLast('/').split(WHITESPACE).firstOrNull() ?: ""
             if (baseName in interactivePrograms) {
                 if (lastLine.endsWith('$') || lastLine.endsWith('>') ||
                     lastLine.endsWith(':') || lastLine.endsWith('#')) {

@@ -7,9 +7,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * 目录列表工具（优化版）
@@ -51,7 +48,8 @@ class ListFilesTool(
         }
     """.trimIndent()
 
-    private val dateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+    // v1.4.4 UX 审查：删除从未使用的 dateFormat 死字段（全文件无 dateFormat. 引用；
+    // 残留的 SimpleDateFormat 若未来被「顺手用上」将成为并发 Bug —— 参见 FileGlobTool 同款问题）
 
     override suspend fun execute(arguments: String): String {
         return try {

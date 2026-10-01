@@ -880,7 +880,12 @@ class TerminalViewModel @Inject constructor(
     }
 
     fun updateSettings(block: TerminalSettings.() -> TerminalSettings) {
-        val next = _settings.value.block()
+        val next = _settings.value.block().let {
+            // v1.4.4 UX 审查：设置抽屉旧上限 32 与捏合钳制 24 不一致 —— 用户调到 25..32 后
+            // 一次缩放即 8 级跳变；抽屉上限已统一为常量，持久化前再钳制兑底
+            // （防旧版本已落盘的越界值继续生效）。
+            it.copy(fontSize = it.fontSize.coerceIn(TerminalSettings.MIN_FONT_SIZE, TerminalSettings.MAX_FONT_SIZE))
+        }
         prefs.edit()
             .putInt("term_font_size", next.fontSize)
             .putBoolean("term_monochrome", next.monochrome)

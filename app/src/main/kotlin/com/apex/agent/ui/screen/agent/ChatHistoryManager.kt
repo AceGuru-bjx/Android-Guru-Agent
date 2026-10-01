@@ -52,6 +52,13 @@ class ChatHistoryManager @Inject constructor(
      */
     private val tombstones = HashSet<String>()
 
+    /** 墓碑容量上限：超出即整体重置 —— 超过窗口的在途归档早已落盘，
+    // 清空安全；防止 clearAll（一次登记最多 100 个 UUID）后长期进程内存缓慢累积。 */
+    private fun rememberTombstone(id: String) {
+        if (tombstones.size >= MAX_TOMBSTONES) tombstones.clear()
+        tombstones.add(id)
+    }
+
     /** 全部会话摘要，按最近更新倒序。 */
     fun loadSessions(): List<ChatSessionSummary> {
         val raw = prefs.getString(KEY_INDEX, null) ?: return emptyList()
@@ -95,7 +102,7 @@ class ChatHistoryManager @Inject constructor(
     /** 删除单个会话（索引 + 消息；登记墓碑拦截在途归档）。 */
     fun deleteSession(sessionId: String) {
         synchronized(ioLock) {
-            tombstones.add(sessionId)
+            rememberTombstone(sessionId)
             prefs.edit()
                 .putString(KEY_INDEX, json.encodeToString(indexSerializer, loadSessions().filter { it.id != sessionId }))
                 .remove(keyMessages(sessionId))
@@ -198,7 +205,7 @@ class ChatHistoryManager @Inject constructor(
     /** 清空全部历史会话（全键清扫：索引外的孤儿 msg_ 键一并回收）。 */
     fun clearAll() {
         synchronized(ioLock) {
-            loadSessions().forEach { tombstones.add(it.id) }
+            loadSessions().forEach { rememberTombstone(it.id) }
             val editor = prefs.edit().remove(KEY_INDEX)
             // 只按当前索引删键回收不了历史孤儿（被截断出索引的会话）——
             // 直接按 msg_ 前缀全键清扫，一次性兜底。
@@ -214,6 +221,7 @@ class ChatHistoryManager @Inject constructor(
         const val KEY_INDEX = "index"
         const val KEY_MSG_PREFIX = "msg_"
         const val MAX_SESSIONS = 100
+        const val MAX_TOMBSTONES = 256
         /** 重命名标题上限（与 historyTitle 的 40 字截断对齐，给自定义命名留余量）。 */
         const val TITLE_MAX_LENGTH = 40
         /** 全文搜索最多扫描的会话数（见 [searchSessions]）。 */
