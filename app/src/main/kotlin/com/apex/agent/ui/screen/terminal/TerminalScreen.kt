@@ -1,7 +1,13 @@
 package com.apex.agent.ui.screen.terminal
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -688,13 +694,10 @@ private fun EnvironmentPreparingContent(
     onOpenCenter: () -> Unit
 ) {
     // ── 顶部图标：呼吸光晕的终端符号 ──
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "env-glow")
+    val transition = rememberInfiniteTransition(label = "env-glow")
     val glow by transition.animateFloat(
         initialValue = 0.55f, targetValue = 1f,
-        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-            androidx.compose.animation.core.tween(1400),
-            androidx.compose.animation.core.RepeatMode.Reverse
-        ),
+        animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Reverse),
         label = "env-glow-alpha"
     )
     Box(contentAlignment = Alignment.Center) {
