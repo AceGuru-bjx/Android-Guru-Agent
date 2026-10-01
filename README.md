@@ -60,8 +60,8 @@ FSM 旁路回放 → 梦境巩固）、Root/Shizuku/无障碍三级权限链、�
 
 <a href="#tools"><img src="https://img.shields.io/badge/🧰_tools-109-ff69b4" alt="109 Tools"/></a>
 <a href="#engine"><img src="https://img.shields.io/badge/🧠_agent_modes-6-00C2D1" alt="6 Modes"/></a>
-<a href="#architecture"><img src="https://img.shields.io/badge/📦_gradle_modules-14-8A2BE2" alt="14 Modules"/></a>
-<a href="#testing"><img src="https://img.shields.io/badge/🧪_tests-74_files-2EA44F" alt="74 Tests"/></a>
+<a href="#architecture"><img src="https://img.shields.io/badge/📦_gradle_modules-20-8A2BE2" alt="20 Modules"/></a>
+<a href="#testing"><img src="https://img.shields.io/badge/🧪_tests-252_files_·_4k_用例-2EA44F" alt="252 Tests"/></a>
 <a href="#cs-mem"><img src="https://img.shields.io/badge/🧠_memory-cs--mem-00C2D1" alt="cs-mem"/></a>
 <a href="#terminal-runtime"><img src="https://img.shields.io/badge/sandbox-PRoot_Ubuntu_24.04-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu"/></a>
 <img src="https://img.shields.io/badge/ABI-arm64·x86__64·v7a-3DDC84" alt="ABI"/>
@@ -264,21 +264,24 @@ flowchart TB
     subgraph CORE["⚙️ core:* — 纯 JVM · 零 Android 依赖"]
         direction LR
         ENGINE["agent-engine<br/>六模式 ReAct 循环<br/>TaskOrchestrator<br/>P7 三级压缩"]
-        TOOLS["tool-registry<br/>57 内置工具 · schema 即校验<br/>SkillRegistry · MCP 客户端"]
+        TOOLS["tool-registry<br/>内置工具 · schema 即校验<br/>SkillRegistry · MCP 客户端 · Hub 源"]
         LLM["llm-adapter<br/>OpenAI 兼容 SSE<br/>多模型运行时 · 角色路由"]
         LOGC["logging<br/>结构化日志"]
+        CODEENG["code-engine<br/>编码工位引擎<br/>长任务韧性 · 子代理 · 胶囊流"]
     end
 
     subgraph PLAT["🧱 platform:* — Android 平台层"]
         direction LR
         PRIV["privilege<br/>Root / Shizuku / Shell<br/>三级权限链"]
         PERSIST["persistence<br/>前台服务 + 看门狗"]
-        TERM["terminal<br/>Ubuntu rootfs · PRoot<br/>原生 PTY · 19 工具"]
+        TERM["terminal<br/>Ubuntu rootfs · PRoot<br/>原生 PTY · 25 工具"]
         CSMEM["cs-mem 认知记忆<br/>蒸馏 · 旁路回放 · 梦境<br/>Room 图数据库"]
+        MCPH["mcp-host<br/>逆向 MCP Host<br/>:8765 · Bearer · 白名单"]
     end
 
     VTE["🖥️ terminal-emulator<br/>自研 VT100 / ANSI 模拟器"]
     VTN["🚀 terminal-native<br/>apex-vt-native C++17 引擎<br/>（JNI 零分配热路径）"]
+    TVW["🪟 terminal-view<br/>Compose 画布渲染 · 手势 · IME"]
 
     subgraph PLUG["🧩 plugin-sdk — AIDL 跨进程"]
         PAPI["plugin-api · IApexPlugin"]
@@ -297,30 +300,38 @@ flowchart TB
     ENGINE -->|会话记忆观察| CSMEM
     TERM --> VTE
     VTE -.native 加速.-> VTN
+    TERM --> TVW
+    MCPH -->|工具暴露·同一门控链| TOOLS
     PHOST -->|插件工具注册| TOOLS
     PERSIST -.前台保活.-> APP
     PAPI -.契约.-> PHOST
     PLUGINS -.实现.-> PAPI
 ```
 
-**14 个 Gradle 模块**（单一仓库 `settings.gradle.kts`）：
+**20 个 Gradle 模块**（单一仓库 `settings.gradle.kts`）：
 
 | 模块 | 类型 | 职责 |
 |------|:---:|------|
 | `:app` | Android App | Compose UI（抽屉导航 8 屏）、Hilt 装配、浏览器/GitHub 工具、悬浮球 |
 | `:core:agent-engine` | 纯 JVM | ReAct 引擎（Plan/Build 等六模式）、任务编排器、上下文压缩、会话记忆 |
-| `:core:tool-registry` | 纯 JVM | 57 个内置工具（schema 即校验 + 风险门 + 使用统计）+ 工具执行器 + SkillRegistry + MCP 客户端 |
+| `:core:tool-registry` | 纯 JVM | 内置工具（schema 即校验 + 风险门 + 使用统计）+ 工具执行器 + SkillRegistry + MCP 客户端 + Hub 源 |
 | `:core:llm-adapter` | 纯 JVM | OpenAI 兼容流式客户端 + 多模型运行时（角色路由/能力校验/错误分类） |
 | `:core:logging` | 纯 JVM | 结构化日志（LogCategory/LogLevel/LogRecord） |
+| `:core:code-tools` | 纯 JVM | 编码工具包：文件编辑 / git / 诊断 / TODO |
+| `:core:code-engine` | 纯 JVM | 编码工位专用引擎：长任务韧性 / 子代理 / 胶囊流式 / 思考档位 |
 | `:platform:privilege` | Android Lib | Root/Shizuku/普通三级权限链 + 无障碍服务 + 进程流工厂 |
 | `:platform:persistence` | Android Lib | 前台服务 + WorkManager 看门狗（被杀自动拉起） |
-| `:platform:terminal` | Android Lib | 终端运行时 2.0：rootfs 供给、PRoot 后端、原生 PTY、Ubuntu 生命周期编排、18 个工具 |
+| `:platform:terminal` | Android Lib | 终端运行时 2.0：rootfs 供给、PRoot 后端、原生 PTY、Ubuntu 生命周期编排、25 个工具 |
 | `:platform:cs-mem` | Android Lib | 认知记忆系统（本仓库的差异化核心，见下节） |
-| `:terminal-emulator` | Android Lib | 自研 VT100/ANSI 终端模拟器（vendored，ATR Phase 2）+ `TerminalEngine` 引擎抽象 |
+| `:platform:code-workspace` | Android Lib | 编码工作区：安全根目录与生命周期 |
+| `:platform:mcp-host` | 纯 JVM | 逆向 MCP Host：把手机工具暴露给 PC 客户端（零第三方依赖） |
+| `:terminal-emulator` | 纯 Kotlin | 自研 VT100/ANSI 终端模拟器（零依赖）+ `TerminalEngine` 引擎抽象 |
 | `:terminal-native` | Android Lib | apex-vt-native C++17 零分配 VT 引擎（vendored + JNI，运行时回退 Kotlin） |
+| `:terminal-view` | Android Lib | Compose 终端视图层：画布渲染 / 手势 / 选区 / IME 连接 |
 | `:plugin-sdk:plugin-api` | Android Lib | AIDL `IApexPlugin` + PluginContract 常量 |
 | `:plugin-sdk:plugin-host` | Android Lib | 插件发现/绑定/工具桥接 |
-| `:plugins:plugin-workflow` | Android App | 参考插件 APK（`workflow/save、execute、list` 三工具） |
+| `:plugins:plugin-workflow` | Android App | 参考插件 APK（工作流三工具） |
+| `:plugins:plugin-web-automation` | Android App | 参考插件 APK：浏览器自动化工具目录 |
 
 > [!NOTE]
 > 📌 `ComposeFoundry/` 是**独立的 Gradle 工程**（有自己的 `settings.gradle.kts`），
@@ -917,7 +928,7 @@ chmod +x gradlew
 <a id="testing"></a>
 ## 🧪 测试与质量保障
 
-**74 个测试文件**（69 JVM 单测 + 5 真机仪器测试）+ 三道静态门禁：
+**252 个测试文件**（246 JVM 单测 + 6 真机仪器测试，≈4,008 个 `@Test` 用例）+ 三道静态门禁：
 
 | 模块 | 单测 | 亮点 |
 |------|------|------|
@@ -940,7 +951,7 @@ chmod +x gradlew
 
 > [!TIP]
 > 📖 完整测试文档：[docs/TESTING.md](docs/TESTING.md)（理念 / 矩阵 / 替身规范 /
-> FAQ / 74 文件清单）。
+> FAQ / 文件清单 —— 清单撰写时 74 文件，主干现已 252，待同步）。
 
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
@@ -998,12 +1009,12 @@ Android-Guru-Agent/
 
 | 指标 | 数值 |
 |------|-----:|
-| Kotlin 主源码 | 367 个文件 / 64,842 行 |
-| Kotlin 测试源码 | 74 个文件 / 19,769 行 |
-| C++（终端 PTY/JNI 桥） | 6 个文件 / 1,121 行 |
-| Gradle 模块 | 13 |
-| 内置工具 | 100 |
-| 测试代码 / 主源码比例 | ≈ 30% |
+| Kotlin 主源码 | 802 个文件 / 183,615 行 |
+| Kotlin 测试源码 | 252 个文件 / 64,116 行（≈4,008 个 `@Test` 用例） |
+| C++（终端 PTY/JNI/VT 原生层） | 37 个文件 / 10,650 行 |
+| Gradle 模块 | 20 |
+| 内置工具 | 109 |
+| 测试代码 / 主源码比例 | ≈ 35% |
 
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
@@ -1037,7 +1048,7 @@ Android-Guru-Agent/
 | 文档 | 内容 |
 |------|------|
 | [docs/tool-system-v3.md](docs/tool-system-v3.md) | **工具系统 v3**：执行硬化八层（超时/重试/限流/熔断/追踪/批量/组合动作/环境门控），MCP·LangGraph·Anthropic CU·Mobile-Agent-E 对标 |
-| [docs/TESTING.md](docs/TESTING.md) | **测试总指南**：理念/矩阵/替身规范/FAQ/74 文件清单 |
+| [docs/TESTING.md](docs/TESTING.md) | **测试总指南**：理念/矩阵/替身规范/FAQ/文件清单（撰写时 74，现已 252，待同步） |
 | [docs/liquid-glass-system.md](docs/liquid-glass-system.md) | **Liquid Glass 玻璃组件系统**：架构/七档材质/组件 API/真实性验收矩阵 |
 | [docs/memory-and-workflow-research.md](docs/memory-and-workflow-research.md) | **记忆与工作流调研报告**：对标 MemGPT/Mem0/A-MEM/Zep/Voyager/Claude Code/OpenHands/SWE-agent |
 | [docs/terminal-api.md](docs/terminal-api.md) | 终端 API 契约 |
