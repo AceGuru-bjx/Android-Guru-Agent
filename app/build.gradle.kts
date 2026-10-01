@@ -165,6 +165,8 @@ dependencies {
     implementation(libs.serialization.json)
     implementation(libs.coroutines.android)
     implementation(libs.okhttp)
+    // 增量更新：VCDIFF 补丁的 LZMA(.xz) 二级压缩段解码（VcdiffDecoder）
+    implementation(libs.xz)
     implementation(libs.work.runtime)
 
     // Coil (image loading)

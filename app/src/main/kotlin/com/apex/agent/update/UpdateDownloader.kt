@@ -86,6 +86,26 @@ class UpdateDownloader(private val context: Context) {
         return 0 to 0L
     }
 
+    /**
+     * 查询下载状态码（STATUS_RUNNING / SUCCESSFUL / FAILED / PAUSED…）。
+     *
+     * 增量更新引擎的轮询终点判定：PAUSED 不算失败 —— DownloadManager 在
+     * 网络抖动时自动暂停/恢复，等它自己翻身即可。未知/丢失 ID 返回 0
+     * （调用方按运行中处理，由外层超时与取消兜底）。
+     */
+    fun statusOf(id: Long): Int {
+        val dm = downloadManager ?: return DownloadManager.STATUS_FAILED
+        val query = DownloadManager.Query().setFilterById(id)
+        dm.query(query)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return cursor.getInt(
+                    cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)
+                )
+            }
+        }
+        return 0
+    }
+
     /** 下载完成后的本地文件（公共 Download/ApexAgent/ 下）。 */
     fun localFile(fileName: String): File = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
