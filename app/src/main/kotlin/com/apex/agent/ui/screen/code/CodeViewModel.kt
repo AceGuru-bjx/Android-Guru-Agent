@@ -2,7 +2,9 @@ package com.apex.agent.ui.screen.code
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.apex.agent.R
 import com.apex.agent.core.code.CodeAgentEngine
+import com.apex.agent.core.code.CodeEngineFacade
 import com.apex.agent.core.code.longtask.LongTaskCopyOptions
 import com.apex.agent.core.code.longtask.LongTaskDiff
 import com.apex.agent.core.code.longtask.LongTaskStatus
@@ -10,6 +12,8 @@ import com.apex.agent.core.code.longtask.LongTaskStore
 import com.apex.agent.core.code.longtask.LongTaskTemplates
 import com.apex.agent.core.code.longtask.LongTaskTracker
 import com.apex.agent.core.code.longtask.TaskCopyEngine
+import com.apex.agent.core.code.standard.DualLogicCodeEngine
+import com.apex.agent.core.code.standard.StandardLogicMode
 import com.apex.agent.core.code.stream.CodeStreamCheckpoint
 import com.apex.agent.core.code.stream.CodeStreamSession
 import com.apex.agent.core.code.stream.CodeStreamSnapshot
@@ -189,8 +193,12 @@ class CodeViewModel @Inject constructor(
      */
     private val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val codeEngineImpl: CodeAgentEngine?
-        get() = codeEngine as? CodeAgentEngine
+    private val codeEngineImpl: CodeEngineFacade?
+        get() = codeEngine as? CodeEngineFacade
+
+    /** 双思考逻辑路由门面（右上角切换入口；注入恒为 DualLogicCodeEngine）。 */
+    private val dualLogicEngine: DualLogicCodeEngine?
+        get() = codeEngine as? DualLogicCodeEngine
 
     init {
         // 工作区清单 + 激活恢复（manager init 已恢复 activeId）
@@ -208,6 +216,54 @@ class CodeViewModel @Inject constructor(
                 ?.let { runCatching { AgentMode.valueOf(it.uppercase()) }.getOrNull() }
         } ?: AgentMode.BUILD
         setMode(if (startupMode in CODING_SCREEN_MODES) startupMode else AgentMode.BUILD)
+        // v1.5 双思考逻辑：恢复持久化档位（空/未知 → 深潜，历史行为零变化）
+        restoreLogicMode()
+    }
+
+    // ═══ v1.5 思考逻辑（深潜 = 自研七档 / 标准 = 标准任务循环）═══
+
+    /**
+     * 切换思考逻辑（Coding 屏右上角选择器入口）：
+     * - 持久化（AgentSettings.codeThinkingLogic）；
+     * - 双引擎门面即时路由（下一轮 execute 走新引擎）；
+     * - 系统消息告知（两线会话现场各自独立保留——切换不清空现场，
+     *   切回来继续）；
+     * - 运行中拒绝切换（防丢现场），由 UI 弹提示。
+     *
+     * @return true = 切换成功；false = 正在运行（UI 提示稍后再切）
+     */
+    fun setLogicMode(mode: StandardLogicMode): Boolean {
+        if (_uiState.value.isRunning) return false
+        if (_uiState.value.logicMode == mode) return true
+        val switched = dualLogicEngine?.switchLogic(mode) ?: true
+        if (!switched) return false
+        settingsRepository.updateAgentSettings {
+            copy(codeThinkingLogic = mode.persistenceName)
+        }
+        _uiState.update { it.copy(logicMode = mode) }
+        appendSystemMessage(
+            if (mode == StandardLogicMode.STANDARD) {
+                languageManager.getString(R.string.code_logic_switched_standard)
+            } else {
+                languageManager.getString(R.string.code_logic_switched_deep_dive)
+            }
+        )
+        // 引擎侧同步当前模式/档位（新激活线接收与 UI 一致的 Build/Plan 与档位）
+        codeEngineImpl?.updateMode(_uiState.value.mode)
+        codeEngineImpl?.updateThinkingLevel(_uiState.value.thinkingLevel)
+        return true
+    }
+
+    /** 启动恢复：codeThinkingLogic 字符串 → 逻辑（空/未知 → 深潜兜底）。 */
+    private fun restoreLogicMode() {
+        val mode = StandardLogicMode.fromName(
+            settingsRepository.agentSettings.value.codeThinkingLogic
+        ) ?: StandardLogicMode.DEEP_DIVE
+        dualLogicEngine?.switchLogic(mode)
+        _uiState.update { it.copy(logicMode = mode) }
+        // 新激活线同步当前 Build/Plan 与档位（与 setLogicMode 运行时切换同口径）
+        codeEngineImpl?.updateMode(_uiState.value.mode)
+        codeEngineImpl?.updateThinkingLevel(_uiState.value.thinkingLevel)
     }
 
     // ═══ #197 执行模式（Build/Plan）═══
@@ -534,6 +590,12 @@ class CodeViewModel @Inject constructor(
      * 引擎从不感知 AUTO——coding 自治语义。
      */
     private fun resolveRuntimeThinkingLevel(goal: String) {
+        // v1.5 标准线无 AUTO 预检机制（思考档位仅映射回合预算倍率）——
+        // 预检与决策回显只在深潜线进行，避免标准线出现无关的自适应消息。
+        if (_uiState.value.logicMode == StandardLogicMode.STANDARD) {
+            effectiveRunLevel = _uiState.value.thinkingLevel
+            return
+        }
         val selected = _uiState.value.thinkingLevel
         if (selected != CodeThinkingLevel.AUTO) {
             effectiveRunLevel = selected
@@ -564,6 +626,8 @@ class CodeViewModel @Inject constructor(
         runToolCalls++
         recentToolOutcomes.addLast(event.success)
         while (recentToolOutcomes.size > RECENT_OUTCOME_WINDOW) recentToolOutcomes.removeFirst()
+        // v1.5 标准线无深水区升级观察器（回合预算由画像×档位倍率自洽）
+        if (_uiState.value.logicMode == StandardLogicMode.STANDARD) return
         if (_uiState.value.thinkingLevel != CodeThinkingLevel.AUTO) return
         val decision = adaptiveSelector.escalateOnDeepWater(
             runToolCalls = runToolCalls,

@@ -207,4 +207,18 @@
     <string name="code_thinking_short_ultracode">Ultra</string>
     <string name="code_thinking_short_apexcode">Apex</string>
     <string name="code_thinking_short_auto">Adaptive</string>
+    <!-- ═══ v1.5 思考逻辑双引擎（右上角切换：深潜 = 自研 / 标准 = 标准任务循环）═══ -->
+    <string name="code_logic_chip">Logic · %1$s</string>
+    <string name="code_logic_selector_title">Task completion logic</string>
+    <string name="code_logic_mode_deep_dive">Deep Dive</string>
+    <string name="code_logic_mode_standard">Standard</string>
+    <string name="code_logic_badge_deep_dive">7 tiers · adaptive</string>
+    <string name="code_logic_badge_standard">agent loop</string>
+    <string name="code_logic_deep_dive_desc">Self-designed thinking: seven depth tiers with pre-run adaptive pick and deep-water escalation</string>
+    <string name="code_logic_standard_desc">Industry-standard agent loop: build/plan roles, permission gates, sub-agent dispatch, context compaction</string>
+    <string name="code_logic_caps_deep_dive">Tier ladder · AUTO pre-check · knob compensation</string>
+    <string name="code_logic_caps_standard">Roles · allow/ask/deny · task sub-agents · compaction</string>
+    <string name="code_logic_switch_blocked">A run is active — switch after it finishes</string>
+    <string name="code_logic_switched_standard">🧭 Thinking logic switched to Standard (agent loop). Your Deep Dive session is kept and will resume when you switch back.</string>
+    <string name="code_logic_switched_deep_dive">🤿 Thinking logic switched to Deep Dive (self-designed seven tiers). Your Standard session is kept and will resume when you switch back.</string>
 </resources>
