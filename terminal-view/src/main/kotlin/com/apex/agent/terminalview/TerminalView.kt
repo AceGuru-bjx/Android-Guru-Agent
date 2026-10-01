@@ -259,14 +259,28 @@ class TerminalView @JvmOverloads constructor(
         invalidate()
     }
 
-    /** 聚焦并拉起输入法（进入终端即敲 —— 部分设备 requestFocus 不弹 IME 的补招）。 */
+    /** 聚焦并拉起输入法（进入终端即敲 —— 部分设备 requestFocus 不弹 IME 的补招）。
+     *
+     * ★ 修复（键盘拉不起来）：旧实现用 SHOW_IMPLICIT —— 该标志语义是
+     * 「隐式请求」（窗口焦点变化等被动场景），部分 ROM/输入法（尤其中文 IME）
+     * 会直接忽略。改用 flags=0（显式用户请求），绝大多数 IME 都必须响应；
+     * 首次失败后再用 SHOW_FORCED 兜一次（极端 ROM）。
+     */
     fun requestFocusAndShowKeyboard() {
         runCatching { requestFocus() }
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        if (imm == null) return
         runCatching {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            val shown = imm.showSoftInput(this, 0)
+            if (!shown) imm.showSoftInput(this, InputMethodManager.SHOW_FORCED)
         }
     }
+
+    /** ★ 修复（点按不弹键盘）：系统把「可编辑文本视图」识别为 tap-to-type 的
+     * 通道就是 onCheckIsTextEditor —— 不覆写时点击 View 不会自动聚焦拉 IME
+     *（旧实现全靠 handleTap 显式调 requestFocusAndShowKeyboard，链路一旦
+     * 被 peek/scroll 手势拦截就断）。覆写后 tap-to-type 是系统级保障。 */
+    override fun onCheckIsTextEditor(): Boolean = true
 
     /** 隐藏输入法（Back 键被 onKeyPreIme 拦截时用）。 */
     fun hideKeyboard() {
@@ -489,6 +503,16 @@ class TerminalView @JvmOverloads constructor(
         super.onWindowFocusChanged(hasWindowFocus)
         scheduleBlinkIfNeeded()
         client?.onTerminalFocus(hasWindowFocus)
+        // ★ T89 输入修复：窗口焦点恢复且本 View 持焦点时重拉 IME（Activity
+        // 切回/弹层关闭后输入法被系统收走的经典场景；IME 仅在窗口有焦点时
+        // 响应 show 请求）。仅在 IME 之前处于激活态时恢复 —— 不抢用户主动
+        // 收起的键盘。
+        if (hasWindowFocus && isFocused) {
+            runCatching {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                if (imm?.isAcceptingText == true) imm.showSoftInput(this, 0)
+            }
+        }
         invalidate()
     }
 
@@ -1023,14 +1047,8 @@ class TerminalView @JvmOverloads constructor(
         return TerminalInputConnection(this)
     }
 
-    /** IME 提交文本（`commitText` 路径）。 */
-    fun handleImeText(text: String) {
-        if (text.isEmpty()) return
-        client?.onTerminalWrite(text.replace('\n', '\r'))
-        onUserTypedSomething()
-    }
-
-    /** IME 组合文本直通（Termux 语义 —— 见 TerminalInputConnection KDoc）。 */
+    /** IME 组合/提交文本（TerminalInputConnection 差分桥的落点；\n 已在桥侧
+     *  归一为 \r —— 此处原样直通 RAW 写入）。 */
     fun handleImeCompose(text: String) {
         if (text.isEmpty()) return
         client?.onTerminalWrite(text)

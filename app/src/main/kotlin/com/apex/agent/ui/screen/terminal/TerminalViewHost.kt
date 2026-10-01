@@ -24,6 +24,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -57,6 +58,7 @@ import com.apex.agent.terminalview.TerminalViewSettings
 import com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysBar
 import com.apex.agent.ui.screen.terminal.scheme.TerminalColorScheme
 import com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeRegistry
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 /**
@@ -137,11 +139,21 @@ fun TerminalViewHost(
     // 响铃振动受设置门控（每次重组后同步，避免陈旧捕获）
     SideEffect { client.bellVibrate = settings.vibrateOnBell }
 
-    // 会话就绪（首帧快照）后自动聚焦拉起 IME：进入终端即可直接敲命令（仅一次，
-    // 避免与用户主动隐藏键盘反复打架）。requestFocus 不弹 IME 的设备由 View 内
-    // requestFocusAndShowKeyboard 的显式 show() 补招兜底。
+    // ★ 键盘拉起时机（T89 输入修复）：旧版只在「首帧 VT 快照到达」（render != null）
+    // 才拉 —— shell 无输出/泵慢时用户点键盘毫无反应。本 Host 挂载即有活跃会话
+    //（TerminalScreen 只在有会话时组合它），组合即拉；快照到达后再补一次
+    //（首帧后窗口焦点已稳定，IME 响应率更高）。仅一次语义，不与用户主动
+    // 收起键盘打架。
+    LaunchedEffect(Unit) {
+        delay(120)   // 等 View attach + 焦点稳定
+        viewState.value?.requestFocusAndShowKeyboard()
+    }
+    var keyboardBoosted by remember { mutableStateOf(false) }
     LaunchedEffect(render != null) {
-        if (render != null) viewState.value?.requestFocusAndShowKeyboard()
+        if (render != null && !keyboardBoosted) {
+            keyboardBoosted = true
+            viewState.value?.requestFocusAndShowKeyboard()
+        }
     }
 
     // ── 工具栏锁存（CTRL/SHIFT/ALT 一次性 —— 与下一个特殊键/字母组合后释放）──
@@ -187,7 +199,7 @@ fun TerminalViewHost(
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         stringResource(R.string.term_not_started),
-                        color = Color(0xFF5A6270),
+                        color = ConsoleTheme.dim,
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -215,7 +227,7 @@ fun TerminalViewHost(
                 ) {
                     Column(
                         modifier = Modifier
-                            .background(Color(0xE6263041), RoundedCornerShape(10.dp))
+                            .background(PopupChrome.bg, RoundedCornerShape(10.dp))
                             .padding(vertical = 4.dp)
                     ) {
                         for (item in request.items) {
@@ -223,7 +235,7 @@ fun TerminalViewHost(
                                 localizedMenuLabel(item),
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Monospace,
-                                color = Color(0xFFE8F2ED),
+                                color = ConsoleTheme.text,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
@@ -507,7 +519,7 @@ private fun JumpToLatestPill(
 ) {
     Row(
         modifier = modifier
-            .background(Color(0xE6263041), RoundedCornerShape(14.dp))
+            .background(PopupChrome.bg, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -518,6 +530,12 @@ private fun JumpToLatestPill(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
         )
     }
+}
+
+/** 浮层 chrome（上下文菜单/跳底浮标）：恒深色 mint 控制台底 —— 旧值
+ * 0xE6263041 是旧主题蓝灰残留，与 ConsoleTheme 色系冲突（T89 清理）。 */
+private object PopupChrome {
+    val bg = Color(0xE60F1613)
 }
 
 /** 菜单项 id → 本地化文案（未知名回落 View 默认英文 label）。 */

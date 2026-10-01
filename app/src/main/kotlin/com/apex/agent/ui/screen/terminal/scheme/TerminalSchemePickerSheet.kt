@@ -40,9 +40,9 @@ import com.apex.agent.R
 /**
  * T87：终端配色方案选择器（底部弹层）。
  *
- * Termux properties 的可视化等价物：20 套内置方案网格陈列，每张卡片 =
+ * Termux properties 的可视化等价物：31 套内置方案网格陈列，每张卡片 =
  * 迷你终端预览（方案底色 + 8 色 ANSI 色条 + 提示符示例），点击即切换
- * （渲染树经 [LocalTerminalColorScheme] 即时换色，无需重启会话）。
+ *（VM 的 schemeId StateFlow → 渲染树调色板即时换色，无需重启会话）。
  *
  * 纯展示组件 —— 选中态/回调由宿主传入；不直接触碰持久化。
  */

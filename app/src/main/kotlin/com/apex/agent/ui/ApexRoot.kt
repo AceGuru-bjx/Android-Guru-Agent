@@ -266,12 +266,17 @@ fun ApexRoot() {
                 OfflineBanner(isOnline = isOnline)
 
                 // ═══ 顶部上下文仪表盘长条（全局）═══
-                ContextMeterBar(
-                    usedTokens = agentState.contextUsedTokens,
-                    maxTokens = agentState.contextMaxTokens,
-                    sessionTotalTokens = agentState.sessionTotalTokens,
-                    onCompress = { agentVm.compressNow() }
-                )
+                // T89：终端页隐藏 —— Agent token 用量与终端会话无关，却吃掉
+                // 终端竖屏 20dp 高度（终端页本就被键区挤压，条带堆叠是「页面
+                // 一坨」的直接成因之一）。其余页面不受影响。
+                if (currentDestination != DrawerDestination.Terminal) {
+                    ContextMeterBar(
+                        usedTokens = agentState.contextUsedTokens,
+                        maxTokens = agentState.contextMaxTokens,
+                        sessionTotalTokens = agentState.sessionTotalTokens,
+                        onCompress = { agentVm.compressNow() }
+                    )
+                }
 
                 Box(modifier = Modifier.fillMaxSize()) {
                     when (currentDestination) {

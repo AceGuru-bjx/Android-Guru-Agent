@@ -192,14 +192,18 @@ PtySession::PtySession(int id, const std::vector<std::string>& argv,
         fcntl(masterFd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    // 设置PTY属性：ECHO/ICRNL 决策保留（交互行为已按此打磨）；
-    // Termux 修法：清 IXON/IXOFF —— 防 Ctrl+S 软件流控把输出“锁死”
-    //（用户按到 Ctrl+S 后终端永久停滞的经典坑）；置 IUTF8 ——
-    // 行规程的行编辑/退格按 UTF-8 码点边界处理（CJK 输入不再半个字符地删）。
+    // ★ 修复（输入失灵根因之一）：恢复行规程默认的 ECHO 与 ICRNL。
+    // 旧实现清了 ECHO/ICRNL：bash readline（自设 raw 模式）不受影响，但任何
+    // canonical 模式的读者（read 内建、cat、非行编辑 shell、脚本 read 提示）
+    // 会「敲字不回显 + 回车不提交行」—— ICRNL 关闭后 \r 永远不转成 \n，
+    // 行缓冲永不结束，用户感知就是「命令输不进去」。真实终端（Termux）的
+    // master termios 保持 forkpty 默认（ECHO|ICRNL 开）—— 交互程序自己负责
+    // 切 raw（readline/vim）并恢复。保留的调整只有两个纯增益项：
+    //   - 清 IXON/IXOFF：防 Ctrl+S 软件流控把输出“锁死”（经典坑）；
+    //   - 置 IUTF8：行编辑/退格按 UTF-8 码点边界（CJK 不再半个字符地删）。
     struct termios tio{};
     if (tcgetattr(masterFd, &tio) == 0) {
-        tio.c_lflag &= ~(ECHO | ECHONL);  // 关闭回显
-        tio.c_iflag &= ~(ICRNL | IXON | IXOFF);  // 不转换CR为NL；关软件流控
+        tio.c_iflag &= ~(IXON | IXOFF);  // 保留 ICRNL（回车→行提交）
 #ifdef IUTF8
         tio.c_iflag |= IUTF8;
 #endif

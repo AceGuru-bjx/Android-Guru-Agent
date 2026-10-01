@@ -631,6 +631,9 @@ class UbuntuLifecycleCoordinatorTest {
         assertEquals(P.ROOTFS_READY, d(true, "READY", "NOT_STARTED", P.NOT_INSTALLED))
         assertEquals(P.ROOTFS_READY, d(true, "READY", "FAILED", P.NOT_INSTALLED))
         assertEquals(P.FAILED, d(true, "READY", "FAILED", P.FAILED))
+        // ★ 降级 READY 稳定化：bootstrap FAILED + 之前（降级）READY → 保持 READY
+        //（refreshState 不再把降级态翻回 ROOTFS_READY 丢失 bootstrapNote）
+        assertEquals(P.READY, d(true, "READY", "FAILED", P.READY))
     }
 
     @Test

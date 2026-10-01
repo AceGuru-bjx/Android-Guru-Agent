@@ -15,16 +15,8 @@
     <string name="term_cd_close_session">Close session</string>
     <string name="term_no_session">No active session</string>
     <string name="term_waiting_input">⌨ Waiting for input</string>
-    <string name="term_banner_failed_title">Ubuntu environment error</string>
-    <string name="term_banner_not_installed_title">Ubuntu dev environment not unpacked</string>
-    <string name="term_banner_failed_desc">Last unpack/bootstrap failed; you can retry</string>
-    <string name="term_banner_not_installed_desc">Full Linux environment: gcc / python3 / git / vim / man out of the box (offline unpack built in, ~2–5 minutes)</string>
     <string name="term_retry">Retry</string>
-    <string name="term_unpack">Unpack</string>
     <string name="term_env_center">Environment center</string>
-    <string name="term_installing_banner">Unpacking Ubuntu rootfs offline… (~2–5 minutes, you can wait in background)</string>
-    <string name="term_bootstrapping_banner">Ubuntu bootstrap: apt sources / network / base packages… (auto-degrades when offline)</string>
-    <string name="term_converging_banner">Ubuntu environment settling…</string>
     <string name="term_settings_title">Terminal settings</string>
     <string name="term_appearance">Terminal appearance</string>
     <string name="term_font_size">Font size</string>
@@ -120,6 +112,7 @@
     <string name="term_notice_ubuntu_unavailable">Ubuntu environment unavailable: %1$s</string>
     <string name="term_notice_create_failed">Session creation failed: %1$s</string>
     <string name="term_notice_no_session_input">No active session — input not delivered (create a session first)</string>
+    <string name="term_notice_fallback_session">Ubuntu temporarily unavailable (%1$s) — switched to Android Shell; you can type right away, retry Ubuntu from the environment center</string>
     <string name="term_notice_blocked">⛔ Command blocked by blacklist/whitelist: %1$s (not executed; Ctrl+C or Ctrl+U clears the line)</string>
     <string name="term_notice_input_failed">Input failed: %1$s</string>
     <string name="term_notice_paste_blocked">⛔ Paste blocked: first line hit the blacklist/whitelist: %1$s</string>

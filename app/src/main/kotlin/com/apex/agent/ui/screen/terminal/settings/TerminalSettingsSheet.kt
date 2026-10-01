@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -15,17 +14,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,24 +40,28 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
-import com.apex.agent.ui.screen.terminal.EnvironmentCenterSheet
 import com.apex.agent.ui.screen.terminal.SettingsCard
 import com.apex.agent.ui.screen.terminal.SurfaceBadge
+import com.apex.agent.ui.screen.terminal.TerminalConsoleTheme
 import com.apex.agent.ui.screen.terminal.TerminalViewModel
 import com.apex.agent.ui.screen.terminal.ToggleRow
 
 /**
- * 终端专属设置抽屉（T87 从 TerminalScreen.kt 拆出 —— Screen 行数预算治理）。
+ * 终端设置弹层（T89 从侧抽屉改为 bottom sheet）。
  *
- * 新增（T87 终端体验完善）：
- *  - **配色方案入口**（[onOpenSchemePicker]）：31 套 Termux 风格主题；
- *  - **bold-as-bright 开关**：xterm 传统（ls/ls 彩色输出的约定）；
- *  - **命令历史入口**（[onOpenHistory]）。
- *
- * 其余（外观/反馈/黑白名单）与拆出前逐字节一致。
+ * 变更（T89 终端大修）：
+ *  - **范式统一**：终端域的配置类弹层此前三种范式并存（设置=侧抽屉、环境中心/
+ *    配色/历史=bottom sheet、新建=AlertDialog），drawer 套在 App 全局 drawer 里
+ *    形成双层侧滑。统一收敛为 bottom sheet（新建会话保留系统 AlertDialog ——
+ *    快速二选一的标准容器）；
+ *  - **字号区间修正**：输入侧允许 8..32 而 VM 钳制 8..24 —— 输 25~32 显示大
+ *    数字实际落盘 24 的静默分叉修复（对齐 TerminalSettings.MIN/MAX）；
+ *  - **深色控制台主题**：经 [TerminalConsoleTheme] 包裹 —— 浅色 App 主题下
+ *    弹层不再「白纸糊在黑终端上」。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TerminalSettingsDrawer(
+fun TerminalSettingsSheet(
     settings: TerminalViewModel.TerminalSettings,
     onSettings: (TerminalViewModel.TerminalSettings.() -> TerminalViewModel.TerminalSettings) -> Unit,
     schemeName: String,
@@ -76,159 +81,167 @@ fun TerminalSettingsDrawer(
     onRemoveWhite: (String) -> Unit,
     onClose: () -> Unit
 ) {
-    ModalDrawerSheet(modifier = Modifier.width(340.dp)) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    TerminalConsoleTheme {
+        ModalBottomSheet(
+            onDismissRequest = onClose,
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
-            // 标题
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SurfaceBadge(Icons.Default.Settings, MaterialTheme.colorScheme.primary)
-                Text(stringResource(R.string.term_settings_title), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // 标题
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SurfaceBadge(Icons.Default.Settings, MaterialTheme.colorScheme.primary)
+                    Text(stringResource(R.string.term_settings_title), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                }
 
-            // ═══ 1. 终端外观与交互 ═══
-            SettingsCard(Icons.Default.Settings, stringResource(R.string.term_appearance)) {
-                LabeledNumber(stringResource(R.string.term_font_size), settings.fontSize, TerminalViewModel.TerminalSettings.MIN_FONT_SIZE, TerminalViewModel.TerminalSettings.MAX_FONT_SIZE) { onSettings { copy(fontSize = it) } }
-                ToggleRow(stringResource(R.string.term_monochrome), settings.monochrome) { onSettings { copy(monochrome = it) } }
-                ToggleRow(stringResource(R.string.term_keybar), settings.showKeybar) { onSettings { copy(showKeybar = it) } }
-            }
+                // ═══ 1. 终端外观与交互 ═══
+                // v1.4.4 UX 审查 #233：字号上下限统一为 TerminalSettings 常量（T89 上游同款修复）
+                SettingsCard(Icons.Default.Settings, stringResource(R.string.term_appearance)) {
+                    LabeledNumber(
+                        label = stringResource(R.string.term_font_size),
+                        value = settings.fontSize,
+                        min = TerminalViewModel.TerminalSettings.MIN_FONT_SIZE,
+                        max = TerminalViewModel.TerminalSettings.MAX_FONT_SIZE
+                    ) { onSettings { copy(fontSize = it) } }
+                    ToggleRow(stringResource(R.string.term_monochrome), settings.monochrome) { onSettings { copy(monochrome = it) } }
+                    ToggleRow(stringResource(R.string.term_keybar), settings.showKeybar) { onSettings { copy(showKeybar = it) } }
+                }
 
-            // ═══ 1a. 配色方案（T87）═══
-            SettingsCard(Icons.Default.Palette, stringResource(R.string.term_scheme_section)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(stringResource(R.string.term_scheme_current), style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            schemeName,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                // ═══ 1a. 配色方案 ═══
+                SettingsCard(Icons.Default.Palette, stringResource(R.string.term_scheme_section)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(stringResource(R.string.term_scheme_current), style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                schemeName,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        TextButton(onClick = onOpenSchemePicker) {
+                            Text(stringResource(R.string.term_scheme_change))
+                        }
                     }
-                    TextButton(onClick = onOpenSchemePicker) {
-                        Text(stringResource(R.string.term_scheme_change))
+                    ToggleRow(stringResource(R.string.term_bold_as_bright), boldAsBright, onBoldAsBright)
+                    Text(
+                        stringResource(R.string.term_bold_as_bright_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // ═══ 1b. 命令历史 ═══
+                SettingsCard(Icons.Default.History, stringResource(R.string.term_history_section)) {
+                    Text(
+                        stringResource(R.string.term_history_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TextButton(onClick = onOpenHistory) {
+                        Text(stringResource(R.string.term_history_open))
                     }
                 }
-                ToggleRow(stringResource(R.string.term_bold_as_bright), boldAsBright, onBoldAsBright)
-                Text(
-                    stringResource(R.string.term_bold_as_bright_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
 
-            // ═══ 1b. 命令历史（T87）═══
-            SettingsCard(Icons.Default.History, stringResource(R.string.term_history_section)) {
-                Text(
-                    stringResource(R.string.term_history_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                TextButton(onClick = onOpenHistory) {
-                    Text(stringResource(R.string.term_history_open))
-                }
-            }
-
-            // ═══ 1c. 扩展键行（T87 —— Termux extra-keys 等价物）═══
-            SettingsCard(Icons.Default.Apps, stringResource(R.string.term_extra_keys_section)) {
-                Text(
-                    stringResource(R.string.term_extra_keys_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (extraKeys.isNotEmpty()) {
-                    Spacer(Modifier.height(6.dp))
-                    LazyColumn(modifier = Modifier.height((extraKeys.size.coerceAtMost(4) * 34).dp)) {
-                        items(extraKeys, key = { it.label + it.kind + it.payload }) { k ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 2.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "• ${k.label}  (${kindLabel(k.kind)})",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                TextButton(onClick = { onRemoveExtraKey(k.label) }) {
-                                    Text(stringResource(R.string.term_remove), color = MaterialTheme.colorScheme.error)
+                // ═══ 1c. 扩展键行（Termux extra-keys 等价物）═══
+                SettingsCard(Icons.Default.Apps, stringResource(R.string.term_extra_keys_section)) {
+                    Text(
+                        stringResource(R.string.term_extra_keys_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (extraKeys.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        LazyColumn(modifier = Modifier.height((extraKeys.size.coerceAtMost(4) * 34).dp)) {
+                            items(extraKeys, key = { it.label + it.kind + it.payload }) { k ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "• ${k.label}  (${kindLabel(k.kind)})",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    TextButton(onClick = { onRemoveExtraKey(k.label) }) {
+                                        Text(stringResource(R.string.term_remove), color = MaterialTheme.colorScheme.error)
+                                    }
                                 }
                             }
                         }
                     }
+                    ExtraKeyAdder(onAdd = onAddExtraKey)
+                    TextButton(onClick = onResetExtraKeys) {
+                        Text(stringResource(R.string.term_extra_keys_reset), color = MaterialTheme.colorScheme.primary)
+                    }
                 }
-                ExtraKeyAdder(onAdd = onAddExtraKey)
-                TextButton(onClick = onResetExtraKeys) {
-                    Text(stringResource(R.string.term_extra_keys_reset), color = MaterialTheme.colorScheme.primary)
-                }
-            }
 
-            // ═══ 2. 反馈（对齐 Termux / ConnectBot 的终端反馈习惯）═══
-            SettingsCard(Icons.Default.Settings, stringResource(R.string.term_feedback)) {
-                ToggleRow(stringResource(R.string.term_vibrate_on_bell), settings.vibrateOnBell) {
-                    onSettings { copy(vibrateOnBell = it) }
+                // ═══ 2. 反馈（对齐 Termux / ConnectBot 的终端反馈习惯）═══
+                SettingsCard(Icons.Default.Settings, stringResource(R.string.term_feedback)) {
+                    ToggleRow(stringResource(R.string.term_vibrate_on_bell), settings.vibrateOnBell) {
+                        onSettings { copy(vibrateOnBell = it) }
+                    }
+                    Text(
+                        stringResource(R.string.term_vibrate_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    ToggleRow(stringResource(R.string.term_keep_screen_on), settings.keepScreenOn) {
+                        onSettings { copy(keepScreenOn = it) }
+                    }
+                    Text(
+                        stringResource(R.string.term_keep_screen_on_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
+
+                // ═══ 3. 黑名单 / 白名单 ═══
+                SettingsCard(Icons.Default.Block, stringResource(R.string.term_blacklist_title)) {
+                    Text(
+                        stringResource(R.string.term_blacklist_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    CommandListEditor(
+                        title = stringResource(R.string.term_blacklist),
+                        items = blacklist.toList().sorted(),
+                        onAdd = onAddBlack,
+                        onRemove = onRemoveBlack,
+                        danger = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    CommandListEditor(
+                        title = stringResource(R.string.term_whitelist),
+                        items = whitelist.toList().sorted(),
+                        onAdd = onAddWhite,
+                        onRemove = onRemoveWhite,
+                        danger = false
+                    )
+                }
+
+                // ═══ 4. 入口提示（环境解包在环境中心）═══
                 Text(
-                    stringResource(R.string.term_vibrate_desc),
+                    stringResource(R.string.term_env_hint),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                ToggleRow(stringResource(R.string.term_keep_screen_on), settings.keepScreenOn) {
-                    onSettings { copy(keepScreenOn = it) }
-                }
-                Text(
-                    stringResource(R.string.term_keep_screen_on_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // ═══ 3. 黑名单 / 白名单 ═══
-            SettingsCard(Icons.Default.Block, stringResource(R.string.term_blacklist_title)) {
-                Text(
-                    stringResource(R.string.term_blacklist_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = stringResource(R.string.term_blacklist),
-                    items = blacklist.toList().sorted(),
-                    onAdd = onAddBlack,
-                    onRemove = onRemoveBlack,
-                    danger = true
-                )
-                Spacer(Modifier.height(8.dp))
-                CommandListEditor(
-                    title = stringResource(R.string.term_whitelist),
-                    items = whitelist.toList().sorted(),
-                    onAdd = onAddWhite,
-                    onRemove = onRemoveWhite,
-                    danger = false
-                )
-            }
-
-            // ═══ 4. 入口提示（环境解包在环境中心）═══
-            Text(
-                stringResource(R.string.term_env_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
-                Text(stringResource(R.string.term_close))
             }
         }
     }
@@ -292,7 +305,7 @@ private fun CommandListEditor(title: String, items: List<String>, onAdd: (String
     }
 }
 
-/** 宏类型 → 短标签（设置抽屉列表展示）。 */
+/** 宏类型 → 短标签（设置弹层列表展示）。 */
 private fun kindLabel(kind: com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.MacroKind): String =
     when (kind) {
         com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.MacroKind.TEXT -> "文本"
