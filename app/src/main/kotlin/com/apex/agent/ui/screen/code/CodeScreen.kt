@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -139,9 +138,10 @@ fun CodeScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .imePadding()
+        modifier = Modifier.fillMaxSize()
+        // IME insets 已由 ApexRoot 的 contentWindowInsets(systemBars ∪ ime) 统一
+        // 注入——这里再叠 .imePadding() 会双重抬升（键盘弹出时输入栏被顶过高，
+        // 第三轮审计对 Agent 屏的同款修复，见 ApexRoot.kt 注释）。
     ) {
         WorkspaceBar(
             active = state.activeWorkspace,
@@ -468,14 +468,15 @@ private fun WorkspaceBar(
                 )
             }
 
-            Text(
-                text = stringResource(R.string.code_clear_chat),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .clickable { onClearChat() }
-                    .padding(6.dp)
-            )
+            // 新会话：图标按钮（对齐 Agent 屏 34/19dp 规格与 History 邻钮密度）
+            IconButton(onClick = onClearChat, modifier = Modifier.size(28.dp)) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = stringResource(R.string.code_clear_chat),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
     }
 }
@@ -590,9 +591,12 @@ private fun CodeInputBar(
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
             // ═══ 流水线指令胶囊行（[/> skill: 名字 ×]；无挂起不占位）═══
+            // 紧凑规格（v2）：胶囊高度收敛到与工具栏按钮同量级，行下留 2dp
+            // 间距——旧版 48dp 关闭钮把胶囊撑到 54dp，视觉上“糊”在输入框上。
             PipelineCapsuleRow(
                 pending = pendingCommand,
-                onRemove = onRemovePendingCommand
+                onRemove = onRemovePendingCommand,
+                modifier = Modifier.padding(bottom = 2.dp)
             )
 
             // ═══ 小圆环状态标签行（搜索/时间/函数/格式/规则芯片，可单独关闭）═══

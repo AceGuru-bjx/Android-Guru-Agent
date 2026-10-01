@@ -172,8 +172,10 @@ object SlashCommandRouter {
      *   随 App 启动自动连接）。已连接（或旧调用方只携带 Token 态且已连接）→
      *   注入列出 7 个 MCP 工具 + mcp_call 用法的提示词；未连接 → 引导走
      *   GithubTokenDialog 配置流程（与此前行为一致，不回归）。
-     * - 其他 `/mcp:<id>`：已连接的服务器 → 提示词引导用 mcp_call 调用其工具；
-     *   未连接 → 通用骨架（"指令存在，能力待接线"，与此前一致）。
+     * - 其他 `/mcp:<id>`：已连接（正在运行）的服务器 → 提示词引导用 mcp_call
+     *   调用其工具；未连接 → **不执行**（agentPrompt 置空，systemMessage 引导
+     *   去市场启动）——Hub 生态门控的产品要求：未安装/未启动的 MCP 不可经
+     *   斜杠使用，宁可拦下也不给模型发空转提示词。
      */
     private fun routeMcp(command: SlashCommand.Mcp, context: SlashRouteContext): SlashCommandRoute {
         if (command.id == GITHUB_MCP_SERVER_ID) {
@@ -206,12 +208,12 @@ object SlashCommandRouter {
                 )
             )
         } else {
+            // 未运行 → 拦截：不向模型发空转提示词，引导用户去市场启动
+            // （调用方对空 agentPrompt 不执行 —— AgentChatViewModel/
+            // CodeViewModel 均有 isNotBlank 门）。
             SlashCommandRoute(
-                systemMessage = "🔌 连接 MCP: ${command.id}",
-                agentPrompt = command.buildAgentPrompt(
-                    verb = "请根据此指令执行对应操作，通过 MCP 工具执行",
-                    toolHint = "mcp"
-                )
+                systemMessage = "⚠️ MCP '${command.id}' 未运行 —— 请先到 市场 → MCP 安装并启动后再使用",
+                agentPrompt = ""
             )
         }
     }

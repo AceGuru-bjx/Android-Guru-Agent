@@ -197,4 +197,14 @@
     <string name="code_stream_detail_output_title">Tool output</string>
     <string name="code_stream_run_streaming">Running · capsule timeline</string>
     <string name="code_stream_run_idle">Describe a coding task to start the capsule timeline</string>
+    <!-- ═══ 思考档位选择器 v2：短档名 + 胶囊标签 ═══ -->
+    <string name="code_thinking_chip">Thinking · %1$s</string>
+    <string name="code_thinking_short_none">Off</string>
+    <string name="code_thinking_short_light">Light</string>
+    <string name="code_thinking_short_standard">Standard</string>
+    <string name="code_thinking_short_deep">Deep</string>
+    <string name="code_thinking_short_maximum">Max</string>
+    <string name="code_thinking_short_ultracode">Ultra</string>
+    <string name="code_thinking_short_apexcode">Apex</string>
+    <string name="code_thinking_short_auto">Adaptive</string>
 </resources>

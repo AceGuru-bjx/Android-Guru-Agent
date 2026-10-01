@@ -729,6 +729,25 @@ linux_bootstrap / linux_status / linux_packages / linux_network / ubuntu_install
 → `skill_list` 确认，全程 LLM 自主闭环。市场货架含**工具 / 技能 / MCP /
 插件 / 连接器**五类。
 
+### 官方 Hub 仓库生态（技能 / MCP 分发）
+
+APK 内置技能只保留 **13 个核心**（8 个 coding 强技能 + 3 个 agent 通用 +
+2 个双工位文档技能），其余 **62 个生活/通用技能全部迁往官方技能仓库**
+[apex-skill-hub](https://github.com/AceGuru-mjh/apex-skill-hub)；MCP 同理
+——内置仅保留 5 台进程内必要服务器（github / search / fs / memory /
+thinking），沙箱与远端 MCP 目录迁往
+[apex-mcp-hub](https://github.com/AceGuru-mjh/apex-mcp-hub)。市场里
+「官方仓库」源直连 raw.githubusercontent.com 拉取 `index.json` 注册表
+（学习 opencode 的远程注册表模式：元数据小体积索引 + 技能正文按需单文件
+下载），一键安装，装完与本地技能同权管理。升级用户由
+`pruneStaleBundled` 白名单反向迁移自动清理旧内置残留。
+
+**斜杠门控**：聊天输入框 `/` 菜单的 Skills 分组只出现**已安装且已开启**
+的技能；MCP 分组只出现**已安装且正在运行**的服务器——未安装/未启动的
+不可选用（市场 → MCP 里安装并启动）。MCP 在市场内有**配置 / 启动 / 停止**
+完整闭环（含 BUILTIN 服务器的配置对话框：作用域 / 启停 / 连接 /
+GitHub Token）。
+
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
 ---

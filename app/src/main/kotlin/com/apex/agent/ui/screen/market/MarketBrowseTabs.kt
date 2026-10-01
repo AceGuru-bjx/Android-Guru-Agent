@@ -41,6 +41,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
 import com.apex.agent.core.tools.marketplace.ClawHubSource
 
@@ -108,11 +109,14 @@ internal fun BrowseSkillsTab(state: MarketUiState, viewModel: MarketViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // ── 仓库源切换：本地技能 ⇄ ClawHub 技能仓库 ──
+        // ── 仓库源切换：本地技能 ⇄ 官方仓库 ⇄ ClawHub 技能仓库 ──
         SkillSourceChips(state, viewModel)
 
         if (state.skillSource == SkillRepoSource.CLAWHUB) {
             ClawHubSection(state, viewModel)
+        } else if (state.skillSource == SkillRepoSource.HUB) {
+            // 官方技能仓库（apex-skill-hub）：内置瘦身后迁出的技能目录，一键直装
+            HubSkillSection(state, viewModel)
         } else {
             Row(
                 modifier = Modifier
@@ -618,6 +622,13 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
         uri?.let { viewModel.importMcpConfigFromFile(it) }
     }
 
+    // 官方 MCP 仓库（apex-mcp-hub）：目录 + 当前分级过滤
+    val hubState by viewModel.hub.uiState.collectAsStateWithLifecycle()
+    val tierScope = state.tier.name.lowercase()
+    val hubMcps = hubState.mcps.filter { it.visibleToScope(tierScope) }
+
+    LaunchedEffect(Unit) { viewModel.hub.loadMcpServers() }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -625,6 +636,64 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
     ) {
         item {
             MarketHeader(stringResource(R.string.market_mcp_header))
+        }
+        // ═══ 官方 MCP 仓库（安装 → 配置 → 启动的市场闭环）═══
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MarketSectionTitle(stringResource(R.string.market_hub_mcp_header))
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { viewModel.hub.loadMcpServers(force = true) },
+                    enabled = !hubState.mcpsLoading
+                ) {
+                    Text(
+                        if (hubState.mcpsLoading) stringResource(R.string.market_loading)
+                        else stringResource(R.string.market_action_refresh),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+        hubState.mcpsError?.let { error ->
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(R.string.market_load_failed_with_reason, error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    TextButton(
+                        onClick = { viewModel.hub.loadMcpServers(force = true) },
+                        enabled = !hubState.mcpsLoading
+                    ) { Text(stringResource(R.string.market_action_retry)) }
+                }
+            }
+        }
+        if (hubState.mcpsLoading && hubMcps.isEmpty()) {
+            item { MarketHint(stringResource(R.string.market_hub_mcp_loading)) }
+        }
+        items(hubMcps, key = { "hub-" + it.name }) { entry ->
+            HubMcpCatalogCard(entry, state, hubState, viewModel)
+        }
+        // ═══ 当前工位已配置服务器（配置 / 启动 / 停止 —— 市场内完成）═══
+        if (state.mcps.isNotEmpty()) {
+            item {
+                MarketSectionTitle(
+                    stringResource(R.string.market_mcp_configured_header, state.mcps.size)
+                )
+            }
+            items(state.mcps, key = { "cfg-" + it.name }) { server ->
+                ConfiguredMcpCard(server, state, viewModel)
+            }
         }
         // #173 逆向 MCP Host：手机作为 MCP Server（外部 AI 接入）——与下方
         //「添加工具源」卡片方向互补（接出 ↔ 接入），同页认知聚合。

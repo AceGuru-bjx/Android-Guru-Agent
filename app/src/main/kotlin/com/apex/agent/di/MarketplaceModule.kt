@@ -2,6 +2,7 @@ package com.apex.agent.di
 
 import android.content.Context
 import com.apex.agent.core.tools.marketplace.ClawHubSource
+import com.apex.agent.core.tools.marketplace.HubSource
 import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.github.GithubTokenManager
 import dagger.Module
@@ -37,5 +38,17 @@ object MarketplaceModule {
     @Singleton
     fun provideClawHubSource(httpClient: OkHttpClient): ClawHubSource {
         return ClawHubSource(httpClient)
+    }
+
+    /**
+     * 官方 Hub 仓库源（apex-skill-hub + apex-mcp-hub 双目录）：
+     * - 技能：62 个生活/通用技能（APK 内置瘦身后迁出），市场「官方仓库」直装；
+     * - MCP：沙箱/远端服务器目录，市场「官方 MCP 仓库」安装 → 配置 → 启动。
+     * raw.githubusercontent.com 只读，无需认证。
+     */
+    @Provides
+    @Singleton
+    fun provideHubSource(httpClient: OkHttpClient): HubSource {
+        return HubSource(httpClient)
     }
 }

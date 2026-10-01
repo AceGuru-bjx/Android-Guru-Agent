@@ -350,4 +350,5 @@
     <string name="chat_session_import_failed">导入失败（文件无效或无消息）</string>
     <string name="chat_session_imported">会话已导入</string>
     <string name="chat_share_received">已接收分享内容 —— 确认后再发送</string>
+    <string name="chat_slash_mcp_none_running">暂无运行中的 MCP —— 请到 市场 → MCP 安装并启动</string>
 </resources>

@@ -28,6 +28,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -69,10 +71,13 @@ enum class MarketTier(@StringRes val labelRes: Int) {
 /**
  * 市场 · Skills 页签的仓库源切换：
  * - [LOCAL] —— 本地技能（已安装 + 内置模板 + 四个本地安装入口）；
+ * - [HUB] —— 官方技能仓库（apex-skill-hub：内置瘦身后迁出的 62 个生活/通用
+ *   技能，目录浏览 + 一键直装）；
  * - [CLAWHUB] —— ClawHub 技能仓库（clawhub.ai：浏览热门 / 搜索 / 真实下载安装）。
  */
 enum class SkillRepoSource(@StringRes val labelRes: Int) {
     LOCAL(R.string.market_skill_source_local),
+    HUB(R.string.market_skill_source_hub),
     CLAWHUB(R.string.market_skill_source_clawhub)
 }
 
@@ -238,6 +243,8 @@ class MarketViewModel @Inject constructor(
     private val installManager: MarketInstallManager,
     private val modelScopeSource: ModelScopeSource,
     private val clawHubSource: ClawHubSource,
+    // 官方 Hub 仓库（技能 + MCP 双目录）——独立状态域，God-file 预算拆分
+    val hub: MarketHubController,
     // 语言切换：VM 侧消息（snackbar）按当前语言取词
     private val languageManager: LanguageManager,
     // ── v2 认知市场：注入 cs-mem + 工具分析四件套（均为 @Singleton）──
@@ -267,7 +274,13 @@ class MarketViewModel @Inject constructor(
     /** 当前搜索结果集对应的查询词（翻页/重试用，避免用户改了输入框但未点搜索时错页）。 */
     private var clawHubSearchQuery = ""
 
-    init { refresh() }
+    init {
+        refresh()
+        // Hub 安装完成 → 刷新市场快照（已装徽标 / MCP 列表联动）
+        hub.refreshMarket
+            .onEach { refresh() }
+            .launchIn(viewModelScope)
+    }
 
     /** 全量刷新（IO 线程）：技能/MCP/连接器/插件快照 + cs-mem 健康数据。保留集成源列表避免安装后列表闪失。 */
     fun refresh() {
@@ -666,6 +679,23 @@ class MarketViewModel @Inject constructor(
     /** #197 关闭启动进度弹窗（连接已完成/失败后用户手动关闭）。 */
     fun dismissMcpStartup() {
         _uiState.update { it.copy(mcpStartup = null) }
+    }
+
+    /**
+     * 更新 MCP 工位作用域（BUILTIN 配置对话框的「配置」动作之一）。
+     * addServer 覆盖写（不动活跃连接——作用域只影响可见性，不影响协议层）。
+     */
+    fun updateMcpScope(name: String, scope: String) {
+        viewModelScope.launch {
+            val config = mcpManager.getConfigs().firstOrNull { it.name == name }
+            if (config == null || config.scope == scope) return@launch
+            mcpManager.addServer(config.copy(scope = scope)).fold(
+                onSuccess = { refresh() },
+                onFailure = {
+                    message(languageManager.getString(R.string.market_action_failed).format(it.message ?: ""))
+                }
+            )
+        }
     }
 
     fun disconnectMcp(name: String) {

@@ -1122,8 +1122,15 @@ class AgentChatViewModel @Inject constructor(
             return
         }
 
-        // 记录流水线路由上下文，循环内产生的工具调用会携带对应来源徽章。
+        // Hub 生态门控：路由器对「未运行的 MCP」返回空 agentPrompt（引导去
+        // 市场启动）——不进入 Agent 主循环，不向模型发空转提示词。
         val execute = result as SlashCommands.Result.Execute
+        if (execute.agentPrompt.isBlank()) {
+            _uiState.update { s -> s.copy(isLoading = false) }
+            return
+        }
+
+        // 记录流水线路由上下文，循环内产生的工具调用会携带对应来源徽章。
         routeContextKind = execute.contextKind
         routeContextName = execute.contextName
         activeBannerId = execute.banner.id
