@@ -161,7 +161,8 @@ private fun ConicBorderCard() {
                         density = this
                     )
                     // 色标轮转：停靠点 = 原位 + shift，越界回绕后按位置排序
-                    //（sweep gradient 要求停靠点升序；同位同色透明停靠点不产生硬边）
+                    //（sweep gradient 要求停靠点升序；同位同色透明停靠点不产生硬边。
+                    // 浮点回绕保护：p 极小时推离 0 锚点，避免与透明锚同位硬边）
                     val stops = buildList {
                         add(0f to Color.Transparent)
                         listOf(
@@ -169,7 +170,8 @@ private fun ConicBorderCard() {
                             0.50f to Color.Transparent,
                             0.74f to scheme.tertiary.copy(alpha = 0.60f)
                         ).forEach { (pos, color) ->
-                            add(((pos + shift) % 1f) to color)
+                            val p = (pos + shift) % 1f
+                            add((if (p < 0.002f) 0.002f else p) to color)
                         }
                         add(1f to Color.Transparent)
                     }.sortedBy { it.first }.toTypedArray()
