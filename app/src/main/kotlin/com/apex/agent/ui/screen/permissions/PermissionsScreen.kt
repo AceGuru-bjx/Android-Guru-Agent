@@ -66,6 +66,7 @@ import com.apex.agent.platform.privilege.PrivilegeDetector
 import com.apex.agent.platform.privilege.PrivilegeManager
 import com.apex.agent.platform.privilege.shizuku.ShizukuCommandExecutor
 import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
