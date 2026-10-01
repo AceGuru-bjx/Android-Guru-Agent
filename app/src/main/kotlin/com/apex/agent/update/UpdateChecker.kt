@@ -73,6 +73,30 @@ class UpdateChecker(
     )
 
     /**
+     * 拉取补丁全量索引（跨版本链式增量的数据源）。
+     *
+     * 与 [check] 同一网络链路（共享客户端/可取消/超时）；失败折叠 null ——
+     * 索引不存在（旧发布仓库）或网络抖动时，调用方回退 version.json 的
+     * 单补丁档或全量包，更新链路不因索引缺失而中断。
+     */
+    suspend fun fetchPatchIndex(): PatchIndex.Model? {
+        val request = Request.Builder()
+            .url(PATCH_INDEX_URL)
+            .header("Cache-Control", "no-cache")
+            .build()
+        return runCatching {
+            val body = withContext(Dispatchers.IO) { client.awaitBody(request) }
+            PatchIndex.parse(body)
+        }.onFailure { e ->
+            AppLogger.instance.warn(
+                LogCategory.SYSTEM,
+                "UpdateChecker",
+                "补丁索引拉取失败（回退单补丁/全量）：${e.message}"
+            )
+        }.getOrNull()
+    }
+
+    /**
      * 按设备 ABI 选最合适的下载地址：arm64 机型出纯净包（~300MB），
      * 其余出 universal（全 3 ABI）；清单缺字段时逐级回退到发布页。
      */
@@ -91,6 +115,52 @@ class UpdateChecker(
             arm64Device -> download.arm64 ?: download.universal
             else -> download.universal ?: download.arm64
         }
+    }
+
+    /** 设备 ABI 对应的发布变体名（与 CI 资产命名/arm64/universal 双档一致）。 */
+    fun deviceVariant(): String =
+        if (Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }) "arm64" else "universal"
+
+    /**
+     * 解析「本地版本 → 清单最新版」的补丁链（跨版本增量核心）。
+     *
+     * 优先级：patches.json 全量索引链 → version.json 单补丁（仅相邻版本）→
+     * null（无增量可用，调用方回退全量）。链总体积超过全量包 60% 时判
+     * 定不划算，返回 null（与 CI 补丁体积守卫同阈值）。
+     *
+     * @param index 补丁索引（[fetchPatchIndex] 的结果，可为 null）
+     * @param manifest 本次检查更新命中的清单
+     * @param currentVersionName 本地 versionName
+     */
+    fun resolvePatchChain(
+        index: PatchIndex.Model?,
+        manifest: UpdateManifest,
+        currentVersionName: String
+    ): PatchIndex.Chain? {
+        val variant = deviceVariant()
+        val full = preferredAsset(manifest) ?: return null
+        val chain = index?.let {
+            PatchIndex.resolveChain(it, currentVersionName, manifest.tag.orEmpty(), variant)
+        } ?: preferredPatch(manifest, currentVersionName)?.let { legacy ->
+            // 索引缺失时回退 version.json 单补丁档（fromTag 已验证匹配本地版本）
+            val toTag = manifest.tag ?: legacy.fromTag
+            PatchIndex.Chain(
+                listOf(
+                    PatchIndex.Entry(
+                        variant = variant,
+                        fromTag = legacy.fromTag,
+                        toTag = toTag,
+                        url = legacy.url,
+                        sizeBytes = legacy.sizeBytes,
+                        sha256 = legacy.sha256
+                    )
+                ),
+                legacy.sizeBytes
+            )
+        } ?: return null
+        // 体积守卫：链总体积 > 60% 全量包 → 增量无意义，直接全量
+        if (full.sizeBytes > 0 && chain.totalBytes * 10 > full.sizeBytes * 6) return null
+        return chain
     }
 
     /**
@@ -116,6 +186,9 @@ class UpdateChecker(
 /** 发布仓库 main 分支上版本清单的固定地址（由开发仓库 CI 自动维护）。 */
 const val UPDATE_MANIFEST_URL =
     "https://raw.githubusercontent.com/AceGuru-mjh/Android-Guru-Agent-Release/main/version.json"
+
+/** 发布仓库 main 分支上补丁全量索引的固定地址（跨版本链式增量）。 */
+const val PATCH_INDEX_URL = PatchIndex.PATCH_INDEX_URL
 
 /**
  * 更新链路共享 OkHttp 客户端（进程级单例）。

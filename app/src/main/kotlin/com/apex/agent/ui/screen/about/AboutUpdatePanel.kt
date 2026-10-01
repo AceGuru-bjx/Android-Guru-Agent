@@ -23,7 +23,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Speed
@@ -51,10 +50,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -64,9 +61,12 @@ import com.apex.agent.R
 import com.apex.agent.update.DownloadMirror
 import com.apex.agent.update.MirrorPrefs
 import com.apex.agent.update.MirrorSpeedProbe
+import com.apex.agent.update.PatchIndex
+import com.apex.agent.update.PatchUpdateEngine
 import com.apex.agent.update.UpdateCheckResult
 import com.apex.agent.update.UpdateChecker
 import com.apex.agent.update.UpdateDownloader
+import com.apex.agent.update.UpdateManifest
 import com.apex.agent.update.UpdateTarget
 import com.apex.agent.update.resolveAuto
 import kotlinx.coroutines.Dispatchers
@@ -80,13 +80,21 @@ import java.io.File
  *
  * v1.4.3 从设置页迁移至关于页并重构 UI：
  *  1. **自动检查**：进入页面即静默检查一次（手动可重试）；
- *  2. **补丁更新主推**：from → to、体积、节省百分比一目了然（~15MB vs 全量 300MB+），
- *     `fromTag` 与本地版本一致时主推补丁，跨多版自动回退全量；
+ *  2. **补丁更新主推**：from → to、体积、节省百分比一目了然（~15MB vs 全量 300MB+）；
  *  3. **高速节点/镜像**：GitHub 直连 + 公共加速镜像，一键测速选优；
  *  4. **下载进度**：百分比 + 已下载字节数（系统 DownloadManager 托管，
  *     断点续传 + 通知栏进度）；
- *  5. **校验闭环**：下载完成 SHA-256 校验 → APK 直接拉起安装器 / 补丁给出
- *     针对本机的 xdelta3 命令。
+ *  5. **校验闭环**：下载完成 SHA-256 校验 → APK 直接拉起安装器。
+ *
+ * v1.4.5 增量更新全自动化 + 跨版本链：
+ *  1. **零命令行**：补丁链下载完成后由 [PatchUpdateEngine] 在应用内
+ *     直接合成新 APK（[VcdiffDecoder] 纯 Kotlin VCDIFF 解码）并自动拉起
+ *     安装器 —— 旧版「复制 xdelta3 命令去终端手打」的路径彻底退役；
+ *  2. **跨版本链**：拉取发布仓库 patches.json 全量索引（[PatchIndex]），
+ *     跨任意多个小版本自动解析补丁链逐段应用，不再回退 300~900MB 全量；
+ *  3. **双保险**：逐段补丁 SHA-256 + 逐窗 Adler32 + 终局产物 SHA-256；
+ *  4. **失败自愈**：增量任一环节失败 → 对话框出「重试 / 改用全量」双路，
+ *     更新链路永不因增量故障而卡死。
  */
 
 /** 更新检查 UI 状态机：Idle → Checking → Done(result)。 */
@@ -96,13 +104,14 @@ private sealed interface UpdateUiState {
     data class Done(val result: UpdateCheckResult) : UpdateUiState
 }
 
-/** 下载完成后的一次性事件（对话框展示 / 触发安装）。 */
+/** 下载完成后的一次性事件（全量包路径；增量路径走 PatchUpdateEngine.State）。 */
 private sealed interface DownloadFinished {
-    /** 补丁就绪：路径 + 可复制的应用命令。 */
-    data class PatchReady(val file: File, val command: String) : DownloadFinished
 
-    /** APK 就绪但安装器未能拉起（罕见环境）—— 展示路径让用户手动装。 */
+    /** 全量 APK 下载完成且校验通过 —— 弹「立即安装」确认框。 */
     data class ApkReady(val file: File) : DownloadFinished
+
+    /** 安装器未能拉起（罕见环境）—— 展示路径让用户手动装。 */
+    data class InstallFailed(val file: File) : DownloadFinished
 
     /** SHA-256 校验失败 —— 文件不可用。 */
     data class VerifyFailed(val fileName: String) : DownloadFinished
@@ -115,6 +124,7 @@ internal fun UpdatePanel() {
     val checker = remember { UpdateChecker() }
     val probe = remember { MirrorSpeedProbe() }
     val downloader = remember { UpdateDownloader(context) }
+    val patchEngine = remember { PatchUpdateEngine(context, downloader) }
 
     var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
     var selectedMirror by remember { mutableStateOf(MirrorPrefs.load(context)) }
@@ -126,6 +136,16 @@ internal fun UpdatePanel() {
     var downloadedBytes by remember { mutableStateOf(0L) }
     var finished by remember { mutableStateOf<DownloadFinished?>(null) }
 
+    // 增量链路：全量补丁索引（跨版本数据源）+ 流水线状态（IO 回调 → 主线程）
+    var patchIndex by remember { mutableStateOf<PatchIndex.Model?>(null) }
+    var patchFlow by remember { mutableStateOf<PatchUpdateEngine.State?>(null) }
+
+    // 就绪产物重入口：「稍后安装」之后（含离开页面再回来）仍可一键安装，
+    // 不必重新下载/合成 —— readyPatch 为引擎合成的增量包，readyFull 为已
+    // 下载的全量包；均在清单就绪后于后台扫描 + 指纹复核。
+    var readyPatch by remember { mutableStateOf<PatchUpdateEngine.State.Ready?>(null) }
+    var readyFull by remember { mutableStateOf<File?>(null) }
+
     // Toast 文案上提到组合层（非 Compose lambda 中使用）
     val enqueueFailedHint = stringResource(R.string.settings_about_update_enqueue_failed)
     val startedHintFmt = stringResource(R.string.settings_about_update_download_started)
@@ -134,14 +154,79 @@ internal fun UpdatePanel() {
         if (updateState == UpdateUiState.Checking) return
         updateState = UpdateUiState.Checking
         scope.launch {
-            updateState = UpdateUiState.Done(checker.check(BuildConfig.VERSION_CODE))
+            val result = checker.check(BuildConfig.VERSION_CODE)
+            // 有新版才拉补丁全量索引（最新版时白拉一趟）
+            if (result is UpdateCheckResult.Available) {
+                patchIndex = checker.fetchPatchIndex()
+            }
+            updateState = UpdateUiState.Done(result)
         }
     }
 
     // ── 进入页面自动静默检查一次（v1.4.3：不必再手动点第一次）────────────────
     LaunchedEffect(Unit) { triggerCheck() }
 
-    // ── 下载完成广播：校验 SHA-256 → 补丁出说明 / APK 拉起安装器 ─────────────
+    // ── 就绪产物重入口：清单就绪后扫描磁盘（上次「稍后安装」的包仍可直接装）──
+    // 优先级：清掉陈旧合成产物 → 复核增量就绪包 → 复核全量就绪包。
+    // 指纹复核与下载完成的终局校验同源（SHA-256 对账清单），坏文件就地清理。
+    // 已最新（UpToDate）时任何合成产物都是装完的陈旧残留 —— 全清（全量包
+    // 是用户可见下载物，保留不动）；Idle/Checking/Failed 不动磁盘（可能有
+    // 未安装的就绪产物等着复核恢复）。
+    val availableManifest = (updateState as? UpdateUiState.Done)
+        ?.result?.let { it as? UpdateCheckResult.Available }?.latest
+    val checkSettled = updateState is UpdateUiState.Done
+    LaunchedEffect(availableManifest?.versionCode, checkSettled) {
+        val manifest = availableManifest
+        if (manifest == null) {
+            if (checkSettled &&
+                (updateState as UpdateUiState.Done).result is UpdateCheckResult.UpToDate
+            ) {
+                withContext(Dispatchers.IO) {
+                    downloader.workDirectory().listFiles()?.forEach { stale ->
+                        val name = stale.name
+                        if (name.startsWith("ApexAgent-v") && name.endsWith("-patched.apk")) {
+                            runCatching { stale.delete() }
+                        }
+                    }
+                }
+            }
+            return@LaunchedEffect
+        }
+        if (!patchEngine.isRunning) {
+            withContext(Dispatchers.IO) {
+                // 陈旧合成产物（非目标版本的 -patched.apk）——引擎产物而非
+                // DownloadManager 托管文件，引擎空闲时清理安全
+                downloader.workDirectory().listFiles()?.forEach { stale ->
+                    val name = stale.name
+                    if (name.startsWith("ApexAgent-v") && name.endsWith("-patched.apk") &&
+                        name != "ApexAgent-v${manifest.versionName}-patched.apk"
+                    ) runCatching { stale.delete() }
+                }
+            }
+        }
+        val asset = checker.preferredAsset(manifest)
+        val patchFile = patchEngine.readyApkFor(manifest)
+        val patchOk = withContext(Dispatchers.IO) {
+            patchFile.exists() && downloader.verifySha256(patchFile, asset?.sha256)
+        }
+        readyPatch = if (patchOk) {
+            PatchUpdateEngine.State.Ready(patchFile, asset?.sizeBytes ?: patchFile.length())
+        } else {
+            if (patchFile.exists()) {
+                withContext(Dispatchers.IO) { runCatching { patchFile.delete() } }
+            }
+            null
+        }
+        val fullFile = asset?.let { downloader.localFile(it.url.substringAfterLast('/')) }
+        val fullOk = asset != null && fullFile != null && withContext(Dispatchers.IO) {
+            fullFile.exists() && downloader.verifySha256(fullFile, asset.sha256)
+        }
+        readyFull = if (fullOk) fullFile else null
+    }
+
+    // ── 下载完成广播：校验 SHA-256 → 弹「立即安装」确认框 ──────────────
+    // （增量补丁链由 PatchUpdateEngine 轮询驱动，不经此广播；activeDownload
+    //  仅登记全量包下载，引擎入队的补丁 ID 在此被直接忽略。）
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -158,23 +243,9 @@ internal fun UpdatePanel() {
                     }
                     finished = when {
                         file == null || !verified -> DownloadFinished.VerifyFailed(active.fileName)
-                        active.isPatch -> DownloadFinished.PatchReady(
-                            file = file,
-                            command = buildString {
-                                append("xdelta3 -d -s ")
-                                append(context.applicationInfo.sourceDir)
-                                append(" ")
-                                append(file.absolutePath)
-                                append(" ")
-                                append(file.parent)
-                                append("/ApexAgent-patched.apk")
-                            }
-                        )
-                        else -> {
-                            // APK 校验通过直接拉起安装器；拉不起则回退路径提示
-                            if (downloader.installApk(file)) null
-                            else DownloadFinished.ApkReady(file)
-                        }
+                        // 下载完成即弹「立即安装」确认框 —— 不再直接拉起安装器，
+                        // 安装时机由用户主导（与增量路径的就绪弹窗同一交互范式）
+                        else -> DownloadFinished.ApkReady(file)
                     }
                     activeDownload = null
                 }
@@ -202,21 +273,14 @@ internal fun UpdatePanel() {
         }
     }
 
-    // ── 发起下载（镜像解析 → URL 改写 → DownloadManager 入队）──────────────
-    // 注意：patch（UpdatePatchAsset）与 full（UpdateAsset）经 [UpdateTarget]
-    // 统一接待 —— 否则 elvis 的公共父类型坍缩为 Any，.url/.sha256 全部失联。
-    fun startDownload(usePatch: Boolean) {
+    // ── 发起全量下载（镜像解析 → URL 改写 → DownloadManager 入队）──────────
+    fun startDownload() {
         val result = (updateState as? UpdateUiState.Done)?.result
         val manifest = (result as? UpdateCheckResult.Available)?.latest ?: return
-        val patch = checker.preferredPatch(manifest, BuildConfig.VERSION_NAME)
-        val full = checker.preferredAsset(manifest)
-        val asset: UpdateTarget = (if (usePatch) patch else null) ?: full ?: return
+        val full = checker.preferredAsset(manifest) ?: return
+        val asset: UpdateTarget = full
         val fileName = asset.url.substringAfterLast('/')
-        val title = if (usePatch) {
-            "Apex Agent ${manifest.versionName} patch"
-        } else {
-            "Apex Agent v${manifest.versionName}"
-        }
+        val title = "Apex Agent v${manifest.versionName}"
         scope.launch {
             // AUTO 档：无测速数据先现场探测一轮，再取最快节点
             val resolved = if (selectedMirror == DownloadMirror.AUTO && speeds.isEmpty()) {
@@ -227,7 +291,7 @@ internal fun UpdatePanel() {
             } else selectedMirror
             val finalUrl = resolved.rewrite(asset.url)
             val enqueued = withContext(Dispatchers.IO) {
-                downloader.enqueue(finalUrl, fileName, title, usePatch, asset.sha256)
+                downloader.enqueue(finalUrl, fileName, title, false, asset.sha256)
             }
             if (enqueued != null) {
                 downloadPercent = 0
@@ -239,6 +303,35 @@ internal fun UpdatePanel() {
             } else {
                 Toast.makeText(context, enqueueFailedHint, Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    // ── 发起增量更新（引擎内全自动：链下载 → 合成 → 校验 → 就绪弹安装按钮）──
+    fun startPatchFlow(chain: PatchIndex.Chain, manifest: UpdateManifest) {
+        if (patchEngine.isRunning) return
+        patchFlow = null
+        // 补丁体积小（11~18MB/段）：AUTO 且已有测速则复用，否则直连 GitHub
+        // —— 不为小文件现场跑一轮四节点探测
+        val resolved = if (selectedMirror == DownloadMirror.AUTO && speeds.isNotEmpty()) {
+            resolveAuto(speeds)
+        } else if (selectedMirror == DownloadMirror.AUTO) {
+            DownloadMirror.DIRECT
+        } else selectedMirror
+        patchEngine.start(scope, chain, manifest, resolved) { state ->
+            // 引擎在 IO 线程回调 → 组合域（主线程）落状态；Ready 同时登记
+            // 就绪重入口（「稍后安装」后仍可从动作区一键回弹安装确认框）
+            scope.launch {
+                patchFlow = state
+                if (state is PatchUpdateEngine.State.Ready) readyPatch = state
+            }
+        }
+    }
+
+    // ── 立即安装（就绪产物 → 系统安装器；结果回 patchFlow 状态机）──────────
+    // 与引擎协程解耦：Ready 之后的安装触发不依赖流水线存活，可反复重发。
+    fun installNow(apk: File) {
+        patchEngine.launchInstaller(apk) { state ->
+            scope.launch { patchFlow = state }
         }
     }
 
@@ -366,7 +459,6 @@ internal fun UpdatePanel() {
 
                     is UpdateCheckResult.Available -> {
                         val manifest = result.latest
-                        val patch = checker.preferredPatch(manifest, BuildConfig.VERSION_NAME)
                         val full = checker.preferredAsset(manifest)
 
                         // 新版本横幅：大号版本号 + NEW 徽章
@@ -407,135 +499,201 @@ internal fun UpdatePanel() {
                             onClick = { showMirrorDialog = true }
                         )
 
-                        // 下载动作区（下载中显示进度，隐藏按钮防重复）
+                        // 下载动作区（优先级：增量流水线 > 全量下载进度 > 动作按钮）
                         val active = activeDownload
-                        if (active != null) {
-                            Column(
-                                Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                LinearProgressIndicator(
-                                    progress = { downloadPercent / 100f },
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Text(
-                                    stringResource(
-                                        R.string.about_update_progress_mb,
-                                        downloadPercent,
-                                        formatMb(downloadedBytes)
-                                    ),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline
-                                )
-                                Text(
-                                    active.fileName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.outline
-                                )
+                        val flow = patchFlow
+                        when {
+                            flow is PatchUpdateEngine.State.Downloading ||
+                                flow is PatchUpdateEngine.State.Applying -> {
+                                PatchFlowProgress(flow)
                             }
-                        } else {
-                            // 补丁可用 → 主推推荐卡；不可用 → 提示原因
-                            if (patch != null && full != null) {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceContainerHigh
-                                        .copy(alpha = 0.55f)
+
+                            active != null -> {
+                                Column(
+                                    Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Column(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    LinearProgressIndicator(
+                                        progress = { downloadPercent / 100f },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Text(
+                                        stringResource(
+                                            R.string.about_update_progress_mb,
+                                            downloadPercent,
+                                            formatMb(downloadedBytes)
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                    Text(
+                                        active.fileName,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                }
+                            }
+
+                            else -> {
+                                // 就绪产物优先：上次已合成/已下载但未安装的包，
+                                // 一键直达安装确认框（不重复下载/合成）
+                                val ready = readyPatch
+                                if (ready != null) {
+                                    Button(
+                                        onClick = { patchFlow = ready },
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Text(
-                                            stringResource(R.string.about_update_patch_recommended),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary
+                                        Icon(
+                                            Icons.Outlined.SystemUpdateAlt,
+                                            contentDescription = null
                                         )
-                                        val saved = if (full.sizeBytes > 0) {
-                                            // 守卫：清单缺 sizeBytes（旧 schema/手写清单）时
-                                            // 默认 0，Long 除零会直接抛 ArithmeticException
-                                            100 - (patch.sizeBytes * 100 / full.sizeBytes).toInt()
-                                                .coerceIn(0, 100)
-                                        } else 0
+                                        Spacer(Modifier.width(6.dp))
                                         Text(
                                             stringResource(
-                                                R.string.settings_about_update_patch_hint,
-                                                patch.fromTag.removePrefix("v"),
+                                                R.string.about_update_install_ready_entry,
                                                 manifest.versionName,
-                                                saved
-                                            ),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.outline
-                                        )
-                                        Button(
-                                            onClick = { startDownload(usePatch = true) },
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Icon(
-                                                Icons.Outlined.Download,
-                                                contentDescription = null
+                                                formatMb(ready.sizeBytes)
                                             )
-                                            Spacer(Modifier.width(6.dp))
+                                        )
+                                    }
+                                }
+                                readyFull?.let { file ->
+                                    OutlinedButton(
+                                        onClick = { finished = DownloadFinished.ApkReady(file) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Download,
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            stringResource(
+                                                R.string.about_update_install_full_entry,
+                                                formatMb(file.length())
+                                            )
+                                        )
+                                    }
+                                }
+
+                                // 跨版本补丁链（patches.json 索引 → 链式增量）；
+                                // 增量包已就绪时不再重复提供（重跑会重下补丁）
+                                val chain = if (ready == null) checker.resolvePatchChain(
+                                    patchIndex, manifest, BuildConfig.VERSION_NAME
+                                ) else null
+                                if (chain != null && full != null) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                                            .copy(alpha = 0.55f)
+                                    ) {
+                                        Column(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
                                             Text(
                                                 stringResource(
-                                                    R.string.settings_about_update_patch,
-                                                    formatMb(patch.sizeBytes)
+                                                    R.string.about_update_patch_recommended
+                                                ),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            val saved = if (full.sizeBytes > 0) {
+                                                // 守卫：清单缺 sizeBytes（旧 schema/手写清单）时
+                                                // 默认 0，Long 除零会直接抛 ArithmeticException
+                                                100 - (chain.totalBytes * 100 / full.sizeBytes)
+                                                    .toInt().coerceIn(0, 100)
+                                            } else 0
+                                            Text(
+                                                stringResource(
+                                                    R.string.about_update_patch_chain_hint,
+                                                    BuildConfig.VERSION_NAME,
+                                                    manifest.versionName,
+                                                    chain.steps.size,
+                                                    saved
+                                                ),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.outline
+                                            )
+                                            Button(
+                                                onClick = { startPatchFlow(chain, manifest) },
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Icon(
+                                                    Icons.Outlined.SystemUpdateAlt,
+                                                    contentDescription = null
                                                 )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    stringResource(
+                                                        R.string.about_update_patch_chain_button,
+                                                        formatMb(chain.totalBytes),
+                                                        chain.steps.size
+                                                    )
+                                                )
+                                            }
+                                            Text(
+                                                stringResource(
+                                                    R.string.about_update_patch_auto_note
+                                                ),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.outline
                                             )
                                         }
                                     }
-                                }
-                            } else if (manifest.patch?.arm64 != null ||
-                                manifest.patch?.universal != null
-                            ) {
-                                // 有补丁但 fromTag 不匹配本地版本（跨多版）
-                                Text(
-                                    stringResource(
-                                        R.string.settings_about_update_patch_inapplicable,
-                                        manifest.patch?.arm64?.fromTag
-                                            ?: manifest.patch?.universal?.fromTag.orEmpty(),
-                                        BuildConfig.VERSION_NAME
-                                    ),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline
-                                )
-                            }
-
-                            // 全量安装包（永久兜底路径）
-                            if (full != null) {
-                                OutlinedButton(
-                                    onClick = { startDownload(usePatch = false) },
-                                    modifier = Modifier.fillMaxWidth()
+                                } else if (manifest.patch?.arm64 != null ||
+                                    manifest.patch?.universal != null
                                 ) {
-                                    Icon(
-                                        Icons.Outlined.Download,
-                                        contentDescription = null
-                                    )
-                                    Spacer(Modifier.width(6.dp))
+                                    // 索引缺失且单补丁 fromTag 不匹配（跨多版且无索引）
                                     Text(
                                         stringResource(
-                                            R.string.settings_about_update_full,
-                                            formatMb(full.sizeBytes)
-                                        )
+                                            R.string.settings_about_update_patch_inapplicable,
+                                            manifest.patch?.arm64?.fromTag
+                                                ?: manifest.patch?.universal?.fromTag.orEmpty(),
+                                            BuildConfig.VERSION_NAME
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline
                                     )
                                 }
-                            } else {
-                                // 清单缺资产（schema 异常）：回退发布页外链
-                                val noBrowserHint =
-                                    stringResource(R.string.settings_about_no_browser)
-                                manifest.releasePage?.let { page ->
-                                    Button(
-                                        onClick = { openUrl(context, page, noBrowserHint) },
+
+                                // 全量安装包（永久兜底路径；已有就绪/已下载包时不重复提供）
+                                if (full != null && ready == null && readyFull == null) {
+                                    OutlinedButton(
+                                        onClick = { startDownload() },
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
+                                        Icon(
+                                            Icons.Outlined.Download,
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(6.dp))
                                         Text(
                                             stringResource(
-                                                R.string.settings_about_update_download
+                                                R.string.settings_about_update_full,
+                                                formatMb(full.sizeBytes)
                                             )
                                         )
+                                    }
+                                } else {
+                                    // 清单缺资产（schema 异常）：回退发布页外链
+                                    val noBrowserHint =
+                                        stringResource(R.string.settings_about_no_browser)
+                                    manifest.releasePage?.let { page ->
+                                        Button(
+                                            onClick = { openUrl(context, page, noBrowserHint) },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                stringResource(
+                                                    R.string.settings_about_update_download
+                                                )
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -570,75 +728,85 @@ internal fun UpdatePanel() {
         )
     }
 
-    // ── 下载完成事件对话框 ──────────────────────────────────────────────────
-    val clipboard = LocalClipboardManager.current
+    // ── 下载完成事件对话框（全量包路径：弹「立即安装」按钮）───────────────────
     when (val event = finished) {
-        is DownloadFinished.PatchReady -> {
-            val copiedHint = stringResource(R.string.settings_about_update_copied)
+        is DownloadFinished.ApkReady -> {
+            // 版本号来自当前清单（下载中重查过/清单过期时退化为通用文案）
+            val manifest = availableManifest
+            val launchedHint = stringResource(R.string.about_update_installer_launched_toast)
             AlertDialog(
-                onDismissRequest = { finished = null },
-                title = { Text(stringResource(R.string.settings_about_update_patch_done_title)) },
+                onDismissRequest = {
+                    // 点外部关闭与「稍后」同义：登记重入口（动作区一键回弹）
+                    readyFull = event.file
+                    finished = null
+                },
+                title = { Text(stringResource(R.string.settings_about_update_apk_done_title)) },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            stringResource(
+                                R.string.settings_about_update_apk_done_body,
+                                manifest?.versionName ?: "",
+                                formatMb(event.file.length())
+                            ),
+                            style = MaterialTheme.typography.bodySmall
+                        )
                         Text(
                             stringResource(
                                 R.string.settings_about_update_patch_done_saved,
                                 event.file.absolutePath
                             ),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        HorizontalDivider()
-                        Text(
-                            stringResource(R.string.settings_about_update_patch_done_body),
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.outline
                         )
-                        Surface(
-                            tonalElevation = 2.dp,
-                            shape = MaterialTheme.shapes.small
-                        ) {
-                            Text(
-                                event.command,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace
-                                ),
-                                modifier = Modifier.padding(8.dp)
-                            )
-                        }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        clipboard.setText(AnnotatedString(event.command))
-                        Toast.makeText(context, copiedHint, Toast.LENGTH_SHORT).show()
+                        if (downloader.installApk(event.file)) {
+                            finished = null
+                            Toast.makeText(context, launchedHint, Toast.LENGTH_SHORT).show()
+                        } else {
+                            finished = DownloadFinished.InstallFailed(event.file)
+                        }
                     }) {
-                        Icon(Icons.Outlined.ContentCopy, contentDescription = null,
-                            Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(stringResource(R.string.settings_about_update_copy_cmd))
+                        Text(stringResource(R.string.about_update_install_now))
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { finished = null }) {
-                        Text(stringResource(R.string.settings_about_update_close))
+                    TextButton(onClick = {
+                        // 稍后安装：保留 readyFull 重入口（动作区一键回弹本框）
+                        readyFull = event.file
+                        finished = null
+                    }) {
+                        Text(stringResource(R.string.about_update_install_later))
                     }
                 }
             )
         }
 
-        is DownloadFinished.ApkReady -> AlertDialog(
-            onDismissRequest = { finished = null },
-            title = { Text(stringResource(R.string.settings_about_update_apk_done_title)) },
+        is DownloadFinished.InstallFailed -> AlertDialog(
+            onDismissRequest = {
+                readyFull = event.file
+                finished = null
+            },
+            title = { Text(stringResource(R.string.settings_about_update_install_failed_title)) },
             text = {
                 Text(
                     stringResource(
-                        R.string.settings_about_update_patch_done_saved, event.file.absolutePath
+                        R.string.settings_about_update_install_failed,
+                        event.file.absolutePath
                     ),
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             },
             confirmButton = {
-                TextButton(onClick = { finished = null }) {
+                TextButton(onClick = {
+                    readyFull = event.file
+                    finished = null
+                }) {
                     Text(stringResource(R.string.settings_about_update_close))
                 }
             }
@@ -665,9 +833,181 @@ internal fun UpdatePanel() {
 
         null -> Unit
     }
+
+    // ── 增量流水线对话框：就绪弹安装按钮 / 已拉起安装器 / 失败双路 ──────
+    when (val flow = patchFlow) {
+        // 合成完成且指纹对账通过 —— 用户主导安装时机（下载完弹出的安装按钮）
+        is PatchUpdateEngine.State.Ready -> {
+            val manifest = availableManifest
+            AlertDialog(
+                onDismissRequest = { patchFlow = null },
+                title = { Text(stringResource(R.string.about_update_install_ready_title)) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            stringResource(
+                                R.string.about_update_install_ready_body,
+                                manifest?.versionName ?: "",
+                                formatMb(flow.sizeBytes)
+                            ),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            flow.apk.absolutePath,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { installNow(flow.apk) }) {
+                        Text(stringResource(R.string.about_update_install_now))
+                    }
+                },
+                dismissButton = {
+                    // 稍后安装：保留 readyPatch 重入口（动作区一键回弹本框）
+                    TextButton(onClick = { patchFlow = null }) {
+                        Text(stringResource(R.string.about_update_install_later))
+                    }
+                }
+            )
+        }
+
+        is PatchUpdateEngine.State.Installed -> AlertDialog(
+            onDismissRequest = { patchFlow = null },
+            title = { Text(stringResource(R.string.about_update_patch_done_title)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(R.string.about_update_patch_done_body),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        flow.apk.absolutePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { patchFlow = null }) {
+                    Text(stringResource(R.string.settings_about_update_close))
+                }
+            }
+        )
+
+        is PatchUpdateEngine.State.Failed -> {
+            // 失败原因按类别本地化；detail 只进日志/高级线索
+            val body = when (flow.kind) {
+                PatchUpdateEngine.FailKind.SPACE -> stringResource(
+                    R.string.about_update_patch_failed_space,
+                    // 预检 detail 形如 "need=… free=…"；UI 侧拿不到体积参数时退化为通用语
+                    flow.detail?.substringAfter("need=")?.substringBefore(" ")
+                        ?.toLongOrNull()?.let { formatMb(it) } ?: ""
+                )
+                PatchUpdateEngine.FailKind.DOWNLOAD -> stringResource(
+                    R.string.about_update_patch_failed_download
+                )
+                PatchUpdateEngine.FailKind.VERIFY -> stringResource(
+                    R.string.about_update_patch_failed_verify, flow.detail.orEmpty()
+                )
+                PatchUpdateEngine.FailKind.DECODE -> stringResource(
+                    R.string.about_update_patch_failed_decode, flow.detail.orEmpty()
+                )
+                PatchUpdateEngine.FailKind.INSTALLER -> stringResource(
+                    R.string.about_update_patch_failed_installer, flow.detail.orEmpty()
+                )
+            }
+            AlertDialog(
+                onDismissRequest = { patchFlow = null },
+                title = { Text(stringResource(R.string.about_update_patch_failed_title)) },
+                text = {
+                    Text(
+                        body,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                },
+                confirmButton = {
+                    // 重试增量：沿用同一条链重启流水线
+                    val result = (updateState as? UpdateUiState.Done)?.result
+                    val manifest = (result as? UpdateCheckResult.Available)?.latest
+                    val chain = manifest?.let {
+                        checker.resolvePatchChain(patchIndex, it, BuildConfig.VERSION_NAME)
+                    }
+                    TextButton(
+                        onClick = {
+                            patchFlow = null
+                            if (manifest != null && chain != null) {
+                                startPatchFlow(chain, manifest)
+                            }
+                        },
+                        enabled = manifest != null && chain != null
+                    ) {
+                        Text(stringResource(R.string.about_update_patch_retry))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        patchFlow = null
+                        startDownload()
+                    }) {
+                        Text(stringResource(R.string.about_update_patch_use_full))
+                    }
+                }
+            )
+        }
+
+        else -> Unit
+    }
 }
 
 // ── 小控件 ──────────────────────────────────────────────────────────────────
+
+/** 增量流水线进度：下载段（N/M · 百分比）或合成段（补丁 N/M · 百分比）。 */
+@Composable
+private fun PatchFlowProgress(flow: PatchUpdateEngine.State) {
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        when (flow) {
+            is PatchUpdateEngine.State.Downloading -> {
+                LinearProgressIndicator(
+                    progress = { flow.percent / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    stringResource(
+                        R.string.about_update_patch_downloading,
+                        flow.step, flow.steps, flow.percent
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            is PatchUpdateEngine.State.Applying -> {
+                LinearProgressIndicator(
+                    progress = { flow.percent / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    stringResource(
+                        R.string.about_update_patch_applying,
+                        flow.step, flow.steps, flow.percent
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            else -> Unit
+        }
+    }
+}
 
 /** 主色实底小徽章（NEW）。 */
 @Composable

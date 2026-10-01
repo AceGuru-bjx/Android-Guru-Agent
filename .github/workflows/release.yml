@@ -15,6 +15,7 @@ name: Release (Cross-Repo)
 #   构建 APK（universal + arm64，复用 apk.yml 的成熟路径）
 #       ├─ 生成 version.json（版本 / 下载地址 / SHA-256 / 补丁清单）
 #       ├─ 与上一版本生成 xdelta3 增量补丁（App「关于 → 检查更新」可选增量更新）
+#       ├─ 累积维护 patches.json 补丁全量索引（App 跨版本链式增量的数据源）
 #       └─ 双落点发布（产物在两个仓库都可直接下载）：
 #             ├─ 发布仓库 Android-Guru-Agent-Release（跨仓库 PAT RELEASE_REPO_TOKEN）：
 #             │     创建 Release + 上传 APK / 补丁 / version.json
@@ -352,9 +353,15 @@ jobs:
             fi
             PATCH_NAME="patch_${VARIANT}_${PREV_TAG}_to_${TAG}.vcdiff"
             echo "⚙️  xdelta3: ${PREV_APK} + ${NEW_APK} → ${PATCH_NAME}"
-            if ! xdelta3 -e -f -s "$PREV_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
-              echo "⚠️ xdelta3 失败（${VARIANT}）—— 跳过该补丁"
-              continue
+            # 显式 -S lzma：与 App 内 VcdiffDecoder 的支持面对齐（Ubuntu 发行版
+            # 默认即 lzma，但显式化可免 runner 升级后的行为漂移）；不支持时回退
+            # 无二级压缩的原生 VCDIFF（App 同样可解码，体积略大）
+            if ! xdelta3 -e -f -S lzma -s "$PREV_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
+              echo "⚠️ -S lzma 不可用（${VARIANT}）—— 回退无二级压缩"
+              if ! xdelta3 -e -f -s "$PREV_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
+                echo "⚠️ xdelta3 失败（${VARIANT}）—— 跳过该补丁"
+                continue
+              fi
             fi
             # 补丁体积守卫：> 60% 新包即无意义（rootfs 大改时直接下全量）
             NEW_SIZE=$(stat -c%s "$NEW_APK")
@@ -463,8 +470,8 @@ jobs:
                   "### 🔧 增量补丁（App 内「关于 → 检查更新」可直选）",
                   patch_lines,
                   "",
-                  "应用方式：`xdelta3 -d -s 旧版本.apk 补丁.vcdiff 新版本.apk`（App 下载补丁后",
-                  "会给出针对本机的完整命令，内置 Ubuntu 终端装 xdelta3 后可直接执行）。",
+                  "应用方式：App 内「关于 → 检查更新」下载补丁后**自动合成并拉起安装**",
+                  "（v1.4.5+ 内置 VCDIFF 解码器，无需命令行；跨多版本会自动链式应用）。",
                   "",
                   "### 📋 版本清单",
                   "`version.json` —— App 内「关于 → 检查更新」即读取此文件（含 SHA-256 校验）。",
@@ -487,6 +494,83 @@ jobs:
               f.write(body_dev)
           PYEOF
           cat release_body.md
+
+      - name: Generate patches.json (cumulative patch index)
+        if: needs.resolve.outputs.publishing == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 拉取现有索引（首版 / 历史缺失时从空开始）—— 跨版本链式增量的数据底座：
+          # App 由此把「本地版本 → 最新版本」解析成补丁链逐段应用
+          export EXISTING_JSON=""
+          if EXISTING_RAW=$(gh api "repos/${RELEASE_REPO}/contents/patches.json?ref=main" \
+              --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null); then
+            export EXISTING_JSON="$EXISTING_RAW"
+            echo "📥 已拉取现有补丁索引（$(echo "$EXISTING_RAW" | jq '.patches | length') 条）"
+          else
+            echo "🆕 无现有 patches.json —— 从零构建"
+          fi
+          python3 - <<'PYEOF'
+          import base64, datetime, hashlib, json, os
+
+          tag, repo = os.environ["TAG"], os.environ["RELEASE_REPO"]
+          existing = os.environ.get("EXISTING_JSON", "")
+          patches = []
+          if existing:
+              try:
+                  patches = json.loads(existing).get("patches", [])
+              except Exception:
+                  patches = []
+
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          added = 0
+          if os.path.exists("meta/patch_meta.tsv"):
+              with open("meta/patch_meta.tsv") as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      variant, from_tag, fname = line.split("|")
+                      # 幂等守卫：同 (variant, fromTag, toTag) 不重复追加
+                      dup = any(
+                          p.get("variant") == variant and
+                          p.get("fromTag") == from_tag and
+                          p.get("toTag") == tag
+                          for p in patches
+                      )
+                      if dup:
+                          continue
+                      patches.append({
+                          "variant": variant,
+                          "fromTag": from_tag,
+                          "toTag": tag,
+                          "url": f"{base}/{fname}",
+                          "sizeBytes": os.path.getsize(f"dist/{fname}"),
+                          "sha256": sha256(f"dist/{fname}"),
+                      })
+                      added += 1
+
+          manifest = {
+              "generatedAt": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "latestTag": tag,
+              "patches": patches,
+          }
+          with open("dist/patches.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+          print(f"📦 patches.json：共 {len(patches)} 条（本次新增 {added}）")
+          PYEOF
 
       - name: Upload workflow artifacts (backup / dry-run output)
         uses: actions/upload-artifact@v4
@@ -535,13 +619,18 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${RELEASE_TOKEN}@github.com/${RELEASE_REPO}.git" relrepo
           cp dist/version.json relrepo/version.json
+          # 补丁全量索引与版本清单同源提交 —— App 跨版本链式增量依赖此文件
+          if [ -f dist/patches.json ]; then
+            cp dist/patches.json relrepo/patches.json
+          fi
           cd relrepo
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add version.json
-          git commit -m "chore: version.json → ${TAG}（dev repo ${SHA8}）"
+          git add version.json patches.json
+          git commit -m "chore: version.json + patches.json → ${TAG}（dev repo ${SHA8}）"
           git push origin main
           echo "✅ https://raw.githubusercontent.com/${RELEASE_REPO}/main/version.json 已更新"
+          echo "✅ https://raw.githubusercontent.com/${RELEASE_REPO}/main/patches.json 已更新"
 
       - name: Summary
         if: always()
