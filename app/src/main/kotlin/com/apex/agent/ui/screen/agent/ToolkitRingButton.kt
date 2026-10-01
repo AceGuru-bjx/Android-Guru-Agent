@@ -69,6 +69,7 @@ import com.apex.agent.R
 import com.apex.agent.ui.screen.agent.toolkit.ChatRule
 import com.apex.agent.ui.screen.agent.toolkit.OutputFormat
 import com.apex.agent.core.tools.ToolCategory
+import com.apex.agent.core.tools.ToolDomain
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -208,25 +209,38 @@ fun ToolkitRingButton(
                                 onCheckedChange = onToggleExposeAllTools
                             )
                         }
-                        // v2：按类别分组展示（类别标题行 + 工具行），
-                        // 高风险工具带 ⚠ 徽标 —— 40+ 扁平列表找不到工具，
-                        // 分组让用户按任务类型快速定位。
-                        val grouped = availableTools
-                            .groupBy { it.category }
+                        // #206 三级分组：域（#206 工具域）→ 类别 → 工具 —— 18 个
+                        // 细分类一屏放不下且认知负担大；先按 7 域聚合，域内再按
+                        // 类别分节。高风险工具带 ⚠ 徽标保持不变。
+                        val byDomain = availableTools
+                            .groupBy { it.category?.let { c -> ToolDomain.domainOf(c) } }
                             .toSortedMap(compareBy { it?.order ?: Int.MAX_VALUE })
-                        grouped.forEach { (category, tools) ->
-                            Text(
-                                text = category?.label ?: stringResource(R.string.chat_category_other),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 36.dp, top = 8.dp, bottom = 2.dp)
-                            )
-                            tools.sortedBy { it.id }.forEach { tool ->
-                                ToolCheckboxRow(
-                                    tool = tool,
-                                    checked = tool.id in selectedFunctionIds,
-                                    onToggle = { onToggleFunction(tool.id) }
+                        byDomain.forEach { (domain, domainTools) ->
+                            if (domain != null) {
+                                Text(
+                                    text = domain.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(start = 28.dp, top = 8.dp, bottom = 1.dp)
                                 )
+                            }
+                            val grouped = domainTools
+                                .groupBy { it.category }
+                                .toSortedMap(compareBy { it?.order ?: Int.MAX_VALUE })
+                            grouped.forEach { (category, tools) ->
+                                Text(
+                                    text = category?.label ?: stringResource(R.string.chat_category_other),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 36.dp, top = 4.dp, bottom = 2.dp)
+                                )
+                                tools.sortedBy { it.id }.forEach { tool ->
+                                    ToolCheckboxRow(
+                                        tool = tool,
+                                        checked = tool.id in selectedFunctionIds,
+                                        onToggle = { onToggleFunction(tool.id) }
+                                    )
+                                }
                             }
                         }
                     }

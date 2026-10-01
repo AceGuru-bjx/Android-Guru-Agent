@@ -52,11 +52,14 @@ private val goToBrowse: (MarketViewModel) -> Unit = { it.selectScope(MarketScope
  * 沙箱就绪态判定：与 ProotMcpProcessLauncher 门禁同源（rootfs current 链接存在）。
  * 与 BrowseMcpTab 添加对话框的判定保持一致 —— 判定口径分叉会造成「添加能开沙箱、
  * 编辑却提示不可用」的矛盾体验。
+ *
+ * #206 修复：以 editingConfig 为键重查 —— 旧实现 remember 无键，rootfs 装好后
+ * 编辑弹窗仍报「不可用」直到重组。
  */
 @Composable
-private fun rememberSandboxAvailable(): Boolean {
+private fun rememberSandboxAvailable(key: Any? = Unit): Boolean {
     val context = androidx.compose.ui.platform.LocalContext.current
-    return androidx.compose.runtime.remember {
+    return androidx.compose.runtime.remember(key) {
         java.io.File(context.filesDir, "rootfs/ubuntu/current").exists()
     }
 }
@@ -323,6 +326,15 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
                         checked = server.enabled,
                         onCheckedChange = { viewModel.toggleMcp(server.name, it) }
                     )
+                    // #205 启动时间线：tracker 里留过底的服务器可回放真实
+                    // 启动史（pid/argv/serverInfo/stderr），排障「刚才为什么没连上」。
+                    if (viewModel.hasMcpTimeline(server.name)) {
+                        TextButton(
+                            onClick = { viewModel.showMcpTimeline(server.name) }
+                        ) {
+                            Text(stringResource(R.string.market_mcp_timeline))
+                        }
+                    }
                     // 配置编辑：改 URL / 命令 / 参数 / 环境变量 / 沙箱开关。
                     // BUILTIN 是进程内预置（无用户可配字段），不提供编辑。
                     if (!server.builtin) {
@@ -388,9 +400,12 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
     editingConfig?.let { config ->
         EditMcpDialog(
             initial = config,
-            sandboxAvailable = rememberSandboxAvailable(),
+            // 以当前编辑对象为键重查沙箱态（每次打开编辑器都是新鲜判定）。
+            sandboxAvailable = rememberSandboxAvailable(config),
             onSave = { updated -> viewModel.updateMcpServer(updated) },
-            onDismiss = { viewModel.closeMcpEditor() }
+            onDismiss = { viewModel.closeMcpEditor() },
+            // #206 实时预检（编辑模式自动豁免自身名的重名误报）。
+            validate = viewModel::validateMcpConfig
         )
     }
 }

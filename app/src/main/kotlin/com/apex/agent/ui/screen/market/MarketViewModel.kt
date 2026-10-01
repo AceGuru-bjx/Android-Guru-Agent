@@ -11,8 +11,14 @@ import com.apex.agent.core.tools.connector.ConnectorRegistry
 import com.apex.agent.core.tools.marketplace.ClawHubSource
 import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.core.tools.mcp.McpConfigImport
+import com.apex.agent.core.tools.mcp.McpConfigValidator
 import com.apex.agent.core.tools.mcp.McpManager
+import com.apex.agent.core.tools.mcp.McpServerCatalog
 import com.apex.agent.core.tools.mcp.McpServerConfig
+import com.apex.agent.core.tools.mcp.McpStartupEvent
+import com.apex.agent.core.tools.mcp.McpStartupListener
+import com.apex.agent.core.tools.mcp.McpStartupStage
+import com.apex.agent.core.tools.mcp.McpStartupTracker
 import com.apex.agent.core.tools.mcp.McpTransport
 import com.apex.agent.core.tools.skill.SkillMenuProvider
 import com.apex.agent.core.tools.skill.SkillRegistry
@@ -22,6 +28,8 @@ import com.apex.agent.plugin.host.PluginManager
 import com.apex.agent.ui.language.LanguageManager
 import com.apex.agent.R
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -202,6 +210,17 @@ data class MarketUiState(
     val mcpConnecting: String? = null,
     /** #197 真实启动进度（连接中服务器的实时阶段事件；null = 关闭弹窗）。 */
     val mcpStartup: McpStartupUi? = null,
+    // ── #205 MCP 精选目录（assets/mcp_catalog 离线随包）──
+    /** 目录全量条目（未分级过滤）。 */
+    val mcpCatalog: List<McpServerCatalog.McpCatalogEntry> = emptyList(),
+    /** 目录加载完成（空目录且 false = 加载中/失败）。 */
+    val mcpCatalogLoaded: Boolean = false,
+    /** 目录加载失败原因（本地资产损坏时非空）。 */
+    val mcpCatalogError: String? = null,
+    /** 目录分类过滤（null = 全部）。 */
+    val mcpCatalogCategory: String? = null,
+    /** 待配置环境变量的目录条目（null = 环境变量弹窗关闭）。 */
+    val catalogEnvEntry: McpServerCatalog.McpCatalogEntry? = null,
     val lastMessage: String? = null
 )
 
@@ -230,6 +249,7 @@ data class McpStartupUi(
  */
 @HiltViewModel
 class MarketViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val skillRegistry: SkillRegistry,
     private val skillMenuProvider: SkillMenuProvider,
     private val mcpManager: McpManager,
@@ -267,7 +287,16 @@ class MarketViewModel @Inject constructor(
     /** 当前搜索结果集对应的查询词（翻页/重试用，避免用户改了输入框但未点搜索时错页）。 */
     private var clawHubSearchQuery = ""
 
-    init { refresh() }
+    /**
+     * #205 启动事件追踪器：弹窗关掉后事件仍留底 —— 「已安装管理」里的
+     * 时间线按钮可回放每台服务器的真实启动史（pid/argv/serverInfo/stderr）。
+     */
+    private val startupTracker = McpStartupTracker()
+
+    init {
+        refresh()
+        loadMcpCatalog()
+    }
 
     /** 全量刷新（IO 线程）：技能/MCP/连接器/插件快照 + cs-mem 健康数据。保留集成源列表避免安装后列表闪失。 */
     fun refresh() {
@@ -277,8 +306,19 @@ class MarketViewModel @Inject constructor(
                 // 视图与瞬时态保留：scope 不保留 →「已安装管理」里任何开关/卸载/连接
                 // （全部以 refresh() 收尾）都会把顶栏弹回「市场」视图；mcpConnecting
                 // 不保留 → 长连接期间重进屏幕丢失防双击并发保护。
+                // #206 修复：tier 不保留 → 任何操作后 Coding 市场选择被弹回 Agent 市场。
                 scope = state.scope,
                 mcpConnecting = state.mcpConnecting,
+                tier = state.tier,
+                // #205：进度弹窗与目录状态跨 refresh 保留 —— 连接完成后
+                // refresh() 不再把弹窗抹掉（完整时间线由用户手动关闭）；
+                // 目录资产只加载一次，不能被快照重置回空表。
+                mcpStartup = state.mcpStartup,
+                mcpCatalog = state.mcpCatalog,
+                mcpCatalogLoaded = state.mcpCatalogLoaded,
+                mcpCatalogError = state.mcpCatalogError,
+                mcpCatalogCategory = state.mcpCatalogCategory,
+                catalogEnvEntry = state.catalogEnvEntry,
                 selectedTab = state.selectedTab,
                 modelScopeQuery = state.modelScopeQuery,
                 modelScopeSkills = state.modelScopeSkills,
@@ -381,8 +421,7 @@ class MarketViewModel @Inject constructor(
     /** 切换顶栏视图（市场 ⇄ 已安装管理），保留当前子页签。 */
     fun selectScope(scope: MarketScope) = _uiState.update { it.copy(scope = scope) }
 
-    /** #197 切换市场分级（Agent 市场 / Coding 市场），列表按作用域过滤。 */
-    fun selectTier(tier: MarketTier) = _uiState.update { it.copy(tier = tier) }
+    // #206：selectTier 迁至 MCP 目录区（切换分级时同步校正目录分类选择），见下方。
 
     /** #197 当前分级下可见的技能列表（scope=all 两级都保留）。 */
     fun visibleSkills(state: MarketUiState): List<MarketSkillRow> {
@@ -506,10 +545,53 @@ class MarketViewModel @Inject constructor(
     // ═══ MCP ═══
 
     /**
+     * #205 共享启动监听器：真实事件双写 —— tracker 留底（事后时间线可回放）
+     * + uiState.mcpStartup（弹窗实时渲染）。所有连接路径统一走它。
+     *
+     * #206 修复：仅当弹窗属于同一服务器且未被用户关闭时追加 —— 旧行为里
+     * 用户点「隐藏」后，后续 stderr 事件（每连接最多 30 行）会把弹窗反复拉起。
+     */
+    private fun startupListenerFor(name: String): McpStartupListener =
+        McpStartupListener { event ->
+            startupTracker.record(event)
+            _uiState.update { s ->
+                s.copy(
+                    mcpStartup = s.mcpStartup
+                        ?.takeIf { it.serverName == name && it.running }
+                        ?.let { it.copy(events = it.events + event, running = event.stage != McpStartupStage.FAILED) }
+                )
+            }
+        }
+
+    /**
+     * #206 连接成功的收尾：真实 tools/list 发现 + TOOLS_DISCOVERED 事件
+     * （[McpStartupTracker.recordToolsIfChanged] 去重重记）+ 弹窗停止转圈。
+     * connect/add/update 三条路径共用。
+     */
+    private suspend fun finishStartupWithTools(name: String) {
+        val tools = mcpManager.listServerTools(name)
+        val toolNames = tools.map { it.name }
+        // tracker 侧：同清单不重记（重连场景不刷重复行）。
+        startupTracker.recordToolsIfChanged(name, toolNames)
+        val detail = "发现 ${tools.size} 个工具：" + toolNames.take(6).joinToString("、") +
+            if (tools.size > 6) " …" else ""
+        _uiState.update { s ->
+            s.copy(
+                mcpStartup = s.mcpStartup
+                    ?.takeIf { it.serverName == name }
+                    ?.let { it.copy(events = it.events + McpStartupEvent(name, McpStartupStage.TOOLS_DISCOVERED, detail), running = false) }
+            )
+        }
+    }
+
+    /**
      * 添加 MCP 工具源。
      *
      * 注意 STDIO 不是"服务器 URL"：它是本地命令（command + args + env），
      * 添加成功后 connect 会真正把这个进程拉起来做 JSON-RPC 握手。
+     *
+     * #205：添加后的自动连接也接上真实启动事件（进度弹窗 + tracker 留底）
+     * —— 旧版只有手动「连接」才弹进度，添加失败时用户只看到一句抽象报错。
      */
     fun addMcpServer(config: McpServerConfig) {
         viewModelScope.launch {
@@ -526,14 +608,26 @@ class MarketViewModel @Inject constructor(
                     onSuccess = {
                         // P2：连接结果不再被吞 —— 添加后立即连接失败（URL 错/命令不存在）时
                         // 用户只看到「已添加」成功提示，错误静默丢失。fold 进同一条 snackbar。
-                        val connectMsg = mcpManager.connect(name).fold(
+                        // #205：连接过程有真实启动事件弹窗（环境/spawn/握手/stderr）。
+                        _uiState.update { it.copy(mcpConnecting = name, mcpStartup = McpStartupUi(serverName = name)) }
+                        val connectMsg = mcpManager.connect(name, startupListenerFor(name)).fold(
                             onSuccess = { languageManager.getString(R.string.market_mcp_added).format(name) },
                             onFailure = {
                                 languageManager.getString(R.string.market_add_failed)
                                     .format("${it.message ?: ""}")
                             }
                         )
+                        // #206 修复：连接成功也做 tools 发现收尾，弹窗不再无限转圈。
+                        if (mcpManager.getConnectedServers().contains(name)) {
+                            finishStartupWithTools(name)
+                        } else {
+                            _uiState.update { s ->
+                                s.copy(mcpStartup = s.mcpStartup
+                                    ?.takeIf { it.serverName == name }?.let { it.copy(running = false) })
+                            }
+                        }
                         message(connectMsg)
+                        _uiState.update { it.copy(mcpConnecting = null) }
                         refresh()
                     },
                 onFailure = {
@@ -618,38 +712,17 @@ class MarketViewModel @Inject constructor(
     fun connectMcp(name: String) {
         viewModelScope.launch {
             _uiState.update { it.copy(mcpConnecting = name, mcpStartup = McpStartupUi(serverName = name)) }
-            // #197 真实启动事件流：监听器把每个真实阶段（env/spawn/initialize/
-            // initialized）写进 uiState.mcpStartup —— 弹窗实时渲染；连接成功后
-            // 再做一次真实 tools/list 发现（这也是 McpToolRegistrar 的注册路径）。
-            val listener = com.apex.agent.core.tools.mcp.McpStartupListener { event ->
-                _uiState.update { s ->
-                    s.copy(
-                        mcpStartup = s.mcpStartup?.let {
-                            it.copy(events = it.events + event, running = event.stage != com.apex.agent.core.tools.mcp.McpStartupStage.FAILED)
-                        } ?: McpStartupUi(serverName = name, events = listOf(event))
-                    )
-                }
-            }
+            // #197/#205 真实启动事件流：共享监听器（tracker 留底 + 弹窗实时渲染），
+            // 每个真实阶段（env/spawn/initialize/initialized/stderr）逐条可见；
+            // 连接成功后再做一次真实 tools/list 发现（这也是 McpToolRegistrar
+            // 的注册路径）。
+            val listener = startupListenerFor(name)
             try {
                 mcpManager.connect(name, listener).fold(
                     onSuccess = {
                         // 真实工具发现：与 McpToolRegistrar 同一数据源（listServerTools）。
-                        val tools = mcpManager.listServerTools(name)
-                        _uiState.update { s ->
-                            s.copy(
-                                mcpStartup = s.mcpStartup?.let {
-                                    it.copy(
-                                        events = it.events + com.apex.agent.core.tools.mcp.McpStartupEvent(
-                                            serverName = name,
-                                            stage = com.apex.agent.core.tools.mcp.McpStartupStage.TOOLS_DISCOVERED,
-                                            detail = "发现 ${tools.size} 个工具：" + tools.take(6).map { t -> t.name }.joinToString("、") +
-                                                if (tools.size > 6) " …" else ""
-                                        ),
-                                        running = false
-                                    )
-                                }
-                            )
-                        }
+                        // #206：收尾逻辑抽取为 finishStartupWithTools（tracker 去重重记）。
+                        finishStartupWithTools(name)
                         message(languageManager.getString(R.string.market_mcp_connected).format(name))
                     },
                     onFailure = {
@@ -679,6 +752,7 @@ class MarketViewModel @Inject constructor(
     fun removeMcp(name: String) {
         viewModelScope.launch {
             mcpManager.removeServer(name)
+            startupTracker.clear(name)
             message(languageManager.getString(R.string.market_mcp_removed).format(name))
             refresh()
         }
@@ -703,6 +777,8 @@ class MarketViewModel @Inject constructor(
     /**
      * 保存编辑后的配置：断开旧连接（配置已变，旧连接必然失效）→ 覆盖写 →
      * enabled 时自动重连（对齐「添加并连接」的行为闭环）。
+     *
+     * #205：重连同样接上真实启动事件（进度弹窗 + tracker 留底）。
      */
     fun updateMcpServer(config: McpServerConfig) {
         viewModelScope.launch {
@@ -713,7 +789,8 @@ class MarketViewModel @Inject constructor(
                 onSuccess = {
                     // 连接结果折叠（同 addMcpServer）：编辑保存后重连失败不再静默。
                     if (config.enabled) {
-                        val connectMsg = mcpManager.connect(name).fold(
+                        _uiState.update { it.copy(mcpConnecting = name, mcpStartup = McpStartupUi(serverName = name)) }
+                        val connectMsg = mcpManager.connect(name, startupListenerFor(name)).fold(
                             onSuccess = {
                                 languageManager.getString(R.string.market_mcp_edit_saved).format(name)
                             },
@@ -722,7 +799,17 @@ class MarketViewModel @Inject constructor(
                                     .format("${it.message ?: ""}")
                             }
                         )
+                        // #206 修复：与添加路径同构的 tools 发现收尾，弹窗不转圈。
+                        if (mcpManager.getConnectedServers().contains(name)) {
+                            finishStartupWithTools(name)
+                        } else {
+                            _uiState.update { s ->
+                                s.copy(mcpStartup = s.mcpStartup
+                                    ?.takeIf { it.serverName == name }?.let { it.copy(running = false) })
+                            }
+                        }
                         message(connectMsg)
+                        _uiState.update { it.copy(mcpConnecting = null) }
                     } else {
                         message(languageManager.getString(R.string.market_mcp_edit_saved).format(name))
                     }
@@ -735,6 +822,188 @@ class MarketViewModel @Inject constructor(
             _editingMcp.value = null
         }
     }
+
+    // ═══ MCP · 精选目录（#205：assets/mcp_catalog 离线随包，一键安装）═══
+
+    /**
+     * 加载精选目录：遍历 assets/mcp_catalog 下的分类 JSON → [McpServerCatalog.parseCategoryFile]。
+     *
+     * 单文件损坏只降级跳过（错误计入 [MarketUiState.mcpCatalogError]），
+     * 不拖垮其余分类。只加载一次（[init]），refresh 不重置。
+     *
+     * #206 加固：跨文件重复 id 与非法条目不进入 [MarketUiState.mcpCatalog]
+     * （LazyColumn 的 item key 与安装装配都假定 id 唯一合法——有问题条目
+     * 只留在错误提示里，不进渲染列表）。
+     */
+    private fun loadMcpCatalog() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries = mutableListOf<McpServerCatalog.McpCatalogEntry>()
+            val errors = mutableListOf<String>()
+            runCatching {
+                val names = appContext.assets.list("mcp_catalog").orEmpty()
+                    .filter { it.endsWith(".json") }.sorted()
+                require(names.isNotEmpty()) { "目录资产缺失（assets/mcp_catalog）" }
+                for (file in names) {
+                    val text = appContext.assets.open("mcp_catalog/$file")
+                        .bufferedReader().use { it.readText() }
+                    McpServerCatalog.parseCategoryFile(text).fold(
+                        onSuccess = { entries += it.entries },
+                        onFailure = { errors += "${file}: ${it.message}" }
+                    )
+                }
+            }.onFailure { errors += it.message.orEmpty() }
+            val issues = McpServerCatalog.validateEntries(entries)
+            // 跨文件去重（首个胜出，后到的重复 id 只报错不渲染）。
+            val seen = HashSet<String>()
+            val deduped = entries.filter { seen.add(it.id) }
+            val dedupDrops = entries.size - deduped.size
+            _uiState.update {
+                it.copy(
+                    mcpCatalog = deduped,
+                    mcpCatalogLoaded = true,
+                    mcpCatalogError = buildList {
+                        errors.forEach { e -> add(e) }
+                        issues.forEach { i -> add("${i.entryId}: ${i.reason}") }
+                        if (dedupDrops > 0) add("跨文件重复 id：已丢弃 $dedupDrops 条")
+                    }.takeIf { l -> l.isNotEmpty() }?.joinToString("；")
+                )
+            }
+        }
+    }
+
+    /** 当前分级下可见的目录条目（#197 tier 过滤 + 分类过滤）。 */
+    fun visibleCatalog(state: MarketUiState): List<McpServerCatalog.McpCatalogEntry> {
+        val tier = state.tier.name.lowercase()
+        return state.mcpCatalog
+            .filter { it.visibleToTier(tier) }
+            .filter { state.mcpCatalogCategory == null || it.category == state.mcpCatalogCategory }
+    }
+
+    /** 目录分类切换（null = 全部）。 */
+    fun selectCatalogCategory(category: String?) {
+        _uiState.update { it.copy(mcpCatalogCategory = category) }
+    }
+
+    /**
+     * #197/#206 切换市场分级：同时校正目录分类选择 —— coding 专属分类在
+     * Agent 分级下无条目，旧选择留着只会得到空列表。
+     */
+    fun selectTier(tier: MarketTier) {
+        _uiState.update { state ->
+            val catStillVisible = state.mcpCatalogCategory?.let { cat ->
+                state.mcpCatalog.any { it.category == cat && it.visibleToTier(tier.name.lowercase()) }
+            } ?: true
+            state.copy(
+                tier = tier,
+                mcpCatalogCategory = if (catStillVisible) state.mcpCatalogCategory else null
+            )
+        }
+    }
+
+    /**
+     * 目录条目是否已安装：精确名匹配 + 安装时生成的序号后缀形态
+     * （id-2 / id-3…）；不再用宽泛前缀（`github-backup` 不再误判成 `github`）。
+     */
+    fun isCatalogEntryInstalled(entry: McpServerCatalog.McpCatalogEntry): Boolean {
+        val suffixPattern = Regex("^${Regex.escape(entry.id)}-\\d+$")
+        return mcpManager.getConfigs().any { it.name == entry.id || suffixPattern.matches(it.name) }
+    }
+
+    /** 打开目录条目的环境变量弹窗（无必填变量时 UI 直接走安装）。 */
+    fun openCatalogEnvDialog(entry: McpServerCatalog.McpCatalogEntry) {
+        _uiState.update { it.copy(catalogEnvEntry = entry) }
+    }
+
+    fun closeCatalogEnvDialog() {
+        _uiState.update { it.copy(catalogEnvEntry = null) }
+    }
+
+    /**
+     * 安装目录条目：必填环境变量预检 → 预检（[McpConfigValidator]）→
+     * 重名自动加序号 → addServer + connect（真实启动事件弹窗 + tracker 留底）。
+     *
+     * #206 加固：busy 锁防双击并发重入（旧行为两连点会各自 addServer 互相
+     * 覆盖）；序号后缀改为递增扫描（时间戳取模可能撞车）；装配包裹
+     * runCatching（非法目录条目不再炸协程）。
+     */
+    fun installCatalogEntry(entry: McpServerCatalog.McpCatalogEntry, envValues: Map<String, String>) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(catalogEnvEntry = null) }
+            val missing = McpServerCatalog.missingRequiredEnv(entry, envValues)
+            if (missing.isNotEmpty()) {
+                message(languageManager.getString(R.string.market_mcp_catalog_missing_env).format(missing.joinToString("、")))
+                return@launch
+            }
+            if (_uiState.value.mcpConnecting != null) return@launch // 已有连接在进行：防双击
+            // 重名递增：filesystem 已存在 → filesystem-2 → filesystem-3…
+            val existing = mcpManager.getConfigs().map { it.name }.toSet()
+            val name = if (entry.id !in existing) entry.id
+            else {
+                var n = 2
+                while ("${entry.id}-$n" in existing) n++
+                "${entry.id}-$n"
+            }
+            val sandboxAvailable = java.io.File(appContext.filesDir, "rootfs/ubuntu/current").exists()
+            val config = runCatching {
+                McpServerCatalog.toServerConfig(
+                    entry, envValues, name,
+                    runInSandbox = sandboxAvailable && entry.transport == McpTransport.STDIO
+                )
+            }.getOrElse {
+                message(languageManager.getString(R.string.market_mcp_catalog_preflight_failed).format(it.message ?: ""))
+                return@launch
+            }
+            // #205 预检：静态可判定的问题当场报出（重名/沙箱未装/URL 非法/注入字符）。
+            val findings = McpConfigValidator.validate(
+                config,
+                existingNames = emptySet(), // 重名已自行处理为唯一名
+                builtinNames = emptySet(),
+                sandboxReady = if (config.runInSandbox) sandboxAvailable else null
+            )
+            McpConfigValidator.errorsOf(findings).let { errors ->
+                if (errors.isNotEmpty()) {
+                    message(
+                        languageManager.getString(R.string.market_mcp_catalog_preflight_failed)
+                            .format(errors.joinToString("；") { it.message })
+                    )
+                    return@launch
+                }
+            }
+            addMcpServer(config)
+        }
+    }
+
+    /**
+     * #206 添加/编辑对话框的共享预检：全部 [McpConfigValidator] 规则
+     * （含重名 —— 旧行为 addServer 直接覆盖同名配置造成无声数据丢失）。
+     */
+    fun validateMcpConfig(config: McpServerConfig): List<McpConfigValidator.Finding> {
+        val existing = mcpManager.getConfigs().map { it.name }.toSet()
+        val sandboxAvailable = java.io.File(appContext.filesDir, "rootfs/ubuntu/current").exists()
+        return McpConfigValidator.validate(
+            config,
+            existingNames = existing,
+            builtinNames = mcpManager.getConfigs()
+                .filter { it.transport == McpTransport.BUILTIN }.map { it.name }.toSet(),
+            sandboxReady = if (config.runInSandbox) sandboxAvailable else null
+        )
+    }
+
+    /** #205 回放某台服务器的启动时间线（tracker 留底，弹窗只读渲染）。 */
+    fun showMcpTimeline(name: String) {
+        // #206 修复：不覆盖进行中的实时弹窗（连接事件会继续追加进历史快照造成混排）。
+        if (_uiState.value.mcpConnecting != null) return
+        _uiState.update {
+            it.copy(mcpStartup = McpStartupUi(
+                serverName = name,
+                events = startupTracker.snapshot(name),
+                running = false
+            ))
+        }
+    }
+
+    /** #205 该服务器是否有时间线可看（installed 行按钮的可见性）。 */
+    fun hasMcpTimeline(name: String): Boolean = startupTracker.hasEvents(name)
 
     // ═══ 连接器 ═══
 
@@ -1083,8 +1352,14 @@ class MarketViewModel @Inject constructor(
         val state = _uiState.value
         val all = state.skills + state.skillTemplates
         return all.filter { row ->
-            // 分类过滤
-            (state.categoryFilter == null || row.category == state.categoryFilter) &&
+            // #206 分类过滤：键为 SkillCategory.key（categoryFilter 与 chip 同域）；
+            // 「未分类」哨兵（UNCATEGORIZED_FILTER）匹配旧值残留行。
+            (state.categoryFilter == null ||
+                (if (state.categoryFilter == UNCATEGORIZED_FILTER) {
+                    com.apex.agent.core.tools.skill.SkillCategory.of(row.category) == null
+                } else {
+                    row.category == state.categoryFilter
+                })) &&
             // 搜索查询：精确匹配 id/name/tags/description
             (state.skillQuery.isBlank() ||
                 row.id.contains(state.skillQuery, ignoreCase = true) ||
@@ -1092,5 +1367,10 @@ class MarketViewModel @Inject constructor(
                 row.description.contains(state.skillQuery, ignoreCase = true) ||
                 row.tags.any { it.contains(state.skillQuery, ignoreCase = true) })
         }
+    }
+
+    companion object {
+        /** #206「未分类」过滤哨兵（与真实域 key 不撞车的哨兵值）。 */
+        const val UNCATEGORIZED_FILTER = "__uncategorized__"
     }
 }

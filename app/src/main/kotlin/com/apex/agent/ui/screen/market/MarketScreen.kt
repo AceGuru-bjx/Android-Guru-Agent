@@ -11,11 +11,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -239,23 +240,33 @@ private fun McpStartupProgressDialog(
                     .fillMaxWidth()
                     .width(320.dp)
             ) {
-                items(startup.events, key = { it.timestampMs.toString() + it.stage.name }) { event ->
+                // #205：key 加 index —— stderr 事件与阶段事件同毫秒到达时
+                // "timestamp+stage" 也会撞键（两条 STDERR 同 ms 尤甚）导致崩溃。
+                itemsIndexed(
+                    startup.events,
+                    key = { i, e -> "$i-${e.timestampMs}-${e.stage.name}" }
+                ) { _, event ->
                     val failed = event.stage == com.apex.agent.core.tools.mcp.McpStartupStage.FAILED
+                    val stderr = event.stage == com.apex.agent.core.tools.mcp.McpStartupStage.STDERR
                     Row(
                         verticalAlignment = Alignment.Top,
-                        modifier = Modifier.padding(vertical = 5.dp)
+                        modifier = Modifier.padding(vertical = if (stderr) 2.dp else 5.dp)
                     ) {
                         Icon(
-                            imageVector = if (failed) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                            imageVector = if (failed) Icons.Default.ErrorOutline
+                            else if (stderr) Icons.Default.Info
+                            else Icons.Default.CheckCircle,
                             contentDescription = null,
                             tint = if (failed) MaterialTheme.colorScheme.error
+                            else if (stderr) MaterialTheme.colorScheme.outline
                             else MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(17.dp)
                         )
                         Column(modifier = Modifier.padding(start = 8.dp)) {
                             Text(
                                 text = stageLabel(event.stage),
-                                style = MaterialTheme.typography.labelLarge
+                                style = if (stderr) MaterialTheme.typography.labelSmall
+                                else MaterialTheme.typography.labelLarge
                             )
                             Text(
                                 text = event.detail,
@@ -314,6 +325,7 @@ private fun stageLabel(stage: com.apex.agent.core.tools.mcp.McpStartupStage): St
             com.apex.agent.core.tools.mcp.McpStartupStage.INITIALIZE_RESULT -> R.string.market_mcp_stage_init_result
             com.apex.agent.core.tools.mcp.McpStartupStage.INITIALIZED -> R.string.market_mcp_stage_initialized
             com.apex.agent.core.tools.mcp.McpStartupStage.TOOLS_DISCOVERED -> R.string.market_mcp_stage_tools
+            com.apex.agent.core.tools.mcp.McpStartupStage.STDERR -> R.string.market_mcp_stage_stderr
             com.apex.agent.core.tools.mcp.McpStartupStage.FAILED -> R.string.market_mcp_stage_failed
         }
     )

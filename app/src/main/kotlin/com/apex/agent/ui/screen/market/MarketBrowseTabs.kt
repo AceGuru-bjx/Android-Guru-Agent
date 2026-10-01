@@ -1,8 +1,11 @@
 package com.apex.agent.ui.screen.market
 
+import androidx.annotation.StringRes
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,12 +13,14 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -33,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -42,6 +48,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
+import com.apex.agent.core.tools.mcp.McpServerCatalog
 import com.apex.agent.core.tools.marketplace.ClawHubSource
 
 /**
@@ -515,25 +522,39 @@ private fun SkillSearchAndFilter(state: MarketUiState, viewModel: MarketViewMode
     }
 }
 
-/** 分类过滤 chip 行。 */
+/**
+ * #206 分类过滤 chip 行 —— 从 [SkillCategory] 24 域派生（不再硬编码
+ * ToolCategory 名字表：旧列表 10 个 chip 里 6 个对技能永远筛不出任何
+ * 结果，属死过滤器）。
+ *
+ * 只渲染当前列表里**真实有技能**的域（计数 > 0，含旧值残留的「未分类」
+ * 兜底 chip）；计数从行数据实时统计，安装/卸载后自动更新。
+ */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun CategoryFilterChips(
     selected: String?,
     viewModel: MarketViewModel
 ) {
-    val categories = listOf(
-        "SHELL" to null,
-        "FILE" to R.string.market_cat_file,
-        "WEB" to R.string.market_cat_web,
-        "BROWSER" to R.string.market_cat_browser,
-        "MEMORY" to R.string.market_cat_memory,
-        "SYSTEM" to R.string.market_cat_system,
-        "UI" to null,
-        "AGENT" to null,
-        "UTILITY" to R.string.market_cat_utility,
-        "MCP" to null
-    )
+    val state = viewModel.uiState.collectAsStateWithLifecycle().value
+    // 行数据里真实出现的分类（已安装 + 内置模板），保留 SkillCategory 顺序，
+    // 未知旧值（AGENT/UTILITY 等历史残留）归「未分类」。chip 同时携带
+    // 过滤键（字符串，与 categoryFilter 同域）与域对象（标签渲染）。
+    val counted = remember(state.skills, state.skillTemplates) {
+        buildList {
+            val rows = state.skills + state.skillTemplates
+            val known = LinkedHashMap<com.apex.agent.core.tools.skill.SkillCategory, Int>()
+            var uncategorized = 0
+            rows.forEach { row ->
+                val cat = com.apex.agent.core.tools.skill.SkillCategory.of(row.category)
+                if (cat != null) known[cat] = (known[cat] ?: 0) + 1 else uncategorized++
+            }
+            com.apex.agent.core.tools.skill.SkillCategory.inDisplayOrder()
+                .filter { known.containsKey(it) }
+                .forEach { add(it to (known[it] ?: 0)) }
+            if (uncategorized > 0) add(null to uncategorized)
+        }
+    }
     androidx.compose.foundation.layout.FlowRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -544,13 +565,17 @@ private fun CategoryFilterChips(
             onClick = { viewModel.setCategoryFilter(null) },
             label = { Text(stringResource(R.string.market_cat_all), style = MaterialTheme.typography.labelSmall) }
         )
-        categories.forEach { (name, labelRes) ->
+        counted.forEach { (category, count) ->
+            // 过滤键：域 key；未分类 = 空串之外的哨兵（用旧值不可达的 "__uncategorized__"
+            // 避免与真实域 key 撞车；categoryFilter 存的也是它）
+            val filterKey = category?.key ?: MarketViewModel.UNCATEGORIZED_FILTER
             FilterChip(
-                selected = selected == name,
-                onClick = { viewModel.setCategoryFilter(if (selected == name) null else name) },
+                selected = selected == filterKey,
+                onClick = { viewModel.setCategoryFilter(if (selected == filterKey) null else filterKey) },
                 label = {
                     Text(
-                        labelRes?.let { stringResource(it) } ?: name,
+                        text = (category?.let { stringResource(skillCategoryLabel(it)) }
+                            ?: stringResource(R.string.market_cat_uncategorized)) + " $count",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -558,6 +583,36 @@ private fun CategoryFilterChips(
         }
     }
 }
+
+/** #206 技能域 → 本地化标签资源。 */
+@StringRes
+private fun skillCategoryLabel(category: com.apex.agent.core.tools.skill.SkillCategory): Int =
+    when (category) {
+        com.apex.agent.core.tools.skill.SkillCategory.CAREER -> R.string.market_skill_cat_career
+        com.apex.agent.core.tools.skill.SkillCategory.KNOWLEDGE -> R.string.market_skill_cat_knowledge
+        com.apex.agent.core.tools.skill.SkillCategory.LIFESTYLE -> R.string.market_skill_cat_lifestyle
+        com.apex.agent.core.tools.skill.SkillCategory.EMOTIONAL -> R.string.market_skill_cat_emotional
+        com.apex.agent.core.tools.skill.SkillCategory.SOCIAL -> R.string.market_skill_cat_social
+        com.apex.agent.core.tools.skill.SkillCategory.DATA -> R.string.market_skill_cat_data
+        com.apex.agent.core.tools.skill.SkillCategory.BUSINESS -> R.string.market_skill_cat_business
+        com.apex.agent.core.tools.skill.SkillCategory.FINANCE -> R.string.market_skill_cat_finance
+        com.apex.agent.core.tools.skill.SkillCategory.TECH -> R.string.market_skill_cat_tech
+        com.apex.agent.core.tools.skill.SkillCategory.LANGUAGE -> R.string.market_skill_cat_language
+        com.apex.agent.core.tools.skill.SkillCategory.HEALTH -> R.string.market_skill_cat_health
+        com.apex.agent.core.tools.skill.SkillCategory.FITNESS -> R.string.market_skill_cat_fitness
+        com.apex.agent.core.tools.skill.SkillCategory.EDUCATION -> R.string.market_skill_cat_education
+        com.apex.agent.core.tools.skill.SkillCategory.PARENTING -> R.string.market_skill_cat_parenting
+        com.apex.agent.core.tools.skill.SkillCategory.HOME -> R.string.market_skill_cat_home
+        com.apex.agent.core.tools.skill.SkillCategory.TRAVEL -> R.string.market_skill_cat_travel
+        com.apex.agent.core.tools.skill.SkillCategory.CREATIVE -> R.string.market_skill_cat_creative
+        com.apex.agent.core.tools.skill.SkillCategory.WRITING -> R.string.market_skill_cat_writing
+        com.apex.agent.core.tools.skill.SkillCategory.ENTERTAINMENT -> R.string.market_skill_cat_entertainment
+        com.apex.agent.core.tools.skill.SkillCategory.PRODUCTIVITY -> R.string.market_skill_cat_productivity
+        com.apex.agent.core.tools.skill.SkillCategory.COMMUNICATION -> R.string.market_skill_cat_communication
+        com.apex.agent.core.tools.skill.SkillCategory.SAFETY -> R.string.market_skill_cat_safety
+        com.apex.agent.core.tools.skill.SkillCategory.DIGITAL -> R.string.market_skill_cat_digital
+        com.apex.agent.core.tools.skill.SkillCategory.CODING -> R.string.market_skill_cat_coding
+    }
 
 /** 技能列表卡片 —— 已安装显示能量条/结晶徽章，未安装（内置）显示内置标记。点击已安装技能打开认知详情。 */
 @Composable
@@ -631,6 +686,36 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
         item {
             McpHostSection()
         }
+        // #205 精选目录：头部（分类 chips）+ 每条目一个 item（懒加载友好）。
+        item {
+            McpCatalogHeader(state, viewModel)
+        }
+        // 注意：LazyListScope 作用域不是 @Composable —— 这里不能用 remember；
+        // visibleCatalog 是廉价内存过滤，直接调用即可。
+        val catalogEntries = viewModel.visibleCatalog(state)
+        items(
+            catalogEntries,
+            key = { "catalog-${it.id}" }
+        ) { entry ->
+            McpCatalogEntryCard(
+                entry = entry,
+                installed = viewModel.isCatalogEntryInstalled(entry),
+                onInstall = {
+                    if (entry.envSchema.isNotEmpty()) {
+                        viewModel.openCatalogEnvDialog(entry)
+                    } else {
+                        viewModel.installCatalogEntry(entry, emptyMap())
+                    }
+                }
+            )
+        }
+        if (state.mcpCatalogError != null) {
+            item {
+                MarketHint(
+                    stringResource(R.string.market_mcp_catalog_error, state.mcpCatalogError ?: "")
+                )
+            }
+        }
         item {
             MarketInstallActionCard(
                 title = stringResource(R.string.market_mcp_add_title),
@@ -680,7 +765,9 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
                 viewModel.addMcpServer(config)
                 showAddDialog = false
             },
-            sandboxAvailable = sandboxAvailable
+            sandboxAvailable = sandboxAvailable,
+            // #206 实时预检：重名/URL 协议/裸命令/沙箱未装等在表单内当场点名。
+            validate = viewModel::validateMcpConfig
         )
     }
     if (showImportDialog) {
@@ -692,6 +779,292 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
             }
         )
     }
+    // #205 目录条目的环境变量弹窗（密钥引导表单）。
+    state.catalogEnvEntry?.let { entry ->
+        McpCatalogEnvDialog(
+            entry = entry,
+            onDismiss = viewModel::closeCatalogEnvDialog,
+            onInstall = { values -> viewModel.installCatalogEntry(entry, values) }
+        )
+    }
+}
+
+/**
+ * #205 精选目录头部卡片：标题 + 条数 + 分类 chips（横向滚动）。
+ *
+ * 条目本身由调用方 LazyColumn 的 items 逐条渲染（懒加载友好）。
+ * #206：条数显示**过滤后**的可见数（旧实现显示总数，分级/分类过滤后误导）；
+ * chips 按目录声明的 [McpServerCatalog.CATEGORY_ORDER] 排序。
+ */
+@Composable
+private fun McpCatalogHeader(state: MarketUiState, viewModel: MarketViewModel) {
+    androidx.compose.material3.Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(R.string.market_mcp_catalog_header),
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    // #206 修复：可见数（分级 + 分类过滤后），不是资产总数。
+                    text = stringResource(
+                        R.string.market_mcp_catalog_count,
+                        viewModel.visibleCatalog(state).size
+                    ),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = stringResource(R.string.market_mcp_catalog_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                FilterChip(
+                    selected = state.mcpCatalogCategory == null,
+                    onClick = { viewModel.selectCatalogCategory(null) },
+                    label = { Text(stringResource(R.string.market_mcp_catalog_cat_all)) }
+                )
+                // 只显示当前分级下有条目的分类（避免死 chip），按目录声明的
+                // 分类顺序渲染（旧实现按文件名字母序）。
+                val tier = state.tier.name.lowercase()
+                state.mcpCatalog
+                    .filter { it.visibleToTier(tier) }
+                    .groupBy { it.category }
+                    .toSortedMap(compareBy { McpServerCatalog.CATEGORY_ORDER.indexOf(it) })
+                    .forEach { (category, _) ->
+                        FilterChip(
+                            selected = state.mcpCatalogCategory == category,
+                            onClick = { viewModel.selectCatalogCategory(category) },
+                            label = { Text(catalogCategoryLabel(category)) }
+                        )
+                    }
+            }
+        }
+    }
+}
+
+/** 当前 UI 语言是否中文（条目双语简介的取词依据）。 */
+@Composable
+private fun isZhLanguage(): Boolean =
+    androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "zh"
+
+/** 目录分类 → 本地化标签。 */
+@Composable
+private fun catalogCategoryLabel(category: String): String {
+    val res = when (category) {
+        "official" -> R.string.market_mcp_catalog_cat_official
+        "web-search" -> R.string.market_mcp_catalog_cat_search
+        "browser" -> R.string.market_mcp_catalog_cat_browser
+        "database" -> R.string.market_mcp_catalog_cat_database
+        "git" -> R.string.market_mcp_catalog_cat_git
+        "cloud" -> R.string.market_mcp_catalog_cat_cloud
+        "observability" -> R.string.market_mcp_catalog_cat_observability
+        "docs" -> R.string.market_mcp_catalog_cat_docs
+        "productivity" -> R.string.market_mcp_catalog_cat_productivity
+        "desktop" -> R.string.market_mcp_catalog_cat_desktop
+        "finance" -> R.string.market_mcp_catalog_cat_finance
+        "design" -> R.string.market_mcp_catalog_cat_design
+        "communication" -> R.string.market_mcp_catalog_cat_communication
+        "location" -> R.string.market_mcp_catalog_cat_location
+        "data" -> R.string.market_mcp_catalog_cat_data
+        "remote" -> R.string.market_mcp_catalog_cat_remote
+        else -> return category
+    }
+    return stringResource(res)
+}
+
+/**
+ * #205 目录条目卡片：名称 + 风险/运行时/传输徽标 + 双语简介 + 安装按钮。
+ */
+@Composable
+private fun McpCatalogEntryCard(
+    entry: McpServerCatalog.McpCatalogEntry,
+    installed: Boolean,
+    onInstall: () -> Unit
+) {
+    val zh = isZhLanguage()
+    androidx.compose.material3.Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = entry.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                // 风险徽标（high 红 / medium 橙 / low 绿）
+                val (riskLabel, riskColor) = when (entry.risk) {
+                    "high" -> R.string.market_mcp_catalog_risk_high to MaterialTheme.colorScheme.error
+                    "medium" -> R.string.market_mcp_catalog_risk_medium to MaterialTheme.colorScheme.tertiary
+                    else -> R.string.market_mcp_catalog_risk_low to MaterialTheme.colorScheme.primary
+                }
+                Text(
+                    text = stringResource(riskLabel),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = riskColor,
+                    modifier = Modifier.padding(horizontal = 6.dp)
+                )
+                if (installed) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = stringResource(R.string.market_mcp_catalog_installed),
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+            Text(
+                text = entry.descriptionFor(zh),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 6.dp)
+            ) {
+                Text(
+                    text = listOfNotNull(
+                        entry.transport.name,
+                        entry.runtime,
+                        if (entry.envSchema.any { it.required })
+                            stringResource(R.string.market_mcp_catalog_needs_key) else null
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = onInstall, enabled = !installed) {
+                    Text(
+                        if (installed) stringResource(R.string.market_mcp_catalog_installed)
+                        else stringResource(R.string.market_mcp_catalog_install)
+                    )
+                }
+            }
+            entry.notes?.let { notes ->
+                Text(
+                    text = notes,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * #205 目录安装的环境变量引导表单：逐个渲染 envSchema（必填* + 描述），
+ * 高风险条目加警示行。确认时校验必填项，缺的键逐个点名。
+ */
+@Composable
+private fun McpCatalogEnvDialog(
+    entry: McpServerCatalog.McpCatalogEntry,
+    onDismiss: () -> Unit,
+    onInstall: (Map<String, String>) -> Unit
+) {
+    var values by remember(entry.id) { mutableStateOf(mapOf<String, String>()) }
+    var missingKeys by remember(entry.id) { mutableStateOf<List<String>>(emptyList()) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                stringResource(R.string.market_mcp_catalog_env_title, entry.name),
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = entry.descriptionFor(isZhLanguage()),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (entry.risk == "high") {
+                    Text(
+                        text = stringResource(R.string.market_mcp_catalog_env_high_risk),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+                if (missingKeys.isNotEmpty()) {
+                    Text(
+                        text = stringResource(R.string.market_mcp_catalog_missing_env, missingKeys.joinToString("、")),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.size(8.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                ) {
+                    items(entry.envSchema.size) { index ->
+                        val envVar = entry.envSchema[index]
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            OutlinedTextField(
+                                value = values[envVar.key].orEmpty(),
+                                onValueChange = { values = values + (envVar.key to it) },
+                                isError = envVar.required && missingKeys.contains(envVar.key),
+                                label = {
+                                    Text(
+                                        if (envVar.required) "${envVar.key} *"
+                                        else envVar.key
+                                    )
+                                },
+                                supportingText = {
+                                    if (envVar.description.isNotBlank()) {
+                                        Text(envVar.description, style = MaterialTheme.typography.labelSmall)
+                                    }
+                                },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val missing = entry.requiredEnv()
+                        .filter { values[it.key].isNullOrBlank() }
+                        .map { it.key }
+                    if (missing.isEmpty()) {
+                        onInstall(values.filterValues { it.isNotBlank() })
+                    } else {
+                        // 必填缺失：弹窗内联点名（不关弹窗、保留已填内容）。
+                        missingKeys = missing
+                    }
+                }
+            ) {
+                Text(stringResource(R.string.market_mcp_catalog_install))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.market_action_cancel))
+            }
+        }
+    )
 }
 
 // ═══ 市场 · 连接器 ═══
