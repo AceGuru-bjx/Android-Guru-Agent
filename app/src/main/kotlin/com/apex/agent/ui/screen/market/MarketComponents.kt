@@ -57,11 +57,11 @@ import com.apex.agent.R
 internal fun formatDownloads(count: Long, language: String): String {
     val zh = language.equals("zh", ignoreCase = true)
     return when {
-        zh && count >= 100_000_000L -> String.format("%.1f亿", count / 100_000_000.0)
-        zh && count >= 10_000L -> String.format("%.1f万", count / 10_000.0)
-        count >= 1_000_000_000L -> String.format("%.1fB", count / 1_000_000_000.0)
-        count >= 1_000_000L -> String.format("%.1fM", count / 1_000_000.0)
-        count >= 1_000L -> String.format("%.1fK", count / 1_000.0)
+        zh && count >= 100_000_000L -> String.format(java.util.Locale.US, "%.1f亿", count / 100_000_000.0)
+        zh && count >= 10_000L -> String.format(java.util.Locale.US, "%.1f万", count / 10_000.0)
+        count >= 1_000_000_000L -> String.format(java.util.Locale.US, "%.1fB", count / 1_000_000_000.0)
+        count >= 1_000_000L -> String.format(java.util.Locale.US, "%.1fM", count / 1_000_000.0)
+        count >= 1_000L -> String.format(java.util.Locale.US, "%.1fK", count / 1_000.0)
         else -> count.toString()
     }
 }
@@ -296,7 +296,7 @@ internal fun MarketEnergyBar(
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                String.format("%.2f", energy),
+                String.format(java.util.Locale.US, "%.2f", energy),
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.SemiBold,
@@ -382,7 +382,7 @@ internal fun MarketLowEnergyBadge(modifier: Modifier = Modifier) {
  */
 @Composable
 internal fun MarketSuccessRateChip(successRate: Float) {
-    val text = if (successRate > 0f) String.format("%.0f%%", successRate * 100) else "—"
+    val text = if (successRate > 0f) String.format(java.util.Locale.US, "%.0f%%", successRate * 100) else "—"
     val color = when {
         successRate >= 0.9f -> MaterialTheme.colorScheme.primary
         successRate >= 0.5f -> MaterialTheme.colorScheme.tertiary

@@ -131,8 +131,15 @@ class ApexCoreService : LifecycleService() {
             ).apply {
                 description = lang.getString(R.string.core_notif_channel_desc)
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+            val nm = getSystemService(NotificationManager::class.java) ?: run {
+                // 对齐 ApexNotifications.ensureChannels 的 null 安全纪律：
+                // 极端 ROM/instrumentation 下 getSystemService 可返回 null，
+                // 旧实现重接 NPE 会炸掉前台服务 onCreate 链。
+                android.util.Log.w("ApexCoreService", "NotificationManager unavailable; skip channel creation")
+                return
+            }
+            runCatching { nm.createNotificationChannel(channel) }
+                .onFailure { android.util.Log.w("ApexCoreService", "createNotificationChannel failed: ${it.message}") }
         }
     }
 

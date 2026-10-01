@@ -101,6 +101,7 @@ fun TerminalSettingsSheet(
                 }
 
                 // ═══ 1. 终端外观与交互 ═══
+                // v1.4.4 UX 审查 #233：字号上下限统一为 TerminalSettings 常量（T89 上游同款修复）
                 SettingsCard(Icons.Default.Settings, stringResource(R.string.term_appearance)) {
                     LabeledNumber(
                         label = stringResource(R.string.term_font_size),

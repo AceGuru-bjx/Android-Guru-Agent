@@ -216,7 +216,7 @@ private fun CognitiveHealthPanel(state: SkillDetailUiState) {
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        String.format("%.2f", macro.energy),
+                        String.format(java.util.Locale.US, "%.2f", macro.energy),
                         style = MaterialTheme.typography.labelLarge,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold,

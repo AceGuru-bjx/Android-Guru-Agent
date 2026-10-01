@@ -79,6 +79,13 @@ FSM 旁路回放 → 梦境巩固）、Root/Shizuku/无障碍三级权限链、�
 <a href="#faq"><img src="https://img.shields.io/badge/❓_FAQ-6_问答-8B5CF6" alt="FAQ"/></a>
 <a href="#glossary"><img src="https://img.shields.io/badge/🧭_glossary-术语速查-6E7681" alt="Glossary"/></a>
 
+**分享与交流**
+
+<a href="https://twitter.com/intent/tweet?text=%F0%9F%A4%96%20Android%20Guru%20Agent%20%E2%80%94%20%E8%B7%91%E5%9C%A8%E6%89%8B%E6%9C%BA%E4%B8%8A%E7%9A%84%E8%87%AA%E4%B8%BB%E6%99%BA%E8%83%BD%E4%BD%93%EF%BC%88109%20%E5%B7%A5%E5%85%B7%20%C2%B7%20Ubuntu%20%E7%BB%88%E7%AB%AF%20%C2%B7%20cs-mem%20%E8%AE%B0%E5%BF%86%EF%BC%89&url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent"><img src="https://img.shields.io/badge/分享-Twitter-1DA1F2?logo=x&logoColor=white" alt="Share on Twitter"/></a>
+<a href="https://t.me/share/url?url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent&text=%F0%9F%A4%96%20Android%20Guru%20Agent%20%E2%80%94%20%E8%AE%BE%E5%A4%87%E4%B8%8A%E7%9A%84%E8%87%AA%E4%B8%BB%E6%99%BA%E8%83%BD%E4%BD%93"><img src="https://img.shields.io/badge/分享-Telegram-26A5E4?logo=telegram&logoColor=white" alt="Share on Telegram"/></a>
+<a href="https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent&title=Android%20Guru%20Agent%20%E2%80%94%20Autonomous%20AI%20agent%20on-device"><img src="https://img.shields.io/badge/分享-Reddit-FF4500?logo=reddit&logoColor=white" alt="Share on Reddit"/></a>
+<a href="https://github.com/AceGuru-mjh?tab=followers"><img src="https://img.shields.io/github/followers/AceGuru-mjh?label=Follow&style=flat-square&logo=github" alt="Follow"/></a>
+
 </div>
 
 ---
@@ -186,6 +193,7 @@ Root → Shizuku → 沙箱 Shell 自动降级<br/>无 Root 也能执行特权�
 - [📁 仓库结构与代码规模](#structure)
 - [🗺️ 路线图](#roadmap) · [📄 文档索引](#docs-index)
 - [❓ FAQ](#faq) · [🧭 术语速查](#glossary) · [🤝 贡献指南](#contributing)
+- [📊 开发者统计](#dev-stats) · [⭐ Star History](#star-history) · [👥 贡献者](#contributors)
 
 </td>
 </tr>
@@ -1163,6 +1171,46 @@ debug APK 工件（每次构建保留 14 天），零环境开箱体验。
 
 ---
 
+<a id="dev-stats"></a>
+## 📊 开发者统计
+
+<div align="center">
+
+<!-- github-readme-stats：统计卡 + 语言占比（tokyonight 主题与仓库名片一致） -->
+
+<a href="https://github.com/AceGuru-mjh">
+  <img height="165" src="https://github-readme-stats.vercel.app/api?username=AceGuru-mjh&show_icons=true&hide_border=true&theme=tokyonight&include_all_commits=true&count_private=true" alt="GitHub Stats"/>
+</a>
+<a href="https://github.com/AceGuru-mjh">
+  <img height="165" src="https://github-readme-stats.vercel.app/api/top-langs/?username=AceGuru-mjh&layout=compact&hide_border=true&theme=tokyonight&langs_count=8" alt="Top Languages"/>
+</a>
+
+<br/>
+
+<!-- streak-stats：连续贡献热力 -->
+<a href="https://github.com/AceGuru-mjh">
+  <img width="640" src="https://streak-stats.demolab.com?user=AceGuru-mjh&hide_border=true&theme=tokyonight&date_format=%5BY.%5Dn.j" alt="GitHub Streak"/>
+</a>
+
+<br/>
+
+<!-- profile-trophy：成就奖杯 -->
+<a href="https://github.com/ryo-ma/github-profile-trophy">
+  <img width="1000" src="https://github-profile-trophy.vercel.app/?username=AceGuru-mjh&theme=tokyonight&no-frame=true&no-bg=true&margin-w=8&margin-h=8&column=7" alt="GitHub Trophies"/>
+</a>
+
+<br/>
+
+<!-- activity-graph：贡献活动曲线 -->
+<a href="https://github.com/ashutosh00710/github-readme-activity-graph">
+  <img width="920" src="https://github-readme-activity-graph.vercel.app/graph?username=AceGuru-mjh&theme=tokyo-night&hide_border=true&area=true&custom_title=%E8%B4%A1%E7%8C%AE%E6%B4%BB%E5%8A%A8%E6%9B%B2%E7%BA%BF" alt="Contribution Activity Graph"/>
+</a>
+
+</div>
+
+---
+
+<a id="star-history"></a>
 ## ⭐ Star History
 
 <div align="center">
@@ -1176,6 +1224,7 @@ debug APK 工件（每次构建保留 14 天），零环境开箱体验。
 
 ---
 
+<a id="contributors"></a>
 ## 👥 贡献者
 
 <a href="https://github.com/AceGuru-mjh/Android-Guru-Agent/graphs/contributors">

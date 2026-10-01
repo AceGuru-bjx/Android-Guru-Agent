@@ -30,6 +30,11 @@ data class ParsedCommand(
 
 object CommandParser {
 
+    // 命令解析热路径：Agent 每条终端命令 + 用户交互输入都会走 parse/checkSegments，
+    // 每次重新 Pattern.compile 空白正则 → 提为常量复用（同文件 DefaultCommandPolicy 亦引用）。
+    internal val WHITESPACE = Regex("\\s+")
+    internal val ENV_ASSIGNMENT_PREFIX = Regex("^[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+")
+
     // T85：`\u0024\u0028` = "$("（命令替换）—— 与其余操作符共同构成分段边界。
     internal val shellOperators = listOf("&&", "||", ";", "|", ">", ">>", "<", "&", "`", "\u0024\u0028", "(")
     // T85：扩展 shell 包装器集合 —— deep-scan（全 token 扫描）候选。
@@ -61,7 +66,7 @@ object CommandParser {
         }
 
         // Tokenize by whitespace (quote-aware for the FIRST token; complex quoting → complex)
-        val tokens = trimmed.split(Regex("\\s+"))
+        val tokens = trimmed.split(WHITESPACE)
         if (tokens.isEmpty()) return ParsedCommand(null, emptyList(), raw, isComplex = true)
 
         val first = extractFirstToken(trimmed)
@@ -351,7 +356,7 @@ data class CommandPolicy(
 
     /** 剥离一个前导 `VAR=value ` 前缀；无则返回 null。 */
     private fun envAssignmentPrefix(s: String): String? {
-        val m = Regex("^[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+").find(s) ?: return null
+        val m = CommandParser.ENV_ASSIGNMENT_PREFIX.find(s) ?: return null
         return s.substring(m.value.length)
     }
 
@@ -378,6 +383,6 @@ data class CommandPolicy(
             }
             i++
         }
-        return cleaned.toString().split(Regex("\\s+")).filter { it.isNotBlank() }
+        return cleaned.toString().split(CommandParser.WHITESPACE).filter { it.isNotBlank() }
     }
 }

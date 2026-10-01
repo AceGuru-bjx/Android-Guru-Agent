@@ -1028,5 +1028,12 @@ private fun formatDuration(ms: Long): String {
     }
 }
 
-private fun formatDate(epochMs: Long): String =
-    SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(epochMs))
+// v1.4.4 UX 审查：SimpleDateFormat 提升为复用实例（旧实现 formatDate 每条记录
+// 调用 new 一个；对齐 LogViewerScreen 既有模式）
+private val longTaskDateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+
+private fun formatDate(epochMs: Long): String {
+    synchronized(longTaskDateFormat) {
+        return longTaskDateFormat.format(Date(epochMs))
+    }
+}

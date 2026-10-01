@@ -55,8 +55,16 @@ class FileReadTool(
         }
     """.trimIndent()
 
-    // 记住每个文件的当前视口位置（用于scroll）
-    private val viewportCache = mutableMapOf<String, Int>()
+    // 记住每个文件的当前视口位置（用于scroll）。
+    // 工具以单例注册且 BatchExecutionEngine 会并行调用：ConcurrentHashMap 防止
+    // 并发读写导致丢更新 / ConcurrentModificationException（UX 审查 #231）。
+    // 另外限制容量，避免长会话中缓存随访问文件数无界增长。
+    private val viewportCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun rememberViewport(path: String, line: Int) {
+        if (viewportCache.size >= VIEWPORT_CACHE_MAX) viewportCache.clear()
+        viewportCache[path] = line
+    }
 
     override suspend fun execute(arguments: String): String {
         return try {
@@ -76,6 +84,13 @@ class FileReadTool(
             if (!file.exists()) return "Error: File not found: $path"
             if (!file.canRead()) return "Error: Permission denied: $path"
             if (file.isDirectory) return "Error: '$path' is a directory. Use list_files."
+
+            // Size cap 前置：对任何分支（含 PDF/DOCX 文档提取）都生效。
+            // 旧序守卫在 documentLines 之后，文档分支全量读入可把进程 OOM（UX 审查 #232）。
+            if (file.length() > MAX_FILE_BYTES) {
+                return "Error: file too large (${file.length()} bytes, max ${MAX_FILE_BYTES} bytes). " +
+                    "Use offset/limit or shell_execute with grep/sed/tail."
+            }
 
             // ── PDF / DOCX 文档：先文本提取再走视口模式 ──
             // 旧实现把 PDF 当二进制拒读（"Binary file"），用户以为「AI 能读 PDF」
@@ -104,7 +119,7 @@ class FileReadTool(
                     return "📄 ${file.name}（提取文本 $total 行）— offset $startLine 超出末尾。"
                 }
                 val endLine = minOf(startLine + limit, total)
-                viewportCache[path] = startLine
+                rememberViewport(path, startLine)
                 return buildString {
                     appendLine("📄 ${file.name}（${formatSize(file.length())}，提取文本 $total 行）")
                     note?.let { appendLine("⚠ $it") }
@@ -128,10 +143,7 @@ class FileReadTool(
             if (isBinary(file)) return "Binary file (${formatSize(file.length())}). Use shell_execute for inspection."
 
             // Size cap: a multi-GB logcat dump would otherwise OOM the agent on readLines().
-            if (file.length() > MAX_FILE_BYTES) {
-                return "Error: file too large (${file.length()} bytes, max ${MAX_FILE_BYTES} bytes). " +
-                    "Use offset/limit or shell_execute with grep/sed/tail."
-            }
+            // （文档分支已在入口处前置检查，此处保留普通文本分支的兑底防御）
 
             val lines = file.readLines()
             val total = lines.size
@@ -155,7 +167,7 @@ class FileReadTool(
             val visibleLines = lines.subList(startLine, endLine)
 
             // 更新视口缓存
-            viewportCache[path] = startLine
+            rememberViewport(path, startLine)
 
             // 构建输出
             buildString {
@@ -239,5 +251,8 @@ class FileReadTool(
         // 16 MB cap: prevents a multi-GB logcat dump / dataset from OOM-killing the
         // agent when readLines() materializes the whole file as a List<String>.
         private const val MAX_FILE_BYTES = 16L * 1024 * 1024
+
+        // 视口缓存容量上限：超出即整体重置（旧条目的滚动位置早已过时，重置无副作用）
+        private const val VIEWPORT_CACHE_MAX = 256
     }
 }

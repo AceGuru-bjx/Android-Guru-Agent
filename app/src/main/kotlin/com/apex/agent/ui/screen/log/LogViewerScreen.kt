@@ -43,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,6 +79,9 @@ import kotlinx.coroutines.withContext
 fun LogViewerScreen() {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    // v1.4.4 UX 审查：「复制全部」拼接移出主线程 —— 日志环形缓冲可达数 MB，
+    // 旧实现 onClick 里主线程 O(n) joinToString 明显掉帧（导出按钮已修同款，此处漏改）。
+    val copyScope = rememberCoroutineScope()
     // i18n：导出分享 chooser 标题（onClick 内不可调用 stringResource，上提取词）
     val exportLogsTitle = stringResource(R.string.log_export_chooser)
 
@@ -144,7 +148,14 @@ fun LogViewerScreen() {
         ) {
             FilledTonalButton(
                 // 修复性能：导出串点击时才构建（原 remember(records) 每 250ms 快照追加即全量 joinToString，主线程 O(n)）
-                onClick = { clipboard.setText(AnnotatedString(records.joinToString("\n") { it.toFlatString() })) },
+                onClick = {
+                    copyScope.launch {
+                        val text = withContext(Dispatchers.IO) {
+                            records.joinToString("\n") { it.toFlatString() }
+                        }
+                        clipboard.setText(AnnotatedString(text))
+                    }
+                },
                 contentPadding = ButtonDefaults.ButtonWithIconContentPadding
             ) {
                 Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.width(16.dp))

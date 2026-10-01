@@ -80,7 +80,7 @@ class McpHostServer(
         /** 支持的 MCP 协议版本（spec 2024-11-05 —— streamable HTTP 引入版）。 */
         const val PROTOCOL_VERSION = "2024-11-05"
         const val SERVER_NAME = "android-guru-agent"
-        const val SERVER_VERSION = "1.4.0"
+        const val SERVER_VERSION = "1.4.4"
         const val ENDPOINT_PATH = "/mcp"
 
         /** 请求体上限（MCP 消息含大 schema 也远小于此）。 */

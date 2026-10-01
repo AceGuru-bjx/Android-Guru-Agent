@@ -26,6 +26,21 @@ class FileGlobTool(
     private val basePath: File
 ) : AgentTool {
 
+    private companion object {
+        // SimpleDateFormat 非线程安全；本工具以单例注册，BatchExecutionEngine 会并行调用，
+        // 故将格式化收敛到同步块内，避免并发 format 抛 ArrayIndexOutOfBoundsException（UX 审查 #231）
+        private val LOCK = Any()
+        private var sharedFormat: SimpleDateFormat? = null
+
+        fun formatTimestamp(epochMs: Long): String {
+            synchronized(LOCK) {
+                val fmt = sharedFormat ?: SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                    .also { sharedFormat = it }
+                return fmt.format(Date(epochMs))
+            }
+        }
+    }
+
     override val id = "glob_files"
     override val name = "Find Files"
     override val description = """
@@ -56,8 +71,6 @@ class FileGlobTool(
     """.trimIndent()
 
     private val skipDirs = setOf(".git", "node_modules", "__pycache__", ".gradle", "build", ".idea")
-
-    private val dateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
     override suspend fun execute(arguments: String): String {
         return try {
@@ -121,7 +134,7 @@ class FileGlobTool(
                 shown.forEach { f ->
                     val rel = f.relativeTo(dir).path
                     val size = formatSize(f.length())
-                    val modified = dateFormat.format(Date(f.lastModified()))
+                    val modified = formatTimestamp(f.lastModified())
                     appendLine("  ${rel.padEnd(45)} ${size.padStart(8)}  $modified")
                 }
 

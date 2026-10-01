@@ -39,9 +39,6 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * 市场（v3 顶栏双视图重构）
@@ -263,8 +260,7 @@ private fun McpStartupProgressDialog(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
-                                    .format(Date(event.timestampMs)),
+                                text = formatEventTime(event.timestampMs),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline
                             )
@@ -317,3 +313,13 @@ private fun stageLabel(stage: com.apex.agent.core.tools.mcp.McpStartupStage): St
             com.apex.agent.core.tools.mcp.McpStartupStage.FAILED -> R.string.market_mcp_stage_failed
         }
     )
+
+// v1.4.4 UX 审查：SimpleDateFormat 提升为复用实例（旧实现位于 items 循环体内，
+// 每行每次重组都 new 一个；对齐 LogViewerScreen 的既有模式）
+private val marketEventTimeFormat = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+
+private fun formatEventTime(ts: Long): String {
+    synchronized(marketEventTimeFormat) {
+        return marketEventTimeFormat.format(java.util.Date(ts))
+    }
+}

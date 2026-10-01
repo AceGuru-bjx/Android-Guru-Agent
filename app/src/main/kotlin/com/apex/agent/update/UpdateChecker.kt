@@ -77,7 +77,7 @@ class UpdateChecker(
      * 其余出 universal（全 3 ABI）；清单缺字段时逐级回退到发布页。
      */
     fun preferredDownloadUrl(manifest: UpdateManifest): String? {
-        val download = manifest.download ?: return manifest.releasePage
+        // v1.4.4 UX 审查：删除死赋值 download（`?:` 早返回后从未被读取）
         return preferredAsset(manifest)?.url ?: manifest.releasePage
     }
 
