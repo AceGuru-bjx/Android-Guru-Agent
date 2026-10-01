@@ -350,4 +350,5 @@
     <string name="chat_session_import_failed">Import failed (invalid file or no messages)</string>
     <string name="chat_session_imported">Session imported</string>
     <string name="chat_share_received">Shared content received — review before sending</string>
+    <string name="chat_slash_mcp_none_running">No running MCP servers — install &amp; start them in Market → MCP</string>
 </resources>

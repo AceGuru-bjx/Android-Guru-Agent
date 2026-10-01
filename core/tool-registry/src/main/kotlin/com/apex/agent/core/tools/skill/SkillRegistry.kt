@@ -381,6 +381,45 @@ class SkillRegistry(
     }
 
     /**
+     * 内置瘦身迁移：清掉「曾经内置、现已从 assets 移除」的技能。
+     *
+     * 背景（Hub 生态重构）：APK 内置技能从 75 收敛到 13 个核心，其余迁往
+     * 官方技能仓库（apex-skill-hub）。升级用户设备上残留的旧内置技能
+     * bundled=true、不可卸载，会永久卡在已安装列表——本方法按 assets 白名单
+     * 反向清理：
+     * - 只动 `bundled == true` 的条目（社区/仓库安装的永不触碰）；
+     * - id 不在 [bundledIds]（当前 assets 清单）里的内置技能被卸载
+     *   （绕过 [uninstall] 的 bundled 防线——那道防线防的是用户手动卸载后
+     *   被下次启动复活，本方法是同一个释放管线的另一半，语义互补）；
+     * - 同时清理 `.disabled` sidecar 里的残留 id 与 `<id>/` 资源目录。
+     *
+     * @param bundledIds 当前 APK assets/skills/ 里仍然打包的技能 id 集合
+     * @return 本次清理掉的技能数
+     */
+    fun pruneStaleBundled(bundledIds: Set<String>): Int {
+        val stale = synchronized(lock) {
+            installedSkills.values
+                .filter { it.manifest.bundled && it.manifest.id !in bundledIds }
+                .map { it.manifest.id }
+        }
+        for (id in stale) {
+            synchronized(lock) {
+                installedSkills.remove(id)
+                disabledIds.remove(id)
+                persistDisabledIds()
+                runCatching { File(skillsDir, "$id.json").delete() }
+                runCatching { File(skillsDir, id).deleteRecursively() }
+            }
+            logger.log(
+                SkillHotReloadLogLevel.INFO,
+                "内置瘦身：技能 '$id' 已从 assets 移除（迁往官方仓库），本地清理完成"
+            )
+        }
+        if (stale.isNotEmpty()) notifyChanged()
+        return stale.size
+    }
+
+    /**
      * 朴素 semver 比较（major.minor.patch 逐段数值比较；缺段按 0、非数字段按 0）。
      * Issue #166 内置技能升级判定专用——资产版本由本仓库统一管理，无需完整 SemVer
      * 语义（预发布/构建元数据按 0 段处理，误判后果仅是跳过或延后一次升级，无害）。

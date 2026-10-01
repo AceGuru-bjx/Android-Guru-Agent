@@ -115,19 +115,22 @@ class SlashMenuProvider @Inject constructor(
         )
     }
 
-    // ── Skills：复用已有的 SkillMenuProvider，保持「已启用优先、未安装后置」的排序 ──
+    // ── Skills：只展示「已安装且已启用」的技能 ──
+    // Hub 生态门控（产品要求）：斜杠菜单的 skills 分组 = 市场安装 + 开启，
+    // 二者缺一不可——未安装的目录条目不出现（去市场装），装了没开的也不出现
+    // （去市场/已安装页开）。旧版还并列 5 个 legacy 内置模板（未安装也展示、
+    // 状态 NOT_INSTALLED），现在全部移除——模板安装走市场页，菜单只留真货。
     // #197：逐项携带工位作用域（manifest.scope；缺省 all）——消费方按屏过滤。
     private fun buildSkillsCategory(): SlashMenuCategory {
         val active = skills.getActiveSkills()
-        val templates = skills.getBuiltinTemplates()
         val scopeById = skillRegistry.getInstalled()
             .associate { it.manifest.id to it.manifest.scope }
-        val items = (active + templates).map { skill ->
+        val items = active.map { skill ->
             SlashMenuItem(
                 label = skill.label,
                 command = skill.command,
                 description = skill.description,
-                status = if (skill.installed) SlashItemStatus.READY else SlashItemStatus.NOT_INSTALLED,
+                status = SlashItemStatus.READY,
                 scope = scopeById[skill.id] ?: "all"
             )
         }
@@ -141,34 +144,34 @@ class SlashMenuProvider @Inject constructor(
         )
     }
 
-    // ── MCP：只展示「已启用」的配置，区分「已连接」与「离线」 ──
+    // ── MCP：只展示「已安装且正在运行（已连接）」的服务器 ──
+    // Hub 生态门控（产品要求）：本地 MCP 需要启动才能用——未安装/未启动的
+    // 不出现在斜杠菜单（去市场 MCP 页安装并启动）。禁用条目天然不连，无需
+    // 单独排除。菜单随 mcpManager.changes 自动重建（connect/disconnect 均
+    // 发射变更），启动完成后条目即时出现。
     // #197：逐项携带工位作用域（config.scope）——Agent 屏/Coding 屏各自过滤。
     private fun buildMcpCategory(): SlashMenuCategory {
         val connected = mcpManager.getConnectedServers().toSet()
-        val configs = mcpManager.getEnabledConfigs()
-        val items = configs.map { cfg ->
-            val isConnected = cfg.name in connected
+        val running = mcpManager.getEnabledConfigs().filter { it.name in connected }
+        val items = running.map { cfg ->
             SlashMenuItem(
                 label = cfg.name,
                 command = "/mcp:${cfg.name} ",
-                description = cfg.url,
-                status = if (isConnected) SlashItemStatus.CONNECTED else SlashItemStatus.OFFLINE,
+                description = cfg.url.ifBlank { cfg.endpointSummary() },
+                status = SlashItemStatus.CONNECTED,
                 scope = cfg.scope
             )
         }
-        val connectedCount = items.count { it.status == SlashItemStatus.CONNECTED }
         return SlashMenuCategory(
             id = "mcp",
             title = languageManager.getString(R.string.chat_slash_mcp_servers),
             icon = Icons.Default.Api,
             items = items,
-            badge = if (connectedCount > 0)
-                String.format(
-                    languageManager.getString(R.string.chat_slash_mcp_connected),
-                    connectedCount
-                )
-            else null,
-            hint = if (items.isEmpty()) languageManager.getString(R.string.chat_slash_mcp_empty) else null
+            badge = if (items.isNotEmpty()) String.format(
+                languageManager.getString(R.string.chat_slash_mcp_connected),
+                items.size
+            ) else null,
+            hint = if (items.isEmpty()) languageManager.getString(R.string.chat_slash_mcp_none_running) else null
         )
     }
 

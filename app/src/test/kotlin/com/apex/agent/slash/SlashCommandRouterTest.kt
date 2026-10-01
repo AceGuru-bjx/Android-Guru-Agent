@@ -155,19 +155,36 @@ class SlashCommandRouterTest {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // /mcp:<other> — generic fallback (no regression)
+    // /mcp:<other> — generic routing (connected) + running-gate (Hub 生态门控)
     // ═══════════════════════════════════════════════════════════
 
     @Test
-    fun `mcp with non-github id uses generic mcp routing regardless of context`() {
+    fun `mcp with non-github id uses generic mcp routing when connected`() {
         val cmd = SlashCommand.Mcp(id = "postgres")
-        val route = SlashCommandRouter.route(cmd, SlashRouteContext(githubConnected = true))
+        val route = SlashCommandRouter.route(
+            cmd,
+            SlashRouteContext(githubConnected = true, mcpConnected = setOf("postgres"))
+        )
 
         assertFalse(route.requestGithubConnect)
         assertEquals("🔌 连接 MCP: postgres", route.systemMessage)
         assertTrue(route.agentPrompt.contains("/mcp:postgres"))
         // Must NOT leak github tool ids into a postgres prompt.
         assertFalse(route.agentPrompt.contains("github_"))
+    }
+
+    @Test
+    fun `mcp with non-github id not running is blocked with guidance not hollow prompt`() {
+        // Hub 生态门控：未安装/未启动的 MCP 不可经斜杠使用——路由器拦截
+        // （agentPrompt 置空，systemMessage 引导去市场启动），不再发
+        // 「指令存在，能力待接线」的空转骨架提示词。
+        val cmd = SlashCommand.Mcp(id = "postgres")
+        val route = SlashCommandRouter.route(cmd, SlashRouteContext.Empty)
+
+        assertFalse(route.requestGithubConnect)
+        assertEquals("", route.agentPrompt)
+        assertTrue(route.systemMessage.contains("postgres"))
+        assertTrue(route.systemMessage.contains("市场"))
     }
 
     // ═══════════════════════════════════════════════════════════

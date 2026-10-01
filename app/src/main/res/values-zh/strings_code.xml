@@ -197,4 +197,14 @@
     <string name="code_stream_detail_output_title">工具输出</string>
     <string name="code_stream_run_streaming">运行中 · 胶囊时间轴</string>
     <string name="code_stream_run_idle">描述一个编码任务，开启胶囊时间轴</string>
+    <!-- ═══ 思考档位选择器 v2：短档名 + 胶囊标签 ═══ -->
+    <string name="code_thinking_chip">思考 · %1$s</string>
+    <string name="code_thinking_short_none">无</string>
+    <string name="code_thinking_short_light">极简</string>
+    <string name="code_thinking_short_standard">标准</string>
+    <string name="code_thinking_short_deep">深度</string>
+    <string name="code_thinking_short_maximum">极致</string>
+    <string name="code_thinking_short_ultracode">超频</string>
+    <string name="code_thinking_short_apexcode">顶点</string>
+    <string name="code_thinking_short_auto">自适应</string>
 </resources>
