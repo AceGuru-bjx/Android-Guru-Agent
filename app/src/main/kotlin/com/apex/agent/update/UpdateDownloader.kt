@@ -112,6 +112,12 @@ class UpdateDownloader(private val context: Context) {
         "ApexAgent/$fileName"
     )
 
+    /** 公共下载工作目录（Download/ApexAgent）—— 就绪产物扫描/清理的入口。 */
+    fun workDirectory(): File = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        "ApexAgent"
+    ).apply { mkdirs() }
+
     /** SHA-256 校验：清单不带指纹（旧 schema / 内部构建）时跳过并放行。 */
     fun verifySha256(file: File, expected: String?): Boolean {
         if (expected.isNullOrBlank()) return true

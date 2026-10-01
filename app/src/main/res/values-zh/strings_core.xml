@@ -264,6 +264,9 @@
     <string name="settings_about_update_patch_done_title">补丁已就绪</string>
     <string name="settings_about_update_patch_done_saved">保存位置：%1$s</string>
     <string name="settings_about_update_apk_done_title">安装包已就绪</string>
+    <string name="settings_about_update_apk_done_body">v%1$s 已下载并通过校验（%2$s）。点击「立即安装」后，系统将弹出安装确认</string>
+    <string name="settings_about_update_install_failed_title">无法拉起安装器</string>
+    <string name="settings_about_update_install_failed">安装器未能拉起。安装包已保存至 %1$s，可从文件管理器手动安装</string>
     <string name="settings_about_update_close">关闭</string>
 
     <!-- ViewModel 用户可见消息（SettingsViewModel，经 LanguageManager 取词） -->
@@ -521,13 +524,13 @@
     <string name="about_update_new_badge">新版本</string>
     <string name="about_update_progress_mb">下载中 %1$d%% · 已下载 %2$s</string>
     <string name="about_update_patch_recommended">增量更新 · 推荐</string>
-    <string name="about_update_patch_auto_note">补丁自动应用：新版本 APK 在应用内合成并直接拉起安装，全程无需命令行</string>
+    <string name="about_update_patch_auto_note">补丁在应用内自动合成，完成后弹出「立即安装」确认框，点击即装；跨多版本自动链式应用，全程无需命令行</string>
     <string name="about_update_patch_chain_hint">v%1$s → v%2$s · %3$d 个补丁 · 比完整包小 %4$d%%</string>
     <string name="about_update_patch_chain_button">增量更新（%1$s · %2$d 个补丁）</string>
     <string name="about_update_patch_downloading">正在下载补丁 %1$d/%2$d… %3$d%%</string>
     <string name="about_update_patch_applying">正在合成新版本 APK… 补丁 %1$d/%2$d · %3$d%%</string>
     <string name="about_update_patch_done_title">增量更新完成</string>
-    <string name="about_update_patch_done_body">新版本 APK 已合成并通过校验，安装器已拉起；若未自动弹出，可打开下方文件手动安装</string>
+    <string name="about_update_patch_done_body">系统安装器已拉起，请在系统弹窗中点击「安装」完成更新；若未弹出，可打开下方文件手动安装</string>
     <string name="about_update_patch_failed_title">增量更新失败</string>
     <string name="about_update_patch_failed_space">存储空间不足（约需 %1$s）。请清理空间或改用全量包</string>
     <string name="about_update_patch_failed_download">补丁下载中断。请重试，或改用全量包</string>
@@ -536,6 +539,13 @@
     <string name="about_update_patch_failed_installer">安装器未能拉起。APK 已保存至 %1$s</string>
     <string name="about_update_patch_retry">重试增量更新</string>
     <string name="about_update_patch_use_full">改用全量包</string>
+    <string name="about_update_install_ready_title">更新包已就绪</string>
+    <string name="about_update_install_ready_body">新版本 v%1$s 已合成并通过校验（%2$s）。点击「立即安装」后，系统将弹出安装确认</string>
+    <string name="about_update_install_now">立即安装</string>
+    <string name="about_update_install_later">稍后安装</string>
+    <string name="about_update_install_ready_entry">安装已就绪的 v%1$s 更新包（%2$s）</string>
+    <string name="about_update_install_full_entry">安装已下载的完整包（%1$s）</string>
+    <string name="about_update_installer_launched_toast">已拉起安装器，请在系统弹窗中点击「安装」</string>
     <string name="about_feature_agent_title">Agent 对话</string>
     <string name="about_feature_agent_desc">全能 AI 助手：多档思考、工具调用与技能生态</string>
     <string name="about_feature_coding_title">Coding 模式</string>

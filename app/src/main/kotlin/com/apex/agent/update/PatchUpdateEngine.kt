@@ -26,8 +26,10 @@ import java.io.File
  *   2×APK + 补丁体积（开始前做剩余空间预检，不足则劝导全量/清理）；
  * - **双保险校验**：解码器逐窗 Adler32 + 终局 SHA-256 对账 version.json
  *   的 download 指纹（arm64/universal 与补丁链变体严格对应）；
- * - **自动安装**：合成产物落到公共 `Download/ApexAgent/`（FileProvider
- *   授权 URI），直接拉起系统安装器；
+ * - **就绪即停**：合成产物落到公共 `Download/ApexAgent/`（FileProvider
+ *   授权 URI），**不直接拉起安装器** —— 先上报 [State.Ready]，由 UI 弹
+ *   「立即安装」确认框（用户主导安装时机），点击后经 [launchInstaller]
+ *   拉起系统安装器；
  * - **自清理**：开工先清上次残留（含旧命令行方案遗留的 .vcdiff），成功
  *   后清全部补丁与中间产物，只留最终 APK 供安装器读取。
  *
@@ -57,7 +59,10 @@ class PatchUpdateEngine(
         /** 合成阶段：第 step/steps 段补丁应用至 percent%。 */
         data class Applying(val step: Int, val steps: Int, val percent: Int) : State
 
-        /** 终局 SHA-256 通过且安装器已拉起。 */
+        /** 合成完成且终局 SHA-256 通过 —— 等待用户在 UI 点「立即安装」。 */
+        data class Ready(val apk: File, val sizeBytes: Long) : State
+
+        /** 安装器已拉起（[launchInstaller] 成功）。 */
         data class Installed(val apk: File) : State
 
         /** 任一环节失败。 */
@@ -109,6 +114,28 @@ class PatchUpdateEngine(
         job?.cancel()
         job = null
         runCatching { cleanStaleIntermediates(keepPatches = true) }
+    }
+
+    /**
+     * 拉起系统安装器安装就绪产物（UI「立即安装」按钮的落地动作）。
+     *
+     * 与流水线解耦：[State.Ready] 之后用户可能「稍后安装」（甚至离开页面
+     * 再回来）—— 本方法不依赖 engine 协程，可随时对已就绪 APK 重发。
+     *
+     * @param apk [State.Ready.apk] 携带的合成产物
+     * @param listener 结果回调（[State.Installed] / [State.Failed]）
+     */
+    fun launchInstaller(apk: File, listener: StateListener) {
+        val launched = runCatching { downloader.installApk(apk) }.getOrDefault(false)
+        if (launched) {
+            AppLogger.instance.info(
+                LogCategory.SYSTEM, "PatchUpdateEngine",
+                "安装器已拉起：${apk.name}"
+            )
+            listener.onStateChanged(State.Installed(apk))
+        } else {
+            listener.onStateChanged(State.Failed(FailKind.INSTALLER, apk.absolutePath))
+        }
     }
 
     // ── 流水线主体 ───────────────────────────────────────────────────────
@@ -214,32 +241,28 @@ class PatchUpdateEngine(
                 if (!chainSucceeded) runCatching { finalApkFile(manifest).delete() }
             }
 
-            // ── 阶段三：终局 SHA-256 对账 + 拉起安装器 ─────────────────────
+            // ── 阶段三：终局 SHA-256 对账 → 就绪（安装时机交给用户）──────────
             val finalApk = finalApkFile(manifest)
             if (!downloader.verifySha256(finalApk, expectedSha)) {
                 runCatching { finalApk.delete() }
                 listener.onStateChanged(State.Failed(FailKind.VERIFY, "final APK"))
                 return
             }
-            val launched = downloader.installApk(finalApk)
             runCatching { patchFiles.forEach { it.delete() } }
-            if (launched) {
-                AppLogger.instance.info(
-                    LogCategory.SYSTEM, "PatchUpdateEngine",
-                    "增量更新合成完成：${finalApk.name}（${patchFiles.size} 段补丁）"
-                )
-                listener.onStateChanged(State.Installed(finalApk))
-            } else {
-                listener.onStateChanged(
-                    State.Failed(FailKind.INSTALLER, finalApk.absolutePath)
-                )
-            }
+            AppLogger.instance.info(
+                LogCategory.SYSTEM, "PatchUpdateEngine",
+                "增量更新合成完成：${finalApk.name}（${patchFiles.size} 段补丁，等待用户安装）"
+            )
+            listener.onStateChanged(
+                State.Ready(finalApk, expectedAsset?.sizeBytes ?: finalApk.length())
+            )
         } catch (e: Exception) {
             AppLogger.instance.warn(
                 LogCategory.SYSTEM, "PatchUpdateEngine",
                 "增量更新失败：${e.message}"
             )
             val kind = when (e) {
+                is FlowException -> e.kind
                 is VcdiffDecoder.VcdiffFormatException -> FailKind.DECODE
                 else -> FailKind.DECODE
             }
@@ -256,7 +279,8 @@ class PatchUpdateEngine(
             val status = downloader.statusOf(id)
             if (status == DownloadManager.STATUS_SUCCESSFUL) return
             if (status == DownloadManager.STATUS_FAILED) {
-                throw VcdiffDecoder.VcdiffFormatException("download failed")
+                // 独立异常类型：下载中断 ≠ 解码失败，UI 文案需分开本地化
+                throw FlowException(FailKind.DOWNLOAD, "download id=$id failed")
             }
             val (percent, bytes) = downloader.progress(id)
             onTick(percent, bytes)
@@ -267,6 +291,12 @@ class PatchUpdateEngine(
     /** 最终合成 APK 的落点名（FileProvider 可授权安装）。 */
     private fun finalApkFile(manifest: UpdateManifest): File =
         File(workDir, "ApexAgent-v${manifest.versionName}-patched.apk")
+
+    /**
+     * 就绪合成产物的预期落点（UI 重入口扫描用 —— 与流水线内 [finalApkFile]
+     * 同源同名；存在与否、指纹是否对账由调用方复核）。
+     */
+    fun readyApkFor(manifest: UpdateManifest): File = finalApkFile(manifest)
 
     /** 按补丁链变体取全量资产指纹（arm64 链对账 arm64 包）。 */
     private fun assetForVariant(
@@ -295,4 +325,10 @@ class PatchUpdateEngine(
     private companion object {
         const val POLL_INTERVAL_MS = 600L
     }
+
+    /** 流水线内部异常 —— 携带失败类别直达 catch 分型（不混入解码异常）。 */
+    private class FlowException(
+        val kind: FailKind,
+        detail: String?
+    ) : Exception(detail)
 }

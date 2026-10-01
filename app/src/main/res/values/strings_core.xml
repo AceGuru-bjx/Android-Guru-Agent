@@ -264,6 +264,9 @@
     <string name="settings_about_update_patch_done_title">Patch ready</string>
     <string name="settings_about_update_patch_done_saved">Saved to: %1$s</string>
     <string name="settings_about_update_apk_done_title">APK ready</string>
+    <string name="settings_about_update_apk_done_body">v%1$s downloaded and verified (%2$s). Tap \"Install now\" — Android will show its own install confirmation</string>
+    <string name="settings_about_update_install_failed_title">Installer unavailable</string>
+    <string name="settings_about_update_install_failed">The installer could not be launched. The package is saved at %1$s — install it from your file manager</string>
     <string name="settings_about_update_close">Close</string>
 
     <!-- ViewModel 用户可见消息（SettingsViewModel，经 LanguageManager 取词） -->
@@ -521,13 +524,13 @@
     <string name="about_update_new_badge">NEW</string>
     <string name="about_update_progress_mb">Downloading… %1$d%% · %2$s downloaded</string>
     <string name="about_update_patch_recommended">Delta update · recommended</string>
-    <string name="about_update_patch_auto_note">Patches are applied automatically — the new APK is synthesized in-app and the installer is launched. No command line needed</string>
+    <string name="about_update_patch_auto_note">Patches are applied in-app; a ready-to-install popup appears when done — tap Install to finish. Cross-version chains supported, no command line</string>
     <string name="about_update_patch_chain_hint">v%1$s → v%2$s · %3$d patch(es) · %4$d%% smaller than full package</string>
     <string name="about_update_patch_chain_button">Delta update (%1$s · %2$d patch(es))</string>
     <string name="about_update_patch_downloading">Downloading patches %1$d/%2$d… %3$d%%</string>
     <string name="about_update_patch_applying">Building new APK… patch %1$d/%2$d · %3$d%%</string>
     <string name="about_update_patch_done_title">Delta update ready</string>
-    <string name="about_update_patch_done_body">The new APK was synthesized and verified, and the installer has been launched. If it did not open, install the file below manually</string>
+    <string name="about_update_patch_done_body">The system installer has launched — tap \"Install\" in the system dialog to finish. If it did not open, install the file below manually</string>
     <string name="about_update_patch_failed_title">Delta update failed</string>
     <string name="about_update_patch_failed_space">Not enough storage space (about %1$s needed). Free up space or use the full package</string>
     <string name="about_update_patch_failed_download">A patch download was interrupted. Please retry, or switch to the full package</string>
@@ -536,6 +539,13 @@
     <string name="about_update_patch_failed_installer">The installer could not be launched. The APK is saved at %1$s</string>
     <string name="about_update_patch_retry">Retry delta update</string>
     <string name="about_update_patch_use_full">Use full package</string>
+    <string name="about_update_install_ready_title">Update package ready</string>
+    <string name="about_update_install_ready_body">v%1$s has been synthesized and verified (%2$s). Tap \"Install now\" — Android will show its own install confirmation</string>
+    <string name="about_update_install_now">Install now</string>
+    <string name="about_update_install_later">Install later</string>
+    <string name="about_update_install_ready_entry">Install the ready v%1$s update (%2$s)</string>
+    <string name="about_update_install_full_entry">Install the downloaded full package (%1$s)</string>
+    <string name="about_update_installer_launched_toast">Installer launched — tap \"Install\" in the system dialog</string>
     <string name="about_feature_agent_title">Agent chat</string>
     <string name="about_feature_agent_desc">All-in-one AI assistant with multi-level thinking, tool calling and skills</string>
     <string name="about_feature_coding_title">Coding mode</string>

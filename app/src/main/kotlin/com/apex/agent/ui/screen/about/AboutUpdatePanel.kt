@@ -107,8 +107,11 @@ private sealed interface UpdateUiState {
 /** 下载完成后的一次性事件（全量包路径；增量路径走 PatchUpdateEngine.State）。 */
 private sealed interface DownloadFinished {
 
-    /** APK 就绪但安装器未能拉起（罕见环境）—— 展示路径让用户手动装。 */
+    /** 全量 APK 下载完成且校验通过 —— 弹「立即安装」确认框。 */
     data class ApkReady(val file: File) : DownloadFinished
+
+    /** 安装器未能拉起（罕见环境）—— 展示路径让用户手动装。 */
+    data class InstallFailed(val file: File) : DownloadFinished
 
     /** SHA-256 校验失败 —— 文件不可用。 */
     data class VerifyFailed(val fileName: String) : DownloadFinished
@@ -137,6 +140,12 @@ internal fun UpdatePanel() {
     var patchIndex by remember { mutableStateOf<PatchIndex.Model?>(null) }
     var patchFlow by remember { mutableStateOf<PatchUpdateEngine.State?>(null) }
 
+    // 就绪产物重入口：「稍后安装」之后（含离开页面再回来）仍可一键安装，
+    // 不必重新下载/合成 —— readyPatch 为引擎合成的增量包，readyFull 为已
+    // 下载的全量包；均在清单就绪后于后台扫描 + 指纹复核。
+    var readyPatch by remember { mutableStateOf<PatchUpdateEngine.State.Ready?>(null) }
+    var readyFull by remember { mutableStateOf<File?>(null) }
+
     // Toast 文案上提到组合层（非 Compose lambda 中使用）
     val enqueueFailedHint = stringResource(R.string.settings_about_update_enqueue_failed)
     val startedHintFmt = stringResource(R.string.settings_about_update_download_started)
@@ -157,7 +166,65 @@ internal fun UpdatePanel() {
     // ── 进入页面自动静默检查一次（v1.4.3：不必再手动点第一次）────────────────
     LaunchedEffect(Unit) { triggerCheck() }
 
-    // ── 下载完成广播：校验 SHA-256 → 全量 APK 拉起安装器 ─────────────────
+    // ── 就绪产物重入口：清单就绪后扫描磁盘（上次「稍后安装」的包仍可直接装）──
+    // 优先级：清掉陈旧合成产物 → 复核增量就绪包 → 复核全量就绪包。
+    // 指纹复核与下载完成的终局校验同源（SHA-256 对账清单），坏文件就地清理。
+    // 已最新（UpToDate）时任何合成产物都是装完的陈旧残留 —— 全清（全量包
+    // 是用户可见下载物，保留不动）；Idle/Checking/Failed 不动磁盘（可能有
+    // 未安装的就绪产物等着复核恢复）。
+    val availableManifest = (updateState as? UpdateUiState.Done)
+        ?.result?.let { it as? UpdateCheckResult.Available }?.latest
+    val checkSettled = updateState is UpdateUiState.Done
+    LaunchedEffect(availableManifest?.versionCode, checkSettled) {
+        val manifest = availableManifest
+        if (manifest == null) {
+            if (checkSettled &&
+                (updateState as UpdateUiState.Done).result is UpdateCheckResult.UpToDate
+            ) {
+                withContext(Dispatchers.IO) {
+                    downloader.workDirectory().listFiles()?.forEach { stale ->
+                        val name = stale.name
+                        if (name.startsWith("ApexAgent-v") && name.endsWith("-patched.apk")) {
+                            runCatching { stale.delete() }
+                        }
+                    }
+                }
+            }
+            return@LaunchedEffect
+        }
+        if (!patchEngine.isRunning) {
+            withContext(Dispatchers.IO) {
+                // 陈旧合成产物（非目标版本的 -patched.apk）——引擎产物而非
+                // DownloadManager 托管文件，引擎空闲时清理安全
+                downloader.workDirectory().listFiles()?.forEach { stale ->
+                    val name = stale.name
+                    if (name.startsWith("ApexAgent-v") && name.endsWith("-patched.apk") &&
+                        name != "ApexAgent-v${manifest.versionName}-patched.apk"
+                    ) runCatching { stale.delete() }
+                }
+            }
+        }
+        val asset = checker.preferredAsset(manifest)
+        val patchFile = patchEngine.readyApkFor(manifest)
+        val patchOk = withContext(Dispatchers.IO) {
+            patchFile.exists() && downloader.verifySha256(patchFile, asset?.sha256)
+        }
+        readyPatch = if (patchOk) {
+            PatchUpdateEngine.State.Ready(patchFile, asset?.sizeBytes ?: patchFile.length())
+        } else {
+            if (patchFile.exists()) {
+                withContext(Dispatchers.IO) { runCatching { patchFile.delete() } }
+            }
+            null
+        }
+        val fullFile = asset?.let { downloader.localFile(it.url.substringAfterLast('/')) }
+        val fullOk = asset != null && fullFile != null && withContext(Dispatchers.IO) {
+            fullFile.exists() && downloader.verifySha256(fullFile, asset.sha256)
+        }
+        readyFull = if (fullOk) fullFile else null
+    }
+
+    // ── 下载完成广播：校验 SHA-256 → 弹「立即安装」确认框 ──────────────
     // （增量补丁链由 PatchUpdateEngine 轮询驱动，不经此广播；activeDownload
     //  仅登记全量包下载，引擎入队的补丁 ID 在此被直接忽略。）
     DisposableEffect(Unit) {
@@ -176,11 +243,9 @@ internal fun UpdatePanel() {
                     }
                     finished = when {
                         file == null || !verified -> DownloadFinished.VerifyFailed(active.fileName)
-                        else -> {
-                            // APK 校验通过直接拉起安装器；拉不起则回退路径提示
-                            if (downloader.installApk(file)) null
-                            else DownloadFinished.ApkReady(file)
-                        }
+                        // 下载完成即弹「立即安装」确认框 —— 不再直接拉起安装器，
+                        // 安装时机由用户主导（与增量路径的就绪弹窗同一交互范式）
+                        else -> DownloadFinished.ApkReady(file)
                     }
                     activeDownload = null
                 }
@@ -241,7 +306,7 @@ internal fun UpdatePanel() {
         }
     }
 
-    // ── 发起增量更新（引擎内全自动：链下载 → 合成 → 校验 → 安装）──────────
+    // ── 发起增量更新（引擎内全自动：链下载 → 合成 → 校验 → 就绪弹安装按钮）──
     fun startPatchFlow(chain: PatchIndex.Chain, manifest: UpdateManifest) {
         if (patchEngine.isRunning) return
         patchFlow = null
@@ -253,7 +318,19 @@ internal fun UpdatePanel() {
             DownloadMirror.DIRECT
         } else selectedMirror
         patchEngine.start(scope, chain, manifest, resolved) { state ->
-            // 引擎在 IO 线程回调 → 组合域（主线程）落状态
+            // 引擎在 IO 线程回调 → 组合域（主线程）落状态；Ready 同时登记
+            // 就绪重入口（「稍后安装」后仍可从动作区一键回弹安装确认框）
+            scope.launch {
+                patchFlow = state
+                if (state is PatchUpdateEngine.State.Ready) readyPatch = state
+            }
+        }
+    }
+
+    // ── 立即安装（就绪产物 → 系统安装器；结果回 patchFlow 状态机）──────────
+    // 与引擎协程解耦：Ready 之后的安装触发不依赖流水线存活，可反复重发。
+    fun installNow(apk: File) {
+        patchEngine.launchInstaller(apk) { state ->
             scope.launch { patchFlow = state }
         }
     }
@@ -459,10 +536,52 @@ internal fun UpdatePanel() {
                             }
 
                             else -> {
-                                // 跨版本补丁链（patches.json 索引 → 链式增量）
-                                val chain = checker.resolvePatchChain(
+                                // 就绪产物优先：上次已合成/已下载但未安装的包，
+                                // 一键直达安装确认框（不重复下载/合成）
+                                val ready = readyPatch
+                                if (ready != null) {
+                                    Button(
+                                        onClick = { patchFlow = ready },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.SystemUpdateAlt,
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            stringResource(
+                                                R.string.about_update_install_ready_entry,
+                                                manifest.versionName,
+                                                formatMb(ready.sizeBytes)
+                                            )
+                                        )
+                                    }
+                                }
+                                readyFull?.let { file ->
+                                    OutlinedButton(
+                                        onClick = { finished = DownloadFinished.ApkReady(file) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Download,
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            stringResource(
+                                                R.string.about_update_install_full_entry,
+                                                formatMb(file.length())
+                                            )
+                                        )
+                                    }
+                                }
+
+                                // 跨版本补丁链（patches.json 索引 → 链式增量）；
+                                // 增量包已就绪时不再重复提供（重跑会重下补丁）
+                                val chain = if (ready == null) checker.resolvePatchChain(
                                     patchIndex, manifest, BuildConfig.VERSION_NAME
-                                )
+                                ) else null
                                 if (chain != null && full != null) {
                                     Surface(
                                         shape = RoundedCornerShape(12.dp),
@@ -542,8 +661,8 @@ internal fun UpdatePanel() {
                                     )
                                 }
 
-                                // 全量安装包（永久兜底路径）
-                                if (full != null) {
+                                // 全量安装包（永久兜底路径；已有就绪/已下载包时不重复提供）
+                                if (full != null && ready == null && readyFull == null) {
                                     OutlinedButton(
                                         onClick = { startDownload() },
                                         modifier = Modifier.fillMaxWidth()
@@ -609,21 +728,85 @@ internal fun UpdatePanel() {
         )
     }
 
-    // ── 下载完成事件对话框（全量包路径）─────────────────────────────────────
+    // ── 下载完成事件对话框（全量包路径：弹「立即安装」按钮）───────────────────
     when (val event = finished) {
-        is DownloadFinished.ApkReady -> AlertDialog(
-            onDismissRequest = { finished = null },
-            title = { Text(stringResource(R.string.settings_about_update_apk_done_title)) },
+        is DownloadFinished.ApkReady -> {
+            // 版本号来自当前清单（下载中重查过/清单过期时退化为通用文案）
+            val manifest = availableManifest
+            val launchedHint = stringResource(R.string.about_update_installer_launched_toast)
+            AlertDialog(
+                onDismissRequest = {
+                    // 点外部关闭与「稍后」同义：登记重入口（动作区一键回弹）
+                    readyFull = event.file
+                    finished = null
+                },
+                title = { Text(stringResource(R.string.settings_about_update_apk_done_title)) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            stringResource(
+                                R.string.settings_about_update_apk_done_body,
+                                manifest?.versionName ?: "",
+                                formatMb(event.file.length())
+                            ),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            stringResource(
+                                R.string.settings_about_update_patch_done_saved,
+                                event.file.absolutePath
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (downloader.installApk(event.file)) {
+                            finished = null
+                            Toast.makeText(context, launchedHint, Toast.LENGTH_SHORT).show()
+                        } else {
+                            finished = DownloadFinished.InstallFailed(event.file)
+                        }
+                    }) {
+                        Text(stringResource(R.string.about_update_install_now))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        // 稍后安装：保留 readyFull 重入口（动作区一键回弹本框）
+                        readyFull = event.file
+                        finished = null
+                    }) {
+                        Text(stringResource(R.string.about_update_install_later))
+                    }
+                }
+            )
+        }
+
+        is DownloadFinished.InstallFailed -> AlertDialog(
+            onDismissRequest = {
+                readyFull = event.file
+                finished = null
+            },
+            title = { Text(stringResource(R.string.settings_about_update_install_failed_title)) },
             text = {
                 Text(
                     stringResource(
-                        R.string.settings_about_update_patch_done_saved, event.file.absolutePath
+                        R.string.settings_about_update_install_failed,
+                        event.file.absolutePath
                     ),
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             },
             confirmButton = {
-                TextButton(onClick = { finished = null }) {
+                TextButton(onClick = {
+                    readyFull = event.file
+                    finished = null
+                }) {
                     Text(stringResource(R.string.settings_about_update_close))
                 }
             }
@@ -651,8 +834,46 @@ internal fun UpdatePanel() {
         null -> Unit
     }
 
-    // ── 增量流水线对话框：完成（安装器已拉起）/ 失败（重试或改全量）──────────
+    // ── 增量流水线对话框：就绪弹安装按钮 / 已拉起安装器 / 失败双路 ──────
     when (val flow = patchFlow) {
+        // 合成完成且指纹对账通过 —— 用户主导安装时机（下载完弹出的安装按钮）
+        is PatchUpdateEngine.State.Ready -> {
+            val manifest = availableManifest
+            AlertDialog(
+                onDismissRequest = { patchFlow = null },
+                title = { Text(stringResource(R.string.about_update_install_ready_title)) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            stringResource(
+                                R.string.about_update_install_ready_body,
+                                manifest?.versionName ?: "",
+                                formatMb(flow.sizeBytes)
+                            ),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            flow.apk.absolutePath,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { installNow(flow.apk) }) {
+                        Text(stringResource(R.string.about_update_install_now))
+                    }
+                },
+                dismissButton = {
+                    // 稍后安装：保留 readyPatch 重入口（动作区一键回弹本框）
+                    TextButton(onClick = { patchFlow = null }) {
+                        Text(stringResource(R.string.about_update_install_later))
+                    }
+                }
+            )
+        }
+
         is PatchUpdateEngine.State.Installed -> AlertDialog(
             onDismissRequest = { patchFlow = null },
             title = { Text(stringResource(R.string.about_update_patch_done_title)) },
