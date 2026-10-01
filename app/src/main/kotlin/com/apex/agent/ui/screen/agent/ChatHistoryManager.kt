@@ -217,7 +217,9 @@ class ChatHistoryManager @Inject constructor(
     /** 归档目录内全部载荷文件（目录不存在/IO 异常折叠为空表）。 */
     private fun archiveJsonFiles(): List<File> =
         runCatching {
-            archiveDir.listFiles { f -> f.isFile && f.name.endsWith(".json") }?.toList()
+            archiveDir.listFiles { f -> f.isFile && f.name.endsWith(".json") }
+                ?.toList()
+                .orEmpty()
         }.getOrDefault(emptyList())
 
     /** 会话 id → 归档文件名（id 本应为 UUID；防御式清洗非法路径字符）。 */
