@@ -523,6 +523,13 @@ class TerminalView @JvmOverloads constructor(
         lastTouchX = event.x
         lastTouchY = event.y
         val sample = toSample(event) ?: return super.onTouchEvent(event)
+        // T90：捏合累子手势结束复位 —— 旧行为残留 1.05..1.24 的累积量带到下一次
+        // 小捏合，凭空触发 ±1sp 步进（「缩放一坨」的直接根源之一）。任何手势
+        // 结束/降指（UP/CANCEL/POINTER_UP）都视为捏合会话终结。
+        when (event.actionMasked) {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP ->
+                pinchScaleAccum = 1f
+        }
         val decisions = gestureModel.feed(sample)
         for (d in decisions) handleGesture(d)
         scheduleGestureTimers()
@@ -705,6 +712,17 @@ class TerminalView @JvmOverloads constructor(
         client?.onTerminalFontSizeChanged(next)
         invalidate()
     }
+
+    /** 当前网格尺寸（rows×cols；未真实布局时 null —— 宿主据此避免把 2×4 的
+     * 占位网格误报给 PTY）。会话切换重握手用（T90：后台创建的会话从未收到
+     * resize，一直以 24×80 悬空 → 80 列行在窄屏右裁 + 短网格浮在长视口里）。 */
+    fun currentGridSize(): TerminalGridSize? {
+        if (width <= 0 || height <= 0 || !isLaidOut) return null
+        return TerminalGridSize(grid.viewRows, grid.viewCols)
+    }
+
+    /** 网格尺寸快照（[currentGridSize] 返回值）。 */
+    data class TerminalGridSize(val rows: Int, val cols: Int)
 
     private fun handleSecondFingerTap(x: Float, y: Float) {
         val snap = snapshot ?: return

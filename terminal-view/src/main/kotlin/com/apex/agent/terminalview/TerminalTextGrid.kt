@@ -11,11 +11,15 @@ import kotlin.math.abs
  * 单测里用纯数字断言（不依赖 Paint/Canvas）。View 只负责把 MotionEvent 坐标
  * 喂进来、把算出的 Rect 交给 Canvas。
  *
- * 坐标系：内容区左上角为原点；行高恒定 [cellHeightPx]（无基线抖动 —— 基线居中
- * 由渲染器用字体度量算一次，与网格几何解耦）。
+ * 坐标系（T90 居中化）：网格容量截断除法（floor）必然产生余量，**余量分摊到
+ * 两侧**（[originX]/[originY]）—— 内容区在视口内水平/垂直居中，文本不再贴左
+ * 沿、滚动条不再压右列。像素换算双约定：
+ *  - 内容→视口（[columnX]/[rowTopY]/[cursorPixelX]）：输出**已加** origin；
+ *  - 视口→内容（[columnAt]/[rowAt]/[hitTestColumn]）：输入**自动减** origin；
+ *  - 纯视口层几何（[scrollbarGeometry]）不受 origin 影响。
  */
 class TerminalTextGrid(
-    /** 单列宽（px，含 [TerminalViewSettings.wideSafetyFactor]）。 */
+    /** 单列宽（px，含 [TerminalViewSettings.wideSafetyFactor] 与 wide 探测下限）。 */
     val cellWidthPx: Float,
     /** 单行高（px = 字号 sp × lineHeightFactor）。 */
     val cellHeightPx: Float,
@@ -26,26 +30,34 @@ class TerminalTextGrid(
     /** 视口可容纳行数（clamp 2..512）。 */
     val viewRows: Int,
     /** 视口可容纳列数（clamp 4..500）。 */
-    val viewCols: Int
+    val viewCols: Int,
+    /** 内容居中水平偏移（px ≥ 0；floor 余量分摊到两侧，T90 对称化）。 */
+    val originX: Float = 0f,
+    /** 内容居中垂直偏移（px ≥ 0）。 */
+    val originY: Float = 0f
 ) {
     init {
         require(viewRows >= 1 && viewCols >= 1) { "grid must have positive capacity" }
+        require(originX.isFinite() && originX >= 0f && originY.isFinite() && originY >= 0f) {
+            "grid origin must be finite non-negative"
+        }
     }
 
-    /** 行号 → 行顶 y（px）。行号是「合并网格」下标（scrollback+屏），允许为负/越界
-     *  由调用方保证；本方法不做 clamp（渲染前已按可视范围过滤）。 */
-    fun rowTopY(row: Int): Float = row * cellHeightPx
+    /** 行号 → 行顶 y（px，视口坐标 —— 已含 [originY]）。行号是「合并网格」下标
+     * （scrollback+屏），允许为负/越界由调用方保证；本方法不做 clamp（渲染前已按
+     * 可视范围过滤）。 */
+    fun rowTopY(row: Int): Float = originY + row * cellHeightPx
 
-    /** 行号 → 行底 y（px）。 */
-    fun rowBottomY(row: Int): Float = (row + 1) * cellHeightPx
+    /** 行号 → 行底 y（px，视口坐标）。 */
+    fun rowBottomY(row: Int): Float = originY + (row + 1) * cellHeightPx
 
     /**
-     * 行内列号 → 像素 x。宽字符（FLAG_WIDE）占 2 列 —— **以渲染列表步进**，
-     * 与旧渲染器 `columnX` 同式；col 超出列表长度后按 1 列步进（VT 列号 >
-     * 渲染列数时的兜底，防越界负偏移）。
+     * 行内列号 → 像素 x（**视口坐标**，已含 [originX]）。宽字符（FLAG_WIDE）占
+     * 2 列 —— **以渲染列表步进**，与旧渲染器 `columnX` 同式；col 超出列表长度后
+     * 按 1 列步进（VT 列号 > 渲染列数时的兜底，防越界负偏移）。
      */
     fun columnX(cells: List<RenderCell>, col: Int): Float {
-        var x = 0f
+        var x = originX
         var i = 0
         var remaining = col
         while (i < cells.size && remaining > 0) {
@@ -61,12 +73,12 @@ class TerminalTextGrid(
     }
 
     /**
-     * 像素 x → 行内列号（VT 列语义：宽字符落点取它自己的起始列）。返回值可能 ==
-     * cells 总列数（点击行尾右侧）。
+     * 像素 x → 行内列号（**视口坐标输入**，内部减 [originX]；VT 列语义：宽字符
+     * 落点取它自己的起始列）。返回值可能 == cells 总列数（点击行尾右侧）。
      */
     fun columnAt(cells: List<RenderCell>, x: Float): Int {
-        if (x <= 0f || cells.isEmpty()) return 0
-        var px = 0f
+        if (x <= originX || cells.isEmpty()) return 0
+        var px = originX
         var i = 0
         while (i < cells.size) {
             val wide = cells[i].flags and RenderCell.FLAG_WIDE != 0
@@ -90,16 +102,16 @@ class TerminalTextGrid(
         return col
     }
 
-    /** 像素 y → 行号（向下取整，clamp 到 [0, maxRow]）。 */
+    /** 像素 y → 行号（视口坐标输入；向下取整，clamp 到 [0, maxRow]）。 */
     fun rowAt(y: Float, maxRow: Int): Int =
-        (y / cellHeightPx).toInt().coerceIn(0, maxRow.coerceAtLeast(0))
+        ((y - originY) / cellHeightPx).toInt().coerceIn(0, maxRow.coerceAtLeast(0))
 
     /** 光标像素 x（行内 VT 列 → 宽字符步进；与旧 `CursorOverlay` 同式）。 */
     fun cursorPixelX(cursorRowCells: List<RenderCell>, cursorCol: Int): Float =
         columnX(cursorRowCells, cursorCol)
 
     /**
-     * 一行的选区矩形（fromCol/toCol 为 VT 列语义，左闭右开）。
+     * 一行的选区矩形（fromCol/toCol 为 VT 列语义，左闭右开；输出视口坐标）。
      *
      * @return (x0, x1) —— x1 ≥ x0；空区间返回 null。
      */
@@ -147,7 +159,9 @@ class TerminalTextGrid(
         /**
          * 由视口像素与字体度量推导网格（View onSizeChanged / 字号变化后调用）。
          *
-         * @param charAdvancePx 单字符 advance（Paint 实测，>0）
+         * 容量截断余量**分摊到两侧**（[originX]/[originY]，T90 对称化）。
+         *
+         * @param charAdvancePx 单字符 advance（Paint 实测，>0；建议已含 wide 探测下限）
          * @param charHeightPx 单行高（字号 × 行高系数，>0）
          */
         fun compute(
@@ -163,13 +177,19 @@ class TerminalTextGrid(
             val cw = safeAdvance * safeFactor
             val rows = if (heightPx > 0) (heightPx / safeHeight).toInt() else 0
             val cols = if (widthPx > 0) (widthPx / cw).toInt() else 0
+            val vRows = rows.coerceIn(MIN_ROWS, MAX_ROWS)
+            val vCols = cols.coerceIn(MIN_COLS, MAX_COLS)
+            val w = if (widthPx > 0) widthPx.toFloat() else cw * MIN_COLS
+            val h = if (heightPx > 0) heightPx else (safeHeight * MIN_ROWS).toInt()
             return TerminalTextGrid(
                 cellWidthPx = cw,
                 cellHeightPx = safeHeight,
-                widthPx = if (widthPx > 0) widthPx.toFloat() else cw * MIN_COLS,
-                heightPx = if (heightPx > 0) heightPx else (safeHeight * MIN_ROWS).toInt(),
-                viewRows = rows.coerceIn(MIN_ROWS, MAX_ROWS),
-                viewCols = cols.coerceIn(MIN_COLS, MAX_COLS)
+                widthPx = w,
+                heightPx = h,
+                viewRows = vRows,
+                viewCols = vCols,
+                originX = ((w - vCols * cw) / 2f).coerceAtLeast(0f),
+                originY = ((h - vRows * safeHeight) / 2f).coerceAtLeast(0f)
             )
         }
 
