@@ -128,12 +128,16 @@ interface McpTransportHandle {
  *   监视器上等待自己那条 —— 标准 MCP stdio 允许**乱序/穿插通知**，必须按 id 匹配；
  * - 不是 JSON 的行（很多 server 会往 stdout 打日志）只跳过、不抛错，
  *   这也是官方 SDK 的兼容做法；
- * - 进程死掉时等待中的请求会立刻返回 null，上层折叠成明确错误而不是挂死。
+ * - 进程死掉时等待中的请求会立刻返回 null，上层折叠成明确错误而不是挂死；
+ * - #205：stderr 由专职线程常流式清空 —— 子进程往 stderr 写满 64KB 管道
+ *   缓冲区会**阻塞自身**（写不进去 = 进程卡死 = 超时假死）；行回调
+ *   [onStderrLine] 把真实 stderr 行透传给启动监听器（时间线可见）。
  */
 class McpStdioTransport internal constructor(
     private val handle: McpProcessHandle,
     private val json: Json = Json { ignoreUnknownKeys = true },
-    private val requestTimeoutMs: Long = 60_000L
+    private val requestTimeoutMs: Long = 60_000L,
+    private val onStderrLine: ((String) -> Unit)? = null
 ) : McpTransportHandle {
 
     private val writer: BufferedWriter =
@@ -157,19 +161,39 @@ class McpStdioTransport internal constructor(
 
     private val pump: Thread = thread(name = "mcp-stdio-pump", isDaemon = true) { pumpLoop() }
 
+    /**
+     * #205 stderr 泄放线程：常驻读到 EOF。两个作用：
+     * 1. 防管道写满死锁（不清空 → 子进程 stderr 写满 64KB 后自身阻塞）；
+     * 2. 行回调把真实 stderr 透传给调用方（启动时间线 / 诊断日志）。
+     */
+    private val stderrPump: Thread = thread(name = "mcp-stderr-drain", isDaemon = true) {
+        val reader = BufferedReader(InputStreamReader(handle.stderr, StandardCharsets.UTF_8))
+        try {
+            while (!closed) {
+                val line = reader.readLine() ?: break
+                if (line.isBlank()) continue
+                runCatching { onStderrLine?.invoke(line) }
+            }
+        } catch (_: Exception) {
+            // 进程销毁时流关闭属正常路径
+        }
+    }
+
     constructor(
         command: List<String>,
         env: Map<String, String> = emptyMap(),
         launcher: McpProcessLauncher = JvmProcessLauncher,
         workingDir: File? = null,
         requestTimeoutMs: Long = 60_000L,
-        onSpawned: ((pid: Long?, argv: List<String>) -> Unit)? = null
+        onSpawned: ((pid: Long?, argv: List<String>) -> Unit)? = null,
+        onStderrLine: ((String) -> Unit)? = null
     ) : this(
         handle = launcher.launch(command, env, workingDir).also { h ->
             // #197 真实 spawn 事件：进程已 fork，pid/argv 来自真实子进程。
             onSpawned?.invoke(h.pid, command)
         },
-        requestTimeoutMs = requestTimeoutMs
+        requestTimeoutMs = requestTimeoutMs,
+        onStderrLine = onStderrLine
     )
 
     override suspend fun send(id: Int?, payload: String): JsonObject? = withContext(Dispatchers.IO) {
@@ -208,6 +232,9 @@ class McpStdioTransport internal constructor(
             monitor.notifyAll()
         }
         runCatching { writer.close() }
+        // #206 说明：两个泵线程阻塞在不可中断的管道 readLine 上，interrupt()
+        // 对它们是无效操作（已删）—— 真正的退出机制是 destroy() 关闭进程管道
+        // → readLine 返回 EOF → 泵线程自然退出；daemon 标记兜底进程退出。
         runCatching { handle.destroy() }
         runCatching { pump.interrupt() }
     }

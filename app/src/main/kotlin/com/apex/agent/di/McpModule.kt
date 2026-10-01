@@ -102,7 +102,10 @@ object McpModule {
                 libprootPath = hostEnvironment.prootBinary.absolutePath,
                 rootfsDir = rootfsBaseDir,
                 isRootfsReady = { File(rootfsBaseDir, "current").exists() }
-            )
+            ),
+            // #205 沙箱就绪探针：与 launcher 门禁同源（current 标记文件）——
+            // ENV_CHECK 事件里如实呈现 rootfs 状态，未装好在拉进程前就可见。
+            sandboxReadinessProbe = { File(rootfsBaseDir, "current").exists() }
         )
         // ★ 预置内置 MCP 配置（幂等，用户自建同名配置不被动劫持）+ 后台
         // 自动连接。@Provides 副作用模式与 AttachmentModule 触发

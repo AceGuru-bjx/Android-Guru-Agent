@@ -127,6 +127,9 @@ class McpClient(
             // Issue #149：宿主未注入沙箱 launcher 时保持原行为（JvmProcessLauncher）。
             // Issue #163：超时经构造参数注入（沙箱连接由 McpManager 放宽）。
             // #197：onSpawned 回调把真实 pid + argv 报给启动监听（仅在其注入时）。
+            // #205：onStderrLine 把真实 stderr 行透传给监听（每连接前
+            // [STDERR_REPORT_CAP] 行，防雪崩式刷屏时间线）。
+            val stderrReported = java.util.concurrent.atomic.AtomicInteger(0)
             McpStdioTransport(
                 command = cmdLine,
                 env = config.env,
@@ -140,7 +143,18 @@ class McpClient(
                             detail = "子进程已启动 pid=${pid ?: "?"} · ${argv.joinToString(" ")}"
                         )
                     )
-                }} else null
+                }} else null,
+                onStderrLine = if (startupListener != null) ({ line ->
+                    if (stderrReported.incrementAndGet() <= STDERR_REPORT_CAP) {
+                        startupListener.onStartupEvent(
+                            McpStartupEvent(
+                                serverName = config.name,
+                                stage = McpStartupStage.STDERR,
+                                detail = line.take(200)
+                            )
+                        )
+                    }
+                }) else null
             )
         }
         McpTransport.HTTP, McpTransport.SSE -> {
@@ -178,8 +192,14 @@ class McpClient(
                 }
             )
 
-            // #197 真实事件：initialize 请求发出（HTTP/SSE 的传输在 send 内
-            // 惰性创建，spawn 事件由各自 createTransport 路径上报）。
+            // #206 修复：传输先建再报「请求已发出」—— 旧实现惰性创建让 SPAWN
+            // 事件（pid/argv）排在 INITIALIZE_SENT 之后，时间线上的阶段顺序与
+            // 真实生命周期（spawn → initialize）相反。这里显式触发一次
+            // transportHandle()：STDIO 真正 fork，BUILTIN 走工厂，都会在
+            // INITIALIZE_SENT 之前发出自己的 SPAWN 事件。
+            transportHandle()
+
+            // #197 真实事件：initialize 请求发出（此时传输已就绪）。
             startupListener?.onStartupEvent(
                 McpStartupEvent(
                     serverName = config.name,
@@ -454,6 +474,12 @@ class McpClient(
          * 此处不放宽，桌面 JVM 行为不变；沙箱放宽常量见 [McpManager]）。
          */
         const val HOST_STDIO_REQUEST_TIMEOUT_MS = 60_000L
+
+        /**
+         * #205 单连接 stderr 上报上限：卡死的 stderr 刷屏（npm 警告洪流）
+         * 不应把时间线淹没 —— 前 N 行如实上报，之后的静默泄放（仍防死锁）。
+         */
+        const val STDERR_REPORT_CAP = 30
     }
 }
 
