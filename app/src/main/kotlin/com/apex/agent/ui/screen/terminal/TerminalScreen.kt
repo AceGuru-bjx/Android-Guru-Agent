@@ -349,7 +349,9 @@ fun TerminalScreen(
 @Composable
 private fun NoticeBanner(text: String, onDismiss: () -> Unit) {
     val isError = text.contains("失败") || text.contains("不可用") || text.contains("拦截") ||
-        text.contains("已退出") || text.contains("error", true) || text.contains("unavailable", true)
+        text.contains("已退出") || text.contains("error", true) ||
+        text.contains("failed", true) || text.contains("failure", true) ||
+        text.contains("unavailable", true) || text.contains("denied", true)
     val bg = if (isError) ConsoleTheme.dangerSoft else ConsoleTheme.accentSoft
     val fg = if (isError) ConsoleTheme.danger else ConsoleTheme.accent
     Row(

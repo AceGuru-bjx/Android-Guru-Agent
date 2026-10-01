@@ -156,6 +156,17 @@ fun TerminalViewHost(
         }
     }
 
+    // ★ 会话切换重握手网格尺寸（T90）：后台创建的会话（agent 附属/装依赖/第二
+    // 会话）从未收到过 resize —— 一直以 runtime 默认 24×80 悬空：80 列行在窄屏
+    // 右侧被裁、≤24 行内容浮在高视口中间大片留白（「页面不对称 + 输出格式乱」
+    // 的大头）。View 网格是尺寸唯一真源（字体度量 + 视口像素推导）—— 活跃会话
+    // 变化时把它当前网格推给新会话（resize 幂等：native ioctl + VT 同步）。
+    // 首个会话创建后同样受益（不等 150ms 防抖的 onSizeChanged 通道）。
+    val activeSessionId by viewModel.activeSessionId.collectAsStateWithLifecycle()
+    LaunchedEffect(activeSessionId) {
+        viewState.value?.currentGridSize()?.let { viewModel.resizeTerminal(it.rows, it.cols) }
+    }
+
     // ── 工具栏锁存（CTRL/SHIFT/ALT 一次性 —— 与下一个特殊键/字母组合后释放）──
     fun latchedMods(): Int {
         var m = 0

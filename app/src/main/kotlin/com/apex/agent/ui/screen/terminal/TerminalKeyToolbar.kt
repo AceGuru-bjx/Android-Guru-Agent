@@ -68,10 +68,13 @@ internal fun KeyToolbar(
             .background(KeybarChrome.bg)
             .animateContentSize()
     ) {
-        // ── 主行（不滚动；高频键一眼可达）──
+        // ── 主行（T90：可横滚 —— 13 键 ≈ 560-620dp，在 360-412dp 窄屏上旧版不
+        // 滚动会把右侧方向键/粘贴/FN 裁出屏外（页面不对称的直接观感）；与 FN
+        // 行同用 horizontalScroll，宽屏无差异、窄屏可滚到全部键）──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 5.dp, vertical = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically

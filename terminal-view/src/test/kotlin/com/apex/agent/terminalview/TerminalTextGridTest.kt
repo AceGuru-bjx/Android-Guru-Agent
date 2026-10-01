@@ -233,4 +233,68 @@ class TerminalTextGridTest {
         assertFalse(TerminalTextGrid.withinSlop(25f, 0f, 24f))
         assertFalse(TerminalTextGrid.withinSlop(0f, -25f, 24f))
     }
+
+    // ─── T90：居中 origin（floor 余量分摊两侧）───
+
+    @Test
+    fun `compute splits floor remainder symmetrically to both sides`() {
+        // 240px / 8px = 30 列整除 → 余量 0（origin 0，内容满宽）
+        val exact = TerminalTextGrid.compute(widthPx = 240, heightPx = 100, charAdvancePx = 8f, charHeightPx = 20f)
+        assertEquals(0f, exact.originX, 0.01f)
+        assertEquals(0f, exact.originY, 0.01f)
+        // 245px / 8px = 30 列余 5px → originX = 2.5（左右各 2.5，对称）
+        val ragged = TerminalTextGrid.compute(widthPx = 245, heightPx = 100, charAdvancePx = 8f, charHeightPx = 20f)
+        assertEquals(30, ragged.viewCols)
+        assertEquals(2.5f, ragged.originX, 0.01f)
+        // 高 102 / 20 = 5 行余 2 → originY = 1
+        val raggedY = TerminalTextGrid.compute(widthPx = 240, heightPx = 102, charAdvancePx = 8f, charHeightPx = 20f)
+        assertEquals(1f, raggedY.originY, 0.01f)
+    }
+
+    @Test
+    fun `origin shifts viewport outputs and inputs symmetrically`() {
+        val g = TerminalTextGrid(
+            cellWidthPx = 10f, cellHeightPx = 20f,
+            widthPx = 805f, heightPx = 602,
+            viewRows = 30, viewCols = 80,
+            originX = 2.5f, originY = 1f
+        )
+        // 内容→视口：输出加 origin
+        assertEquals(1f, g.rowTopY(0), 0.01f)
+        assertEquals(21f, g.rowTopY(1), 0.01f)
+        assertEquals(61f, g.rowBottomY(2), 0.01f)
+        assertEquals(2.5f, g.columnX(listOf(cell("a")), 0), 0.01f)
+        assertEquals(12.5f, g.columnX(listOf(cell("a")), 1), 0.01f)
+        // 视口→内容：输入减 origin（往返恒等）
+        assertEquals(1, g.rowAt(25f, 99))
+        assertEquals(0, g.rowAt(20.9f, 99))
+        assertEquals(0, g.columnAt(listOf(cell("a")), 3f))
+        assertEquals(1, g.columnAt(listOf(cell("a")), 12.5f))
+        // 光标 x 含 origin（与 columnX 同源）
+        assertEquals(2.5f, g.cursorPixelX(listOf(cell("a")), 0), 0.01f)
+    }
+
+    @Test
+    fun `origin rejects negative or non finite values`() {
+        try {
+            TerminalTextGrid(10f, 20f, 100f, 100, 2, 4, originX = -1f)
+            org.junit.Assert.fail("negative originX should be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
+        try {
+            TerminalTextGrid(10f, 20f, 100f, 100, 2, 4, originY = Float.NaN)
+            org.junit.Assert.fail("NaN originY should be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
+    }
+
+    @Test
+    fun `compute with clamped minimum grid centers within viewport`() {
+        // 极小视口（10px）→ clamp 到 MIN 网格（4 列 × 8px = 32px > 视口）→
+        // 内容超界时 origin 钳 0（不做负偏移，从左沿绘制）
+        val g = TerminalTextGrid.compute(widthPx = 10, heightPx = 10, charAdvancePx = 8f, charHeightPx = 20f)
+        assertEquals(TerminalTextGrid.MIN_COLS, g.viewCols)
+        assertEquals(0f, g.originX, 0.01f)
+        assertTrue(g.originX >= 0f)
+    }
 }

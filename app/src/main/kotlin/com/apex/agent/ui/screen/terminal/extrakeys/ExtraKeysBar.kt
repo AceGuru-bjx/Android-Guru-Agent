@@ -50,7 +50,9 @@ fun ExtraKeysBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 5.dp),
+                    // T90：垂直 padding 对齐 KeyToolbar（旧版只有水平 5dp +
+                    // 尾部 2dp Spacer —— 两栏堆叠处垂直节奏不一致，视觉接缝）
+                    .padding(horizontal = 5.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -65,7 +67,6 @@ fun ExtraKeysBar(
                 }
             }
         }
-        androidx.compose.foundation.layout.Spacer(Modifier.height(2.dp))
     }
 }
 
