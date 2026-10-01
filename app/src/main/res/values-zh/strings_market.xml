@@ -332,5 +332,4 @@
     <string name="market_mcpso_load_more">加载更多</string>
     <string name="market_mcpso_loading_more">加载中…</string>
     <string name="market_mcpso_fetching_config">正在从 mcp.so 拉取安装配置…</string>
-    <string name="market_action_done">完成</string>
 </resources>
