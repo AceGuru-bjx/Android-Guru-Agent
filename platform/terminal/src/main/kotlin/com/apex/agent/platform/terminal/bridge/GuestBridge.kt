@@ -181,23 +181,16 @@ class GuestBridgeService(
 
     /** 解析 {"id":..,"action":..,"args":..}（宽松：无 id/args 也可）。 */
     internal fun parseRequest(raw: String): Triple<String, String, String>? {
-        val id = REQ_ID.find(raw)?.groupValues?.getOrNull(1) ?: return null
-        val action = REQ_ACTION.find(raw)?.groupValues?.getOrNull(1) ?: return null
+        val id = Regex(""""id"\s*:\s*"([^"]*)"""").find(raw)?.groupValues?.getOrNull(1) ?: return null
+        val action = Regex(""""action"\s*:\s*"([^"]*)"""").find(raw)?.groupValues?.getOrNull(1) ?: return null
         // 125 = closing-brace codepoint（CI 原始字符计数门禁 —— 字面量会破坏平衡）
-        val args = REQ_ARGS.find(raw)?.groupValues?.getOrNull(1)
+        val args = Regex(""""args"\s*:\s*(.*)""").find(raw)?.groupValues?.getOrNull(1)
             ?.trim()?.trimEnd(125.toChar())?.trim()?.removeSurrounding("\"")
         return Triple(id, action, args?.takeIf { it.isNotEmpty() } ?: "null")
     }
 
     companion object {
         const val SCRIPT_NAME = "apexctl"
-
-        // v1.4.4 UX 审查：桥轮询 500ms 一次、每个 guest 请求文件都要解析，
-        // 旧实现每次重新编译 3 个正则 → 提为常量。
-        // 注：125 = closing-brace codepoint（CI 原始字符计数门禁 —— 字面量会破坏平衡）
-        private val REQ_ID = Regex(""""id"\s*:\s*"([^"]*)"""")
-        private val REQ_ACTION = Regex(""""action"\s*:\s*"([^"]*)"""")
-        private val REQ_ARGS = Regex(""""args"\s*:\s*(.*)"""")
     }
 }
 
