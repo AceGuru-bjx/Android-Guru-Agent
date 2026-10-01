@@ -245,6 +245,8 @@ class MarketViewModel @Inject constructor(
     private val clawHubSource: ClawHubSource,
     // 官方 Hub 仓库（技能 + MCP 双目录）——独立状态域，God-file 预算拆分
     val hub: MarketHubController,
+    // mcp.so 社区目录（MCP 页签长尾源）——同构独立状态域
+    val mcpSo: MarketMcpSoController,
     // 语言切换：VM 侧消息（snackbar）按当前语言取词
     private val languageManager: LanguageManager,
     // ── v2 认知市场：注入 cs-mem + 工具分析四件套（均为 @Singleton）──

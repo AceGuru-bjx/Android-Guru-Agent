@@ -326,5 +326,10 @@
     <string name="market_mcp_builtin_desc_memory">Knowledge-graph memory (entities / relations / observations), persisted and shared with chat auto-memory.</string>
     <string name="market_mcp_builtin_desc_thinking">Sequential thinking chains (server-sequential-thinking semantics) for stepwise reasoning.</string>
     <string name="market_mcp_builtin_desc_default">Built-in in-process MCP server.</string>
+    <string name="market_mcpso_header">mcp.so community directory — 15,000+ servers</string>
+    <string name="market_mcpso_loading">Loading mcp.so directory…</string>
+    <string name="market_mcpso_load_more">Load more</string>
+    <string name="market_mcpso_loading_more">Loading more…</string>
+    <string name="market_mcpso_fetching_config">Fetching install config from mcp.so…</string>
     <string name="market_action_done">Done</string>
 </resources>

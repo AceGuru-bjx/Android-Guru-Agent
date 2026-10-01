@@ -3,6 +3,7 @@ package com.apex.agent.di
 import android.content.Context
 import com.apex.agent.core.tools.marketplace.ClawHubSource
 import com.apex.agent.core.tools.marketplace.HubSource
+import com.apex.agent.core.tools.marketplace.McpSoSource
 import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.github.GithubTokenManager
 import dagger.Module
@@ -50,5 +51,17 @@ object MarketplaceModule {
     @Singleton
     fun provideHubSource(httpClient: OkHttpClient): HubSource {
         return HubSource(httpClient)
+    }
+
+    /**
+     * mcp.so 社区目录源（1.5 万+ MCP 服务器的聚合长尾目录）：
+     * 市场 MCP 页签的社区源 —— 目录浏览（分页）+ 详情页 mcpServers
+     * 配置一键安装（STDIO 自动路由 PRoot 沙箱）。HTML 路由公开只读，
+     * 无需认证；任何失败折叠为 Result.failure（错误契约同 Hub 源）。
+     */
+    @Provides
+    @Singleton
+    fun provideMcpSoSource(httpClient: OkHttpClient): McpSoSource {
+        return McpSoSource(httpClient)
     }
 }

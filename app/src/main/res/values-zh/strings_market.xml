@@ -327,4 +327,9 @@
     <string name="market_mcp_builtin_desc_thinking">顺序思考链（server-sequential-thinking 语义），分步推理。</string>
     <string name="market_mcp_builtin_desc_default">内置进程内 MCP 服务器。</string>
     <string name="market_action_done">完成</string>
+    <string name="market_mcpso_header">mcp.so 社区目录 —— 15000+ 服务器</string>
+    <string name="market_mcpso_loading">正在加载 mcp.so 目录…</string>
+    <string name="market_mcpso_load_more">加载更多</string>
+    <string name="market_mcpso_loading_more">加载中…</string>
+    <string name="market_mcpso_fetching_config">正在从 mcp.so 拉取安装配置…</string>
 </resources>
