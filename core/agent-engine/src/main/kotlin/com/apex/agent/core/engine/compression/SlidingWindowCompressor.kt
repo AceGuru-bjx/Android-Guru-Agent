@@ -1,6 +1,7 @@
 package com.apex.agent.core.engine.compression
 
 import com.apex.agent.core.llm.LlmMessage
+import com.apex.agent.core.tools.util.TextRelevance
 
 /**
  * 滑动窗口压缩器
@@ -13,6 +14,17 @@ import com.apex.agent.core.llm.LlmMessage
  * 2. 保留最近 preserveRecent 条消息
  * 3. 中间的消息被压缩为一条摘要
  * 4. 摘要包含：用户意图、使用的工具、关键结果
+ *
+ * ═══ 上下文检索增强（相关性感知保留）═══
+ *
+ * 旧摘要取「前 3 条用户消息 + 前 3 条工具结果」—— 与当前任务无关的
+ * 早期闲聊占据了摘要，而真正关键的任务细节（报错原文 / 关键参数 /
+ * 用户约束）却可能被丢弃。现在以**当前任务锚点**（保留窗内最后一条
+ * User 消息）对被压缩段做 BM25 相关性排序：
+ * - 摘要中的用户请求 / 关键结果按相关性选录（相关性同名次时才按时间序）；
+ * - 额外注入 `[RELEVANT RECALL]` 块 —— 被压缩段中与任务最相关的
+ *   [RECALL_EXCERPTS] 条消息逐字保留摘录（每条 [RECALL_EXCERPT_CHARS]
+ *   字），压缩后模型仍能“检索”到任务关键细节，而不是凭摘要复述。
  */
 class SlidingWindowCompressor : ContextCompressor {
 
@@ -76,8 +88,9 @@ class SlidingWindowCompressor : ContextCompressor {
         val toCompress = history.subList(systemEnd, preserveStart).toList()
         val preserved = history.subList(preserveStart, history.size).toList()
 
-        // 生成摘要
-        val summary = generateSimpleSummary(toCompress)
+        // 生成摘要（任务锚点 = 保留窗内最后一条 User 消息，相关性排序选录）
+        val taskAnchor = history.filterIsInstance<LlmMessage.User>().lastOrNull()?.content.orEmpty()
+        val summary = generateSimpleSummary(toCompress, taskAnchor)
 
         // 重建 history
         history.clear()
@@ -99,11 +112,20 @@ class SlidingWindowCompressor : ContextCompressor {
 
     /**
      * 生成简单摘要（不需要LLM）
+     *
+     * 相关性感知版：[taskAnchor] 是当前任务锚点（最近的用户指令原文），
+     * 用户请求与关键结果按 BM25 相关性选录（TextRelevance），最相关的
+     * [RECALL_EXCERPTS] 条消息逐字进 `[RELEVANT RECALL]` 块。
+     * 锚点为空（如纯工具回放场景）时退回旧时间序选录 —— 行为兼容。
      */
-    private fun generateSimpleSummary(messages: List<LlmMessage>): String {
+    private fun generateSimpleSummary(messages: List<LlmMessage>, taskAnchor: String): String {
         val userMessages = messages.filterIsInstance<LlmMessage.User>()
         val assistantMessages = messages.filterIsInstance<LlmMessage.Assistant>()
         val toolResults = messages.filterIsInstance<LlmMessage.ToolResult>()
+
+        // 相关性选录（锚点非空时）：按与任务的相关性排序，同分按出现顺序
+        val rankedUsers = rankByRelevance(taskAnchor, userMessages) { it.content }
+        val rankedResults = rankByRelevance(taskAnchor, toolResults) { it.content }
 
         // 提取工具调用信息
         val toolCalls = assistantMessages.flatMap { it.toolCalls }
@@ -113,9 +135,9 @@ class SlidingWindowCompressor : ContextCompressor {
             appendLine("Previous ${messages.size} messages compressed.")
             appendLine()
 
-            if (userMessages.isNotEmpty()) {
-                appendLine("User requests:")
-                userMessages.take(3).forEach { msg ->
+            if (rankedUsers.isNotEmpty()) {
+                appendLine("User requests (relevance-ranked, top of list is most relevant to the current task):")
+                rankedUsers.take(3).forEach { msg ->
                     appendLine("  - ${msg.content.take(150)}")
                 }
                 appendLine()
@@ -126,9 +148,9 @@ class SlidingWindowCompressor : ContextCompressor {
                 appendLine()
             }
 
-            if (toolResults.isNotEmpty()) {
-                appendLine("Key results:")
-                toolResults.take(3).forEach { result ->
+            if (rankedResults.isNotEmpty()) {
+                appendLine("Key results (relevance-ranked):")
+                rankedResults.take(3).forEach { result ->
                     appendLine("  - ${result.content.take(100)}")
                 }
             }
@@ -140,6 +162,60 @@ class SlidingWindowCompressor : ContextCompressor {
                     appendLine("Last assistant response: ${last.content.take(200)}")
                 }
             }
+
+            // ═══ 相关性检索块：任务关键细节逐字保留 ═══
+            // 被压缩段中与任务锚点最相关的消息（用户请求/助手结论/工具结果均可入块），
+            // 逐字摘录 —— 压缩后模型仍能引用原文细节（报错原文、参数、约束）。
+            if (taskAnchor.isNotBlank()) {
+                val recallDocs = messages.map { it to relevanceText(it) }
+                    .filter { it.second.isNotBlank() }
+                val ranked = TextRelevance.rank(
+                    taskAnchor, recallDocs.map { it.second }, limit = RECALL_EXCERPTS
+                )
+                if (ranked.isNotEmpty()) {
+                    appendLine()
+                    appendLine("[RELEVANT RECALL] verbatim excerpts most relevant to the current task:")
+                    ranked.forEach { scored ->
+                        val (msg, _) = recallDocs[scored.index]
+                        appendLine("  ${msg::class.simpleName}: ${relevanceText(msg).take(RECALL_EXCERPT_CHARS)}")
+                    }
+                    appendLine("[END RELEVANT RECALL]")
+                }
+            }
         }
+    }
+
+    /** 消息参与相关性排序的文本（工具调用参数也计入 —— 参数里的路径/名称常是检索目标）。 */
+    private fun relevanceText(msg: LlmMessage): String = when (msg) {
+        is LlmMessage.System -> ""
+        is LlmMessage.User -> msg.content
+        is LlmMessage.Assistant ->
+            msg.content + msg.toolCalls.joinToString(" ") { it.name + " " + it.arguments }
+        is LlmMessage.ToolResult -> msg.content
+    }
+
+    /** 相关性排序：锚点非空时按分数降序（rank 已按 index 升序稳定排序），否则保持原序。 */
+    private fun <T> rankByRelevance(
+        anchor: String,
+        items: List<T>,
+        textOf: (T) -> String
+    ): List<T> {
+        if (anchor.isBlank() || items.size <= 1) return items
+        val texts = items.map(textOf)
+        // rank 只返回过阈值的条目（分数降序）—— 未过阈值的低相关信息
+        // 不强行排序，按时间序缀在末尾（保留完整性，压缩率不受影响）。
+        val ranked = TextRelevance.rank(anchor, texts, limit = items.size)
+        if (ranked.isEmpty()) return items
+        val rankedOrder = ranked.map { it.index }.toSet()
+        val rest = items.indices.filter { it !in rankedOrder }
+        return (ranked.map { items[it.index] } + rest.map { items[it] })
+    }
+
+    private companion object {
+        /** `[RELEVANT RECALL]` 块内逐字保留的消息条数。 */
+        const val RECALL_EXCERPTS = 3
+
+        /** 单条摘录的最大字符数。 */
+        const val RECALL_EXCERPT_CHARS = 300
     }
 }

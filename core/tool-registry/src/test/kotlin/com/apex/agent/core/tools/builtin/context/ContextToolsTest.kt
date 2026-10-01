@@ -171,14 +171,44 @@ class ContextToolsTest {
     @Test
     fun `search recent scope only searches the window`() = runTest {
         // 窗口取最后 2 条（#8..#9）：“权限不足”在 #3，不在窗口内。
-        val result = structured(search, """{"query":"权限不足","scope":"recent","window":2}""")
+        // mode=exact：本测试验证窗口裁剪（精确子串零命中即 NOT_FOUND）；
+        // 默认 auto 的模糊回退语义由 fuzzy 相关用例覆盖。
+        val result = structured(search, """{"query":"权限不足","scope":"recent","window":2,"mode":"exact"}""")
         assertFalse(result.isSuccess)
         assertEquals(ToolErrorCode.NOT_FOUND, result.error!!.code)
     }
 
     @Test
     fun `search skips system records`() = runTest {
-        val result = structured(search, """{"query":"Apex, an Android"}""")
+        // mode=exact：验证 system 记录跳过（精确子串零命中即 NOT_FOUND）。
+        val result = structured(search, """{"query":"Apex, an Android","mode":"exact"}""")
+        assertFalse(result.isSuccess)
+        assertEquals(ToolErrorCode.NOT_FOUND, result.error!!.code)
+    }
+
+    @Test
+    fun `search falls back to fuzzy ranking when no exact hit`() = runTest {
+        // "转换成 markdown 文档" 不是任何记录的子串，但与 #6 共享词元
+        //（markdown / 转 / 成）→ 模糊回退应命中并标记 ~ 前缀。
+        val result = structured(search, """{"query":"转换成 markdown 文档"}""")
+        assertTrue(result.isSuccess)
+        val out = run(search, """{"query":"转换成 markdown 文档"}""")
+        assertTrue(out.contains("fuzzy"))
+        assertTrue(out.contains("~#6 [user]"))
+    }
+
+    @Test
+    fun `search fuzzy mode ranks related records directly`() = runTest {
+        val out = run(search, """{"query":"markdown 表格","mode":"fuzzy"}""")
+        assertTrue(out.contains("fuzzy"))
+        // #6（"把它转成 markdown 表格"）应排最前
+        val first = out.lineSequence().firstOrNull { it.startsWith("~#") }
+        assertTrue(first!!.startsWith("~#6"))
+    }
+
+    @Test
+    fun `search exact mode keeps not_found on zero hits`() = runTest {
+        val result = structured(search, """{"query":"转换成 markdown 文档","mode":"exact"}""")
         assertFalse(result.isSuccess)
         assertEquals(ToolErrorCode.NOT_FOUND, result.error!!.code)
     }

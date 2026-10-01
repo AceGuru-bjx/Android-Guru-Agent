@@ -629,6 +629,10 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
 
     LaunchedEffect(Unit) { viewModel.hub.loadMcpServers() }
 
+    // mcp.so 社区目录（首屏自动加载；分页「加载更多」）
+    val mcpSoState by viewModel.mcpSo.uiState.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { viewModel.mcpSo.loadFirst() }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -683,6 +687,67 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
         }
         items(hubMcps, key = { "hub-" + it.name }) { entry ->
             HubMcpCatalogCard(entry, state, hubState, viewModel)
+        }
+        // ═══ mcp.so 社区目录（安装 → 配置 → 启动同一闭环，社区长尾源）═══
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MarketSectionTitle(stringResource(R.string.market_mcpso_header))
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { viewModel.mcpSo.loadFirst(force = true) },
+                    enabled = !mcpSoState.loading
+                ) {
+                    Text(
+                        if (mcpSoState.loading) stringResource(R.string.market_loading)
+                        else stringResource(R.string.market_action_refresh),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+        mcpSoState.error?.let { error ->
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(R.string.market_load_failed_with_reason, error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    TextButton(
+                        onClick = { viewModel.mcpSo.loadFirst(force = true) },
+                        enabled = !mcpSoState.loading
+                    ) { Text(stringResource(R.string.market_action_retry)) }
+                }
+            }
+        }
+        if (mcpSoState.loading && mcpSoState.servers.isEmpty()) {
+            item { MarketHint(stringResource(R.string.market_mcpso_loading)) }
+        }
+        items(mcpSoState.servers, key = { it.key }) { entry ->
+            McpSoCard(
+                entry = entry,
+                installed = state.mcps.any { it.name == entry.name },
+                installing = mcpSoState.installingSlug == entry.slug,
+                installBusy = mcpSoState.installingSlug != null,
+                onInstall = { viewModel.mcpSo.installServer(entry) }
+            )
+        }
+        item {
+            McpSoLoadMoreRow(
+                loadingMore = mcpSoState.loadingMore,
+                hasMore = mcpSoState.hasMore,
+                enabled = mcpSoState.servers.isNotEmpty(),
+                onLoadMore = { viewModel.mcpSo.loadMore() }
+            )
         }
         // ═══ 当前工位已配置服务器（配置 / 启动 / 停止 —— 市场内完成）═══
         if (state.mcps.isNotEmpty()) {
