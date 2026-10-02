@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+# ═══════════════════════════════════════════════════════════════════════════
+# 提交信息规范检查（guard-rails · CI: "Commit Message Convention"）
+#
+# 纪律依据（AGENTS.md）：提交信息格式 `类型(范围): 中文摘要 —— 关键词 / 关键词`
+# 例：feat(mcp-host): 逆向 MCP Host —— 手机作为 MCP Server / Token 鉴权
+#
+# 检查范围：BASE_SHA..HEAD_SHA 的非 merge 提交（merge commit 豁免）。
+# 强制项（失败）：`类型(范围): 摘要` 或 `类型: 摘要` 前缀 —— 类型 ∈ 白名单。
+# 建议项（警告不失败）：` —— 关键词` 尾段缺失时提示（历史提交兼容，不卡门）。
+#
+# CI 用法：BASE_SHA / HEAD_SHA 由 workflow 注入（PR = base..head；
+# push = before..after，before 为全 0 时只查 HEAD 单提交）。
+# 本地用法：python3 scripts/check_commit_messages.py <base> <head>
+# 只用标准库；退出码 0 = 通过，1 = 有违规。
+# ═════════════════════════════════════════════════════════════════════════
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+TYPES = {
+    "feat", "fix", "refactor", "test", "docs", "chore", "ci", "build",
+    "perf", "style", "revert", "release", "security",
+}
+HEADER = re.compile(
+    r"^(?P<type>[a-z]+)(?:\((?P<scope>[A-Za-z0-9#][A-Za-z0-9._/,-]*)\))?"
+    r"(?P<bang>!)?:\s+(?P<subject>\S.*)$"
+)
+KEYWORDS_HINT = "——"
+
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(Path(__file__).resolve().parent.parent), *args],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print("用法: check_commit_messages.py <base_sha> <head_sha>")
+        return 1
+    base, head = sys.argv[1], sys.argv[2]
+
+    if set(base) == {"0"}:  # 新分支首推：只查 HEAD 单提交
+        revs = [head]
+    else:
+        revs = git("rev-list", "--no-merges", f"{base}..{head}").split()
+
+    if not revs:
+        print("✓ 提交规范检查通过：范围内没有新增提交")
+        return 0
+
+    violations: list[str] = []
+    warnings: list[str] = []
+
+    for sha in revs:
+        subject = git("log", "-1", "--format=%s", sha).strip()
+        m = HEADER.match(subject)
+        if not m:
+            violations.append(f"{sha[:10]}：`{subject[:60]}` 不符合 `类型(范围): 摘要` 格式")
+            continue
+        if m.group("type") not in TYPES:
+            violations.append(
+                f"{sha[:10]}：类型 `{m.group('type')}` 不在白名单 {sorted(TYPES)}"
+            )
+            continue
+        if KEYWORDS_HINT not in subject:
+            warnings.append(f"{sha[:10]}：`{subject[:50]}` 缺 `—— 关键词` 尾段（建议补，不卡门）")
+
+    for w in warnings:
+        print(f"  ⚠ {w}")
+    if violations:
+        print(f"✗ 提交规范检查失败（{len(violations)} 项）：\n")
+        for v in violations:
+            print(f"  - {v}")
+        print("\n正确格式：`类型(范围): 中文摘要 —— 关键词 / 关键词`，"
+              "类型如 feat/fix/refactor/test/docs/chore/ci/build/perf。")
+        return 1
+
+    print(f"✓ 提交规范检查通过：{len(revs)} 个提交全部合规"
+          + (f"（{len(warnings)} 条关键词建议）" if warnings else ""))
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
