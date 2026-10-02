@@ -130,7 +130,10 @@ class LinuxCapabilityProbe(
                 launch,
                 AbsolutePath(ctx.prootBinary.absolutePath),
                 AbsolutePath(ctx.rootfsDir.absolutePath),
-                AbsolutePath(ctx.workspaceDir.absolutePath)
+                AbsolutePath(ctx.workspaceDir.absolutePath),
+                // T92：探针实测能力门（ctx 由 LinuxExecutionContextFactory.resolve 产出，
+                // capabilities 已随上下文流转 —— 探测路径与 apt/终端会话同款版本自适应）
+                capabilities = ctx.capabilities
             )
             execFn(command)
         } catch (e: Exception) {

@@ -288,4 +288,78 @@ class PRootArgvCapabilitiesTest {
             assertTrue("env trampoline intact", PRootArgvContract.hasEnvTrampoline(argv))
         }
     }
+
+    // ─── 5. T92：默认探针前置 hostEnv.prepare（首启不静默降级） ───
+
+    /**
+     * 脚本化假 proot：exit 0（模拟「选项被接受」）。真实 exec 走 JVM 沙箱
+     * 的 /bin/sh —— 与 ProotExecutorProotSmokeTest 同源的环境假设（无 /bin/sh
+     * 的环境 Assume 跳过，诚实降级）。
+     */
+    private fun scriptProot(dir: File): File = File(dir, "libproot.so").apply {
+        writeText("#!/bin/sh\nexit 0\n")
+        setExecutable(true, false)
+    }
+
+    /** 真实占位 libtalloc（File.exists() 跟随符号链接 —— 悬空链接会误报 false）。 */
+    private fun dummyTalloc(dir: File): File = File(dir, "libtalloc.so").apply {
+        writeBytes(byteArrayOf(0x74, 0x61, 0x6c, 0x6c)) // "tall"
+    }
+
+    @Test
+    fun `T92 default probes run hostEnv prepare before exec (first-boot no silent downgrade)`() {
+        org.junit.Assume.assumeTrue("需要 /bin/sh 的 JVM 沙箱", File("/bin/sh").exists())
+        val dir = tmp.newFolder().apply {
+            scriptProot(this)
+            dummyTalloc(this) // 悬空符号链接 exists()=false —— 需真实目标文件
+        }
+        val hostEnv = PRootHostEnvironment(dir.absolutePath, tmp.newFolder(), tmp.newFolder())
+        // ★ 断言基线：探针执行前 staging 目录不存在（模拟首次安装/清缓存后
+        // 的真实状态 —— libtalloc.so.2 symlink 与 PROOT_TMP_DIR 均未建）
+        assertFalse("前置：staging 尚未建立", File(hostEnv.stagingDir, "libtalloc.so.2").exists())
+
+        val provider = NativeLibraryPRootBinaryProvider(
+            hostEnv = hostEnv,
+            supportedAbis = { listOf("arm64-v8a") }
+            // 三探针均用默认真实 exec 实现（不注入 fake —— 测的就是默认路径）
+        )
+        // capabilitiesFor 是 verify 内部的能力入口（跳过 ELF 字节级校验 ——
+        // 脚本文件不是合法 ELF，但探针前置逻辑与此无关）
+        val caps = provider.capabilitiesFor(File(dir, "libproot.so"))
+
+        // 探针 exec 前 prepare 幂等执行：staging symlink 与 tmp 目录已建
+        assertTrue(
+            "探针必须先 prepare（否则首启 exec 因链接缺失确定性非零退出 → 能力被永久记忆化为 false）",
+            File(hostEnv.stagingDir, "libtalloc.so.2").exists()
+        )
+        assertTrue(hostEnv.prootTmpDir.isDirectory)
+        // 脚本 exit 0 → 两项能力均实测为支持
+        assertTrue("exit-0 假 proot → kill-on-exit 判支持", caps.supportsKillOnExit)
+        assertTrue("exit-0 假 proot → separator 判支持", caps.supportsOptionSeparator)
+    }
+
+    @Test
+    fun `T92 unpreparable host env yields indeterminate probes not false`() {
+        // prepare 失败（nativeDir 无 libproot.so → canExecute=false）→ 默认探针
+        // 不 exec、返回 null → 保守省略（而非「不支持」）—— 与「exec 链接失败
+        // 被误认 unknown option → false」的旧缺陷分界。用默认探针（注入 fake
+        // 会绕过 probeEnv，测不到前置逻辑）。
+        val emptyDir = tmp.newFolder() // 无 libproot.so → prepare 必失败
+        val hostEnv = PRootHostEnvironment(emptyDir.absolutePath, tmp.newFolder(), tmp.newFolder())
+        val provider = NativeLibraryPRootBinaryProvider(
+            hostEnv = hostEnv,
+            supportedAbis = { emptyList() }
+            // killOnExit/separator 探针均用默认实现 —— prepare 失败时绝不 exec
+        )
+        // capabilitiesFor 的入参：一个「可执行且必 exit 0」的脚本 —— 若探针
+        // 在 prepare 失败后仍违规 exec，它会 exit 0 → 能力判 true（≠ 保守
+        // 基线）→ 断言失败（回归可检出）；Fix A 生效时探针根本不执行。
+        org.junit.Assume.assumeTrue("需要 /bin/sh 的 JVM 沙箱", File("/bin/sh").exists())
+        val trapScript = File(tmp.root, "trap-proot.sh").apply {
+            writeText("#!/bin/sh\nexit 0\n")
+            setExecutable(true, false)
+        }
+        val caps = provider.capabilitiesFor(trapScript)
+        assertEquals("prepare 失败 → 不可判定 → 保守省略", PRootArgvCapabilities.UPSTREAM_SAFE, caps)
+    }
 }

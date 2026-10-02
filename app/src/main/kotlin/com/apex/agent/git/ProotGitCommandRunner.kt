@@ -9,6 +9,7 @@ import com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager
 import com.apex.agent.platform.terminal.linux.CpuArchitecture
 import com.apex.agent.platform.terminal.linux.LinuxDistribution
 import com.apex.agent.platform.terminal.linux.RootfsDescriptor
+import com.apex.agent.platform.terminal.proot.PRootArgvCapabilities
 import com.apex.agent.platform.terminal.proot.PRootBind
 import com.apex.agent.platform.terminal.proot.PRootCommand
 import com.apex.agent.platform.terminal.proot.PRootCommandBuilderImpl
@@ -132,7 +133,13 @@ class ProotGitCommandRunner(
     /** 编码工作区根解析器（每次 run 现取，切换工作区即时生效）。 */
     private val workspaceRoots: CodeWorkspaceRoots,
     /** 持久化 home 宿主目录（null 或不存在 = 跳过 home bind，诚实降级）。 */
-    private val persistentHomeDir: File?
+    private val persistentHomeDir: File?,
+    /**
+     * T92（D5 完成度）：argv 能力源（PRootCapabilitySource —— 非挂起读取）。
+     * git 通道与终端会话/apt 同款版本自适应；默认 Termux 基线仅保既有测试
+     * 夹具语义，生产 DI 注入真实源。
+     */
+    private val capabilities: () -> PRootArgvCapabilities = { PRootArgvCapabilities.TERMUX_BUNDLED }
 ) : GitCommandRunner {
 
     private val commandBuilder = PRootCommandBuilderImpl()
@@ -276,7 +283,9 @@ class ProotGitCommandRunner(
             request,
             prootBinary = AbsolutePath(libprootPath),
             rootfsPath = AbsolutePath(rootfs.absolutePath),
-            workspacePath = AbsolutePath(workspaceRoot.absolutePath)
+            workspacePath = AbsolutePath(workspaceRoot.absolutePath),
+            // T92：探针实测能力门（预取未完成时保守省略 —— 见 PRootCapabilitySource）
+            capabilities = capabilities()
         )
     }
 

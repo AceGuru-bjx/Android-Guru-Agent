@@ -9,6 +9,7 @@ import com.apex.agent.platform.terminal.linux.CpuArchitecture
 import com.apex.agent.platform.terminal.linux.LinuxDistribution
 import com.apex.agent.platform.terminal.linux.RootfsDescriptor
 import com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager
+import com.apex.agent.platform.terminal.proot.PRootArgvCapabilities
 import com.apex.agent.platform.terminal.proot.PRootBind
 import com.apex.agent.platform.terminal.proot.PRootCommand
 import com.apex.agent.platform.terminal.proot.PRootCommandBuilderImpl
@@ -87,7 +88,14 @@ class ProotCommandSpawner(
     /** 持久化 home 宿主目录（filesDir/linux/home；null = 跳过 home bind）。 */
     private val persistentHomeDir: File?,
     /** 回落通道（Android 宿主三通道）。 */
-    private val fallback: CommandSpawner = PrivilegedCommandSpawner()
+    private val fallback: CommandSpawner = PrivilegedCommandSpawner(),
+    /**
+     * T92（D5 完成度）：argv 能力源（PRootCapabilitySource —— 非挂起读取，
+     * 预取未完成 = 保守省略基线）。spawn 非挂起契约不动，argv 按探针实测
+     * 能力自适应（与终端会话/apt 同款能力门，根除默认 Termux 基线的静默
+     * 差异）。默认 Termux 基线仅保既有测试夹具语义；生产 DI 注入真实源。
+     */
+    private val capabilities: () -> PRootArgvCapabilities = { PRootArgvCapabilities.TERMUX_BUNDLED }
 ) : CommandSpawner {
 
     private val commandBuilder = PRootCommandBuilderImpl()
@@ -399,7 +407,9 @@ class ProotCommandSpawner(
             pr,
             prootBinary = AbsolutePath(hostEnvironment.prootBinary.absolutePath),
             rootfsPath = AbsolutePath(route.rootfs.absolutePath),
-            workspacePath = AbsolutePath(wsHost.absolutePath)
+            workspacePath = AbsolutePath(wsHost.absolutePath),
+            // T92：探针实测能力门（预取未完成时保守省略 —— 见 PRootCapabilitySource）
+            capabilities = capabilities()
         )
     }
 

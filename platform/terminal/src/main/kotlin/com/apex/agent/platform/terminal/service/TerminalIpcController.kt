@@ -40,14 +40,21 @@ import java.util.concurrent.CopyOnWriteArraySet
  *  - **listSessions**：JSON 数组（[SessionSummaryDto]）；
  *  - **回调流**：事件驱动（[TerminalRuntime.terminalEventFlow] —— TerminalEventBus
  *    的 crash-safe 增量订阅），**非轮询**。会话创建锚点 = create 返回的初始游标；
- *    中途 attach 的已知会话从诞生起重放（重连客户端的 transcript 重同步语义，
- *    与 Termux 客户端重附时的回读对齐）。
+ *    中途 register 的已知会话：若该会话已有收集器（本控制器创建过），新回调
+ *    从收集器的既有锚点续流（**不回放历史 transcript** —— 单收集器多播架构
+ *    下按回调独立重放会把历史重复推给在场客户端）；若无收集器，从诞生
+ *    （anchor 0）重放。T92 审计修正：原 KDoc 声称「从诞生起全量重放」与
+ *    putIfAbsent 单收集器实现不符 —— 本条按实际语义声明，per-callback 锚点
+ *    重构见后续路线（零消费者阶段不做）。
  *
  * ## 防御性纪律（AGENTS.md「防御式 IO」）
  *
  *  - env 赋值 `"K=V"` 形态非法（无 `=` / 空 key）→ **跳过该条**，不炸整次 create；
- *  - 回调派发 try-catch 全吞（单个客户端崩溃不得拖垮 PTY 泵 —— binder oneway
- *    本身不抛，防御的是测试 fake 与未来进程内复用）；
+ *  - 回调派发失败**计数与剔除**（T92 审计修正）：oneway binder 事务在异步
+ *    缓冲耗尽时**直接失败而非阻塞**（「天然背压」是错误认知），旧实现
+ *    runCatching 全吞会把输出块静默丢弃且不可检测 —— 现在连续失败达到
+ *    [CALLBACK_EVICTION_THRESHOLD] 的回调被剔除（死客户端/严重积压者，
+ *    重新 register 可再接入），成功一次即清零；
  *  - 事件收集协程 per-session 独立 Job（SupervisorJob 域内互不传染）。
  */
 class TerminalIpcController(
@@ -57,8 +64,18 @@ class TerminalIpcController(
     private val scope: CoroutineScope,
     /** create 的有界预算（冷启动 rootfs 场景的防御；无界挂起会钉死 binder 线程）。 */
     private val createTimeoutMs: Long = 15_000L,
-    /** onOutput 单次回调的最大字节（binder 异步事务缓冲 ~1MB —— 防御性 256KB 分片）。 */
-    private val maxOutputChunkBytes: Int = 256 * 1024
+    /**
+     * onOutput 单次回调的最大字节。T92 审计修正：256KB → 64KB —— binder
+     * oneway 异步事务缓冲（约 512KB~1MB/进程）在多回调场景下会被 256KB
+     * 大分片×N 个客户端放大至耗尽（失败即静默丢块）；64KB 在终端吞吐与
+     * 缓冲占用间取平衡（termux-emulator 常规刷新远小于此）。
+     */
+    private val maxOutputChunkBytes: Int = 64 * 1024,
+    /**
+     * T92：回调连续失败剔除阈值（测试可注入以确定性收敛；生产用默认 16 ——
+     * 64KB 分片下 ≈ 1MB 输出未送达 = 客户端事实死亡/严重积压）。
+     */
+    private val callbackEvictionThreshold: Int = CALLBACK_EVICTION_THRESHOLD
 ) {
 
     /** AIDL ITerminalCallback 的 Kotlin 镜像（壳层把 binder 代理适配到本接口）。 */
@@ -185,8 +202,8 @@ class TerminalIpcController(
 
     fun registerCallback(callback: Callback) {
         callbacks.add(callback)
-        // 已有会话从诞生起全量重放（重连客户端的 transcript 重同步 —— 与
-        // TerminalEventBus 的 crash-safe 订阅语义同源，非为此新建轮询路径）
+        // 已知会话接入事件流：已有收集器的会话从其既有锚点续流（不回放历史，
+        // 见类 KDoc「回调流」语义声明）；无收集器的会话从诞生（anchor 0）重放
         val runtime = runtimeProvider() ?: return
         val known = runCatching {
             runBlocking {
@@ -201,6 +218,8 @@ class TerminalIpcController(
 
     fun unregisterCallback(callback: Callback) {
         callbacks.remove(callback)
+        // T92：同步清理失败计数（防止「注销后重注册仍带着旧 strike」的伪死客户端判定）
+        callbackFailures.remove(callback)
     }
 
     /** 无回调订阅者时收割全部收集器（Service onDestroy 调用）。 */
@@ -208,6 +227,7 @@ class TerminalIpcController(
         collectors.values.forEach { runCatching { it.cancel() } }
         collectors.clear()
         callbacks.clear()
+        callbackFailures.clear()
         exitAnnounced.clear()
     }
 
@@ -279,9 +299,25 @@ class TerminalIpcController(
         stopEventStream(sessionId)
     }
 
-    private inline fun dispatchToCallbacks(block: (Callback) -> Unit) {
+    /** T92：回调连续失败计数（达阈值剔除 —— 见类 KDoc「防御性纪律」）。 */
+    private val callbackFailures = ConcurrentHashMap<Callback, java.util.concurrent.atomic.AtomicInteger>()
+
+    private fun dispatchToCallbacks(block: (Callback) -> Unit) {
         for (cb in callbacks) {
-            runCatching { block(cb) }
+            val failed = runCatching { block(cb) }.isFailure
+            if (failed) {
+                // 多收集协程并发派发 —— 计数原子化；达阈值剔除（重新 register
+                // 可再接入），中间成功即清零（间歇性 binder 缓冲瞬满不误杀）
+                val strikes = callbackFailures.computeIfAbsent(cb) {
+                    java.util.concurrent.atomic.AtomicInteger()
+                }.incrementAndGet()
+                if (strikes >= callbackEvictionThreshold) {
+                    callbacks.remove(cb)
+                    callbackFailures.remove(cb)
+                }
+            } else {
+                callbackFailures.remove(cb)
+            }
         }
     }
 
@@ -301,6 +337,13 @@ class TerminalIpcController(
 
         /** AIDL "ERR:" 前缀（客户端判定契约 —— 壳层与测试共享）。 */
         const val ERROR_PREFIX = "ERR:"
+
+        /**
+         * T92：回调连续失败剔除阈值。16 次连续失败（64KB 分片下 ≈ 1MB
+         * 输出未送达）= 客户端事实上死亡/严重积压；间歇性失败（binder
+         * 缓冲瞬满）会被中间的成功清零，不触发剔除。
+         */
+        const val CALLBACK_EVICTION_THRESHOLD = 16
 
         /** 防注入（TM6 平移）：`K=V` 形态外的赋值整条跳过，不炸 create。 */
         fun parseEnvAssignments(assignments: List<String>?): Map<String, String> {
