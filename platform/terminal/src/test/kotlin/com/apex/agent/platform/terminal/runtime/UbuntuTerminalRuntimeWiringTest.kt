@@ -51,8 +51,8 @@ import java.nio.file.Files
  * 分配，argv 语义完全一致 —— PTY 侧（SIGWINCH/Ctrl-C/前台组）由真机
  * androidTest（UbuntuTerminalRuntimeInstrumentationTest）锁定。
  *
- * T91（D5）：host proot 方言由生产 provider 的能力探针实测（见 hostDialect），
- * argv 构造端按方言自适应 —— T88 时代的 adaptForUpstreamProot 手工过滤层
+ * T91（D5）：host proot 能力集由生产 provider 的双探针实测（见 hostCapabilities），
+ * argv 构造端按能力自适应 —— T88 时代的 adaptForUpstreamProot 手工过滤层
  * 已删除（它与「把 -E 偷搬进宿主 env」同构：适配层改写生产 argv，
  * CI 绿不等于设备绿）。
  */
@@ -175,13 +175,13 @@ class UbuntuTerminalRuntimeWiringTest {
         // T91（D5）：方言由生产探针实测（与 T72 E2E 同源）—— host proot（Debian
         // 5.4 / Ubuntu 5.1.0）如实返回 UPSTREAM；T73_PROOT_BIN 指向 Termux 补丁
         // 版时返回 TERMUX_COMPAT，两种形状均可执行（上游形状是 Termux 子集）。
-        val dialect = hostDialect()
+        val capabilities = hostCapabilities()
         val binaryProvider = object : PRootBinaryProvider {
             override suspend fun locate(): Result<AbsolutePath> = Result.success(AbsolutePath(bin.absolutePath))
             override suspend fun verify(binary: AbsolutePath): Result<PRootBinaryInfo> = Result.success(
                 PRootBinaryInfo(
                     binary, PRootVersion(5, 4, 0), CpuArchitecture.X86_64, true,
-                    dialect = dialect
+                    capabilities = capabilities
                 )
             )
         }
@@ -205,19 +205,19 @@ class UbuntuTerminalRuntimeWiringTest {
         TerminalRuntimeImpl(native = pty, policy = TerminalPolicyImpl())
 
     /**
-     * T91（D5）：host proot 方言实测 —— 生产 provider 的能力探针
-     * （exec `--kill-on-exit --version`，不 ptrace）直接判定。
+     * T91（D5）：host proot 能力集实测 —— 生产 provider 的双探针
+     * （--kill-on-exit 与 -- 独立判定）直接判定。
      */
-    private fun hostDialect(): com.apex.agent.platform.terminal.proot.PRootDialect {
+    private fun hostCapabilities(): com.apex.agent.platform.terminal.proot.PRootArgvCapabilities {
         val bin = prootBinary
-            ?: return com.apex.agent.platform.terminal.proot.PRootDialect.UPSTREAM
+            ?: return com.apex.agent.platform.terminal.proot.PRootArgvCapabilities.UPSTREAM_SAFE
         val env = com.apex.agent.platform.terminal.proot.PRootHostEnvironment(
             nativeLibraryDir = bin.parentFile.absolutePath,
             baseDir = File(System.getProperty("java.io.tmpdir"), "t91-wiring-dialect-base"),
             cacheDir = File(System.getProperty("java.io.tmpdir"), "t91-wiring-dialect-cache")
         )
         return com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider(env)
-            .dialectFor(bin)
+            .capabilitiesFor(bin)
     }
 
     @Test

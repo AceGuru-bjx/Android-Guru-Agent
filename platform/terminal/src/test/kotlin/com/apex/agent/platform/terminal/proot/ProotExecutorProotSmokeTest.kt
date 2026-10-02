@@ -87,14 +87,14 @@ class ProotExecutorProotSmokeTest {
      * Termux 补丁版时探针返回 TERMUX_COMPAT，argv 含 --kill-on-exit/--，
      * 同样可执行（Termux 方言是上游超集）。
      */
-    private fun hostDialect(bin: File): com.apex.agent.platform.terminal.proot.PRootDialect {
+    private fun hostCapabilities(bin: File): com.apex.agent.platform.terminal.proot.PRootArgvCapabilities {
         val env = com.apex.agent.platform.terminal.proot.PRootHostEnvironment(
             nativeLibraryDir = bin.parentFile.absolutePath,
             baseDir = File(System.getProperty("java.io.tmpdir"), "t91-smoke-dialect-base"),
             cacheDir = File(System.getProperty("java.io.tmpdir"), "t91-smoke-dialect-cache")
         )
         return com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider(env)
-            .dialectFor(bin)
+            .capabilitiesFor(bin)
     }
 
     /** 以真实探针方言执行 builder 命令（T91：argv 原样，无适配层）。 */
@@ -124,7 +124,7 @@ class ProotExecutorProotSmokeTest {
         // 测试真正执行生产 argv 形状（与设备同一 builder 路径，零手工改写）。
         return builder.build(
             launch, AbsolutePath(bin.absolutePath), AbsolutePath("/"), AbsolutePath("/tmp"),
-            dialect = hostDialect(bin)
+            capabilities = hostCapabilities(bin)
         )
     }
 

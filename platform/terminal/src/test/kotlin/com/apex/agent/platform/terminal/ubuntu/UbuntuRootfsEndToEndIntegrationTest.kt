@@ -283,15 +283,15 @@ class UbuntuRootfsEndToEndIntegrationTest {
      * 若用户以 T72_PROOT_BIN 指向 Termux 补丁版，则返回 TERMUX_COMPAT，
      * argv 同样可执行（上游形状是 Termux 方言的子集）。
      */
-    private fun hostDialect(): com.apex.agent.platform.terminal.proot.PRootDialect {
-        val bin = prootBinary ?: return com.apex.agent.platform.terminal.proot.PRootDialect.UPSTREAM
+    private fun hostCapabilities(): com.apex.agent.platform.terminal.proot.PRootArgvCapabilities {
+        val bin = prootBinary ?: return com.apex.agent.platform.terminal.proot.PRootArgvCapabilities.UPSTREAM_SAFE
         val env = com.apex.agent.platform.terminal.proot.PRootHostEnvironment(
             nativeLibraryDir = bin.parentFile.absolutePath,
             baseDir = File(System.getProperty("java.io.tmpdir"), "t91-dialect-base"),
             cacheDir = File(System.getProperty("java.io.tmpdir"), "t91-dialect-cache")
         )
         return com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider(env)
-            .dialectFor(bin)
+            .capabilitiesFor(bin)
     }
 
     private fun executorWith(): ProotExecutor {
@@ -305,7 +305,7 @@ class UbuntuRootfsEndToEndIntegrationTest {
 
     private fun realBackend(): LinuxPRootBackend {
         val bin = prootBinary!!
-        val dialect = hostDialect()
+        val capabilities = hostCapabilities()
         val binaryProvider = object : com.apex.agent.platform.terminal.proot.PRootBinaryProvider {
             override suspend fun locate(): Result<AbsolutePath> = Result.success(AbsolutePath(bin.absolutePath))
             override suspend fun verify(binary: AbsolutePath): Result<PRootBinaryInfo> = Result.success(
@@ -313,7 +313,7 @@ class UbuntuRootfsEndToEndIntegrationTest {
                 // NativeLibraryPRootBinaryProvider.verify 的判定路径同源。
                 PRootBinaryInfo(
                     binary, PRootVersion(5, 4, 0), CpuArchitecture.X86_64, true,
-                    dialect = dialect
+                    capabilities = capabilities
                 )
             )
         }

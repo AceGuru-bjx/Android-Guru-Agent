@@ -32,7 +32,14 @@
 | 二进制 | `--kill-on-exit` | `--` 分隔符 | 出现场景 |
 | --- | --- | --- | --- |
 | 捆绑 Termux 补丁版 5.1.107.92 | 支持 | 支持 | 设备生产（APK jniLibs） |
-| 上游版（Ubuntu 5.1.0 / Debian 5.4） | **不认**（unknown option 拒启） | **不认** | CI E2E、本地开发 host proot |
+| 上游 5.1.0（Ubuntu 24.04 存档） | **不认**（unknown option 拒启） | **不认** | CI E2E、本地开发 host proot |
+| Debian 5.4.0（CI 实测） | **支持**（上游已采纳） | **不认**（unknown option） | CI E2E 的 host proot |
+
+> **两项能力正交**（Debian 5.4 即混合形态）—— 首版实现曾把它们耦合在单一
+> 方言枚举（killOnExit ⇒ separator），CI 上 Debian 5.4 的探针如实返回
+> 「支持 kill-on-exit」却被连带发出 `--` 而拒启。终版改为
+> `PRootArgvCapabilities` 能力对：**双探针独立实测、独立决策**，并以
+> `PRootArgvCapabilitiesTest`（含 Debian 5.4 混合形态 golden）锁定。
 
 T88 时代靠测试内 `adaptForUpstreamProot` 手工过滤——与 `-E` 事故同构的
 「适配层遮蔽真实 argv」风险：**CI 绿不等于设备绿**。
@@ -42,18 +49,23 @@ T88 时代靠测试内 `adaptForUpstreamProot` 手工过滤——与 `-E` 事故
 ```
 NativeLibraryPRootBinaryProvider.verify()
   ├─ 既有：ELF 机器字节判定 / ABI 匹配 / --version 解析
-  └─ 新增：--kill-on-exit 能力探针（exec `<binary> --kill-on-exit --version`，
-     不 ptrace、10s 有界）→ PRootDialect { TERMUX_COMPAT | UPSTREAM }
-     └─ 探针 exec 异常 → 保守回落 TERMUX_COMPAT（设备行为不变）；
-        结果按二进制路径记忆化（provider 为 DI 单例，每会话 verify 不重复 exec）
+  └─ 新增：双能力探针（各自独立，10s 有界，按二进制路径记忆化 ——
+     provider 为 DI 单例，每会话 verify 不重复 exec）
+       ├─ kill-on-exit 探针：exec `<binary> --kill-on-exit --version`，
+       │  exit 0 = 支持（不 ptrace，环境无关）
+       └─ separator 探针：exec `<binary> -- <sh> -c true`（shell 路径回退
+          /bin/sh → /system/bin/sh），exit 0 = 支持。该探针经 tracer 真实
+          exec —— ptrace 受限环境给出假阴性，**假阴性方向安全**（省略 `--`
+          在任何 proot 上均合法：guest 命令恒以非选项 token /usr/bin/env
+          开头，天然分界）
+     探针不可判定（exec 异常/超时）→ 保守省略该项
 
 LinuxPRootBackend.prepare()
-  └─ verify 结果的方言（此前只作门禁被丢弃——静默差异的直接根源）→
-     PRootCommandBuilder.build(dialect)
-       ├─ TERMUX_COMPAT：发 --kill-on-exit + --（既有设备行为，逐字节不变）
-       └─ UPSTREAM：两者省略；env trampoline 原样保留
-          （proot 上游解析器遇首个非选项 token 即命令起点，
-           /usr/bin/env -i 天然分界 —— CI 实测同形可用）
+  └─ verify 结果的能力集（此前只作门禁被丢弃——静默差异的直接根源）→
+     PRootCommandBuilder.build(capabilities)
+       ├─ 捆绑 Termux 5.1.107：发 --kill-on-exit + --（设备 argv 逐字节不变）
+       ├─ 上游 5.1.0：两者省略；env trampoline 原样保留
+       └─ Debian 5.4：只发 --kill-on-exit（混合形态，CI 实测）
 ```
 
 `PRootArgvContract` 双方言形状化：黑名单扫描边界（`--` 或 trampoline 首元素
@@ -68,9 +80,14 @@ LinuxPRootBackend.prepare()
 
 ### 2.4 测试
 
-- `PRootDialectAdaptationTest`（新增，9 项）：探针三态映射 / 记忆化（探针只
-  exec 一次）/ 双方言 golden argv / killOnExit=false 恒不发 / 契约双方言形状
-  与违规拒绝 / backend prepare 端到端方言路由。
+- `PRootArgvCapabilitiesTest`（新增，10 项）：双探针三态映射（含 Debian 5.4
+  混合形态回归锁 —— 本套件的诞生动机）/ 记忆化（每项探针只 exec 一次）/
+  四能力组合 golden argv / killOnExit=false 恒不发 / 契约多形状与违规拒绝 /
+  backend prepare 端到端能力路由。
+- 本地真实复现：Debian proot 5.4.0（CI 同版本）上走生产路径（探针 → builder →
+  ProotExecutor）全链路 —— 探针如实给出混合能力（killOnExit=true,
+  separator=false），argv 正确自适应，`P71_SMOKE` env 注入 + `-w /root` cwd
+  均生效，exitCode=0。
 - 既有 golden（`LinuxPRootBackendTest` argv 契约、`PRootCommandBuilderTest`
   27 项）全部保持绿 —— 默认方言 = 捆绑 Termux 版，设备行为不变。
 

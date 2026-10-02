@@ -101,8 +101,8 @@ class LinuxPRootBackend(
         val binaryPath = binaryProvider.locate().getOrElse { e ->
             return Result.failure(e)
         }
-        // T91（D5）：verify 结果不再只作门禁 —— 方言（能力探针实测）参与 argv 决策
-        //（上游 proot 不认 --kill-on-exit/-- 时自动省略，根除版本静默差异）。
+        // T91（D5）：verify 结果不再只作门禁 —— 能力集（双探针实测）参与 argv
+        // 决策（目标 proot 不认的选项自动省略，根除版本静默差异）。
         val verifiedInfo = binaryProvider.verify(binaryPath).getOrElse { e ->
             return Result.failure(e)
         }
@@ -154,11 +154,11 @@ class LinuxPRootBackend(
         )
 
         // 6. argv（PRootCommandBuilder：request.binds + workspace bind；T91（D5）：
-        //    按实测方言自适应 —— 捆绑 Termux 5.1.107 发 --kill-on-exit/--，
-        //    上游 5.1.0/5.4 自动省略两者）
+        //    按双探针实测能力集自适应 —— 捆绑 Termux 5.1.107 发 --kill-on-exit/--，
+        //    上游 5.1.0 两者皆省，Debian 5.4 只发 --kill-on-exit）
         val workspaceHostDir = AbsolutePath(workspaceDir.absolutePath)
         val command = commandBuilder.build(
-            launch, binaryPath, rootfsPath, workspaceHostDir, dialect = verifiedInfo.dialect
+            launch, binaryPath, rootfsPath, workspaceHostDir, capabilities = verifiedInfo.capabilities
         )
         val argv = listOf(command.executable.value) + command.arguments
 

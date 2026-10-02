@@ -100,7 +100,7 @@ object PRootEnvTrampoline {
  *  2. proot 5.1 兼容回归（[LEGACY_INCOMPATIBLE_FLAGS] 永不为空命中）
  *  3. 诊断工具运行时自检（terminal.diagnostics 的 argv 审计）
  *
- * T91（D5）：argv 有两种合法形状（方言自适应 —— 见 [PRootDialect]）：
+ * T91（D5）：argv 的合法形状由能力集决定（双探针实测 —— 见 [PRootArgvCapabilities]）：
  *  - Termux 方言：`…options -- /usr/bin/env -i K=V… cmd args…`；
  *  - 上游方言：`…options /usr/bin/env -i K=V… cmd args…`（无 `--` 终结符，
  *    首个非选项 token 即命令起点）。两个检查均接受两种形状。
