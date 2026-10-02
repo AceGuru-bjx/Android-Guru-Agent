@@ -33,6 +33,7 @@ import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.platform.code.ws.CodeWorkspace
 import com.apex.agent.platform.code.ws.CodeWorkspaceManager
+import com.apex.agent.slash.SlashCommand
 import com.apex.agent.slash.SlashCommandParser
 import com.apex.agent.slash.SlashCommandRouter
 import com.apex.agent.slash.SlashRouteContext
@@ -319,6 +320,14 @@ class CodeViewModel @Inject constructor(
             runEngine(command)
             return
         }
+        // ═══ v1.5 /logic:<mode> — 本地路由命令：切换双思考逻辑 ═══
+        // 与其他四类命令不同，这是纯 ViewModel 状态操作（持久化 + 门面路由
+        // + 会话现场保留），必须在此截获、不进通用路由（Agent 屏才会走到
+        // 路由的引导分支）。运行中拒绝切换与选择器入口同口径（防丢现场）。
+        if (parsed is SlashCommand.Logic) {
+            handleLogicCommand(parsed)
+            return
+        }
         val context = SlashRouteContext(
             githubConnected = githubTokenManager.isConnected(),
             githubUsername = githubTokenManager.getUsername(),
@@ -340,6 +349,33 @@ class CodeViewModel @Inject constructor(
         }
         if (route.agentPrompt.isNotBlank()) {
             runEngine(route.agentPrompt)
+        }
+    }
+
+    /**
+     * `/logic:<mode>` 执行体（v1.5 双引擎切换的命令通道，与右上角选择器
+     * 共用 [setLogicMode] 同一入口：持久化 + 门面路由 + 会话现场保留 +
+     * 系统消息回执）。
+     *
+     * - id 解析走 [StandardLogicMode.fromName] 容错别名（standard/std →
+     *   标准；deep_dive/deep/apex → 深潜）；
+     * - 未知 id → 引导消息（不进引擎、不改状态）；
+     * - 运行中拒绝切换 → 与选择器同口径提示（[R.string.code_logic_switch_blocked]）。
+     */
+    private fun handleLogicCommand(command: com.apex.agent.slash.SlashCommand.Logic) {
+        val mode = StandardLogicMode.fromName(command.id)
+        if (mode == null) {
+            appendSystemMessage(
+                languageManager.getString(R.string.code_logic_unknown_mode, command.id)
+            )
+            return
+        }
+        // setLogicMode 内部已发切换回执（code_logic_switched_*）与
+        // isRunning 拒绝分支（返回 false）；此处补齐命令通道的失败提示。
+        if (!setLogicMode(mode)) {
+            appendSystemMessage(
+                languageManager.getString(R.string.code_logic_switch_blocked)
+            )
         }
     }
 

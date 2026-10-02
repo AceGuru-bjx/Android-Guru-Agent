@@ -136,6 +136,15 @@ object SlashCommandRouter {
 
         is SlashCommand.Mcp -> routeMcp(command, context)
 
+        is SlashCommand.Logic -> SlashCommandRoute(
+            // 本地路由命令：Coding 屏在路由前已截获执行（见 CodeViewModel
+            // handleSlashCommand 的 Logic 分支），到达这里的是 Agent 屏——
+            // 双引擎是 Coding 模式专属能力，展示引导消息且不生成 agentPrompt
+            // （空 prompt = 不进引擎，与 /mcp:<id> 未连接的拦截语义一致）。
+            systemMessage = "🧭 思考逻辑切换仅 Coding 模式可用——请在 Coding 屏右上角选择器或输入 /logic:standard | /logic:deep_dive",
+            agentPrompt = ""
+        )
+
         is SlashCommand.Connector -> SlashCommandRoute(
             systemMessage = "🔗 使用连接器: ${command.id}",
             agentPrompt = command.buildAgentPrompt(

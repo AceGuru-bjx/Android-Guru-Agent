@@ -221,4 +221,5 @@
     <string name="code_logic_switch_blocked">A run is active — switch after it finishes</string>
     <string name="code_logic_switched_standard">🧭 Thinking logic switched to Standard (agent loop). Your Deep Dive session is kept and will resume when you switch back.</string>
     <string name="code_logic_switched_deep_dive">🤿 Thinking logic switched to Deep Dive (self-designed seven tiers). Your Standard session is kept and will resume when you switch back.</string>
+    <string name="code_logic_unknown_mode">⚠️ /logic:%1$s is not a known mode — use /logic:standard or /logic:deep_dive (aliases: std, deep)</string>
 </resources>
