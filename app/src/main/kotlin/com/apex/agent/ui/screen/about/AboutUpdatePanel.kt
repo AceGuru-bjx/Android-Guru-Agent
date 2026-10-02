@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.widget.Toast
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,30 +15,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.SystemUpdateAlt
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -104,19 +95,6 @@ private sealed interface UpdateUiState {
     data object Idle : UpdateUiState
     data object Checking : UpdateUiState
     data class Done(val result: UpdateCheckResult) : UpdateUiState
-}
-
-/** 下载完成后的一次性事件（全量包路径；增量路径走 PatchUpdateEngine.State）。 */
-private sealed interface DownloadFinished {
-
-    /** 全量 APK 下载完成且校验通过 —— 弹「立即安装」确认框。 */
-    data class ApkReady(val file: File) : DownloadFinished
-
-    /** 安装器未能拉起（罕见环境）—— 展示路径让用户手动装。 */
-    data class InstallFailed(val file: File) : DownloadFinished
-
-    /** SHA-256 校验失败 —— 文件不可用。 */
-    data class VerifyFailed(val fileName: String) : DownloadFinished
 }
 
 @Composable
@@ -780,539 +758,45 @@ internal fun UpdatePanel() {
     }
 
     // ── 下载完成事件对话框（全量包路径：弹「立即安装」按钮）───────────────────
-    when (val event = finished) {
-        is DownloadFinished.ApkReady -> {
-            // 版本号来自当前清单（下载中重查过/清单过期时退化为通用文案）
-            val manifest = availableManifest
-            val launchedHint = stringResource(R.string.about_update_installer_launched_toast)
-            AlertDialog(
-                onDismissRequest = {
-                    // 点外部关闭与「稍后」同义：登记重入口（动作区一键回弹）
-                    readyFull = event.file
-                    finished = null
-                },
-                title = { Text(stringResource(R.string.settings_about_update_apk_done_title)) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            stringResource(
-                                R.string.settings_about_update_apk_done_body,
-                                manifest?.versionName ?: "",
-                                formatMb(event.file.length())
-                            ),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            stringResource(
-                                R.string.settings_about_update_patch_done_saved,
-                                event.file.absolutePath
-                            ),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        if (downloader.installApk(event.file)) {
-                            finished = null
-                            Toast.makeText(context, launchedHint, Toast.LENGTH_SHORT).show()
-                        } else {
-                            finished = DownloadFinished.InstallFailed(event.file)
-                        }
-                    }) {
-                        Text(stringResource(R.string.about_update_install_now))
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        // 稍后安装：保留 readyFull 重入口（动作区一键回弹本框）
-                        readyFull = event.file
-                        finished = null
-                    }) {
-                        Text(stringResource(R.string.about_update_install_later))
-                    }
-                }
-            )
-        }
-
-        is DownloadFinished.InstallFailed -> AlertDialog(
-            onDismissRequest = {
-                readyFull = event.file
-                finished = null
-            },
-            title = { Text(stringResource(R.string.settings_about_update_install_failed_title)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.settings_about_update_install_failed,
-                        event.file.absolutePath
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    readyFull = event.file
-                    finished = null
-                }) {
-                    Text(stringResource(R.string.settings_about_update_close))
-                }
-            }
-        )
-
-        is DownloadFinished.VerifyFailed -> AlertDialog(
-            onDismissRequest = { finished = null },
-            title = { Text(stringResource(R.string.settings_about_update_verify_failed_title)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.settings_about_update_verify_failed_body, event.fileName
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { finished = null }) {
-                    Text(stringResource(R.string.settings_about_update_close))
-                }
-            }
-        )
-
-        null -> Unit
-    }
+    // 对话框层拆分至 AboutUpdateDialogs（SRP 1200 行预算）；此处只做状态接线。
+    FinishedDownloadDialogs(
+        event = finished,
+        manifest = availableManifest,
+        downloader = downloader,
+        onLater = { file ->
+            // 稍后安装/点外关闭：登记重入口（动作区一键回弹）
+            readyFull = file
+            finished = null
+        },
+        onDismiss = { finished = null },
+        onInstallLaunched = { finished = null },
+        onInstallFailed = { file -> finished = DownloadFinished.InstallFailed(file) }
+    )
 
     // ── 增量流水线对话框：就绪弹安装按钮 / 已拉起安装器 / 失败双路 ──────
-    when (val flow = patchFlow) {
-        // 合成完成且指纹对账通过 —— 用户主导安装时机（下载完弹出的安装按钮）
-        is PatchUpdateEngine.State.Ready -> {
+    // 对话框层拆分至 AboutUpdateDialogs；重试可用性（链可解析）在此判定。
+    val retryChain = if (patchFlow is PatchUpdateEngine.State.Failed) {
+        availableManifest?.let { checker.resolvePatchChain(patchIndex, it, BuildConfig.VERSION_NAME) }
+    } else null
+    PatchFlowDialogs(
+        flow = patchFlow,
+        manifest = availableManifest,
+        canRetry = retryChain != null,
+        onDismiss = { center.resetPatchState() },
+        onInstall = { apk -> installNow(apk) },
+        onRetry = {
+            center.resetPatchState()
             val manifest = availableManifest
-            AlertDialog(
-                onDismissRequest = { center.resetPatchState() },
-                title = { Text(stringResource(R.string.about_update_install_ready_title)) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            stringResource(
-                                R.string.about_update_install_ready_body,
-                                manifest?.versionName ?: "",
-                                formatMb(flow.sizeBytes)
-                            ),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            flow.apk.absolutePath,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { installNow(flow.apk) }) {
-                        Text(stringResource(R.string.about_update_install_now))
-                    }
-                },
-                dismissButton = {
-                    // 稍后安装：保留 readyPatch 重入口（动作区一键回弹本框）
-                    TextButton(onClick = { center.resetPatchState() }) {
-                        Text(stringResource(R.string.about_update_install_later))
-                    }
-                }
-            )
-        }
-
-        is PatchUpdateEngine.State.Installed -> AlertDialog(
-            onDismissRequest = { center.resetPatchState() },
-            title = { Text(stringResource(R.string.about_update_patch_done_title)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        stringResource(R.string.about_update_patch_done_body),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        flow.apk.absolutePath,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { center.resetPatchState() }) {
-                    Text(stringResource(R.string.settings_about_update_close))
-                }
+            val chain = manifest?.let {
+                checker.resolvePatchChain(patchIndex, it, BuildConfig.VERSION_NAME)
             }
-        )
-
-        is PatchUpdateEngine.State.Failed -> {
-            // 失败原因按类别本地化；detail 只进日志/高级线索
-            val body = when (flow.kind) {
-                PatchUpdateEngine.FailKind.SPACE -> stringResource(
-                    R.string.about_update_patch_failed_space,
-                    // 预检 detail 形如 "need=… free=…"；UI 侧拿不到体积参数时退化为通用语
-                    flow.detail?.substringAfter("need=")?.substringBefore(" ")
-                        ?.toLongOrNull()?.let { formatMb(it) } ?: ""
-                )
-                PatchUpdateEngine.FailKind.DOWNLOAD -> stringResource(
-                    R.string.about_update_patch_failed_download
-                )
-                PatchUpdateEngine.FailKind.VERIFY -> stringResource(
-                    R.string.about_update_patch_failed_verify, flow.detail.orEmpty()
-                )
-                PatchUpdateEngine.FailKind.DECODE -> stringResource(
-                    R.string.about_update_patch_failed_decode, flow.detail.orEmpty()
-                )
-                PatchUpdateEngine.FailKind.INSTALLER -> stringResource(
-                    R.string.about_update_patch_failed_installer, flow.detail.orEmpty()
-                )
-            }
-            AlertDialog(
-                onDismissRequest = { center.resetPatchState() },
-                title = { Text(stringResource(R.string.about_update_patch_failed_title)) },
-                text = {
-                    Text(
-                        body,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                },
-                confirmButton = {
-                    // 重试增量：沿用同一条链重启流水线
-                    val result = (updateState as? UpdateUiState.Done)?.result
-                    val manifest = (result as? UpdateCheckResult.Available)?.latest
-                    val chain = manifest?.let {
-                        checker.resolvePatchChain(patchIndex, it, BuildConfig.VERSION_NAME)
-                    }
-                    TextButton(
-                        onClick = {
-                            center.resetPatchState()
-                            if (manifest != null && chain != null) {
-                                startPatchFlow(chain, manifest)
-                            }
-                        },
-                        enabled = manifest != null && chain != null
-                    ) {
-                        Text(stringResource(R.string.about_update_patch_retry))
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        center.resetPatchState()
-                        startDownload()
-                    }) {
-                        Text(stringResource(R.string.about_update_patch_use_full))
-                    }
-                }
-            )
-        }
-
-        else -> Unit
-    }
-}
-
-// ── 小控件 ──────────────────────────────────────────────────────────────────
-
-/**
- * 增量流水线进度：下载段（N/M · 百分比 · 已下载字节）或合成段（补丁 N/M ·
- * 百分比）—— v1.4.5 附「后台持续 + 断点续传」提示（离开页面不中断）。
- */
-@Composable
-private fun PatchFlowProgress(flow: PatchUpdateEngine.State) {
-    Column(
-        Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        when (flow) {
-            is PatchUpdateEngine.State.Downloading -> {
-                LinearProgressIndicator(
-                    progress = { flow.percent / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        stringResource(
-                            R.string.about_update_patch_downloading,
-                            flow.step, flow.steps, flow.percent
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                    if (flow.bytesSoFar > 0) {
-                        Text(
-                            formatMb(flow.bytesSoFar),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-                Text(
-                    stringResource(R.string.about_update_patch_background_note),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
-                )
-            }
-
-            is PatchUpdateEngine.State.Applying -> {
-                LinearProgressIndicator(
-                    progress = { flow.percent / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    stringResource(
-                        R.string.about_update_patch_applying,
-                        flow.step, flow.steps, flow.percent
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
-                Text(
-                    stringResource(R.string.about_update_patch_background_note),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
-                )
-            }
-
-            else -> Unit
-        }
-    }
-}
-
-/**
- * 补丁链路可视化 —— 本地版本 →（每段补丁 · 体积）→ 目标版本。
- * 等宽小字 + 箭头，实验室标签风格；单段链只画一行直达。
- */
-@Composable
-private fun PatchChainPath(chain: PatchIndex.Chain) {
-    val scheme = MaterialTheme.colorScheme
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        // 路径行：vLocal → vMid → … → vTarget（节点 = 补丁边界版本）
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val nodes = buildList {
-                add(chain.steps.firstOrNull()?.fromTag?.removePrefix("v") ?: "?")
-                chain.steps.forEach { add(it.toTag.removePrefix("v")) }
-            }
-            nodes.forEachIndexed { index, node ->
-                if (index > 0) {
-                    Text(
-                        " → ",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = scheme.outline
-                    )
-                }
-                Text(
-                    node,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (index == nodes.lastIndex) FontWeight.SemiBold
-                    else FontWeight.Normal,
-                    color = if (index == nodes.lastIndex) scheme.primary else scheme.onSurfaceVariant
-                )
-            }
-        }
-        // 分段体积行（>1 段才展开；单跳已在按钮上标总体积）
-        if (chain.steps.size > 1) {
-            Text(
-                chain.steps.joinToString(" · ") { formatMb(it.sizeBytes) },
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = scheme.outline
-            )
-        }
-    }
-}
-
-/** 主色实底小徽章（NEW）。 */
-@Composable
-private fun StatusBadge(text: String) {
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = MaterialTheme.colorScheme.primary
-    ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimary,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-        )
-    }
-}
-
-/** 当前下载源展示行：镜像名 + 延迟徽章（AUTO 显示已解析的最快节点）。 */
-@Composable
-private fun MirrorSelectionRow(
-    selected: DownloadMirror,
-    speeds: Map<DownloadMirror, Long>,
-    onClick: () -> Unit
-) {
-    val fastest = speeds.minByOrNull { it.value }?.key
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.60f),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Icon(
-                Icons.Outlined.Speed,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp)
-            )
-            Column(Modifier.weight(1f)) {
-                Text(
-                    stringResource(R.string.settings_about_update_source),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.outline
-                )
-                val label = when (selected) {
-                    DownloadMirror.AUTO -> {
-                        val target = fastest?.let { mirrorLabel(it) }
-                            ?: stringResource(R.string.settings_about_update_source_direct)
-                        stringResource(R.string.settings_about_update_source_auto) + " · $target"
-                    }
-                    else -> mirrorLabel(selected)
-                }
-                Text(label, style = MaterialTheme.typography.bodyMedium)
-            }
-            // 右侧：AUTO 且有测速 → 「最快」；手选 → 延迟毫秒
-            if (selected == DownloadMirror.AUTO && fastest != null) {
-                Text(
-                    stringResource(R.string.settings_about_update_fastest),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            } else if (selected != DownloadMirror.AUTO) {
-                speeds[selected]?.let { latency ->
-                    Text(
-                        stringResource(R.string.settings_about_update_ms, latency),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                }
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline
-            )
-        }
-    }
-}
-
-/** 镜像选择对话框：单选 + 各节点延迟 + 打开即测速。 */
-@Composable
-private fun MirrorSelectionDialog(
-    selected: DownloadMirror,
-    speeds: Map<DownloadMirror, Long>,
-    probing: Boolean,
-    onSelect: (DownloadMirror) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val fastest = speeds.minByOrNull { it.value }?.key
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_about_update_source_title)) },
-        // text 必须传 lambda：直接传 Column(...) 调用会得到 Unit，
-        // 导致 AlertDialog 重载解析失败并级联报出 title/confirmButton 处的
-        // 假错误（@Composable invocations can only happen…）。
-        text = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier.verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    stringResource(R.string.settings_about_update_mirror_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-
-                val options = listOf(DownloadMirror.AUTO) + DownloadMirror.NODES
-                options.forEach { mirror ->
-                    val latency = speeds[mirror]
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(mirror) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = mirror == selected, onClick = { onSelect(mirror) })
-                        Column(Modifier.weight(1f)) {
-                            Text(mirrorLabel(mirror), style = MaterialTheme.typography.bodyMedium)
-                            if (mirror == DownloadMirror.AUTO) {
-                                Text(
-                                    stringResource(R.string.settings_about_update_mirror_auto_hint),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline
-                                )
-                            }
-                        }
-                        // 延迟徽章：测速中 spinner 文案 / 毫秒 / 不通
-                        val latencyText = when {
-                            probing && mirror != DownloadMirror.AUTO ->
-                                stringResource(R.string.settings_about_update_speedtesting)
-                            latency != null ->
-                                stringResource(R.string.settings_about_update_ms, latency)
-                            mirror != DownloadMirror.AUTO ->
-                                stringResource(R.string.settings_about_update_unreachable)
-                            else -> ""
-                        }
-                        if (latencyText.isNotEmpty()) {
-                            Text(
-                                latencyText,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (mirror == fastest) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.outline
-                                }
-                            )
-                        }
-                        if (mirror == fastest) {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                stringResource(R.string.settings_about_update_fastest),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
+            if (manifest != null && chain != null) {
+                startPatchFlow(chain, manifest)
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.settings_about_update_close))
-            }
+        onUseFull = {
+            center.resetPatchState()
+            startDownload()
         }
     )
 }
-
-/** 镜像显示名（加速站以其域名命名，免翻译歧义）。 */
-@Composable
-private fun mirrorLabel(mirror: DownloadMirror): String = when (mirror) {
-    DownloadMirror.AUTO -> stringResource(R.string.settings_about_update_source_auto)
-    DownloadMirror.DIRECT -> stringResource(R.string.settings_about_update_source_direct)
-    DownloadMirror.GHFAST -> "ghfast.top"
-    DownloadMirror.GHPROXY_NET -> "ghproxy.net"
-    DownloadMirror.GHPROXY_COM -> "gh-proxy.com"
-}
-
-/** 字节数 → 「318.4 MB」式人类可读体积（一位小数：<1MB 不再显示成 0 MB）。 */
-private fun formatMb(bytes: Long): String =
-    String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
