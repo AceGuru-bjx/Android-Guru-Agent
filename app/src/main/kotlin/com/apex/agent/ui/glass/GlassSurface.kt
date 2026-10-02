@@ -109,9 +109,20 @@ fun GlassSurface(
             .shadow(elevation = style.elevation, shape = shape, clip = false)
             // 按压缩放：玻璃的“形变”反馈 —— 替代涟漪的材质语言
             .glassScale(style, activation, scaleOnPress)
-            // 禁用态整体降权
-            .graphicsLayer { alpha = if (enabled) 1f else 0.55f }
-            .clip(shape)
+            // ═══ 层级裁剪（白天模式矩形露角根因修复 v1.4.5）═══
+            // Haze 的 backdrop 采样层（API 32+ RenderEffect）与 scrim 兜底层
+            //（API < 32）都按**矩形**绘制，`Modifier.clip(shape)` 的 Canvas
+            // 裁剪在 RenderEffect/离屏合成路径上不可靠 —— 乳白 tint 层以
+            // 方角矩形浮出圆角卡片（白天模式高对比下尤其扎眼）。
+            // `graphicsLayer { shape; clip = true }` 把圆角下推到
+            // RenderNode 层（setClipToBounds + Outline），任何子层、任何
+            // 渲染效果、任何 API 级别都无法逃逸 —— 这是 Compose 里最强的
+            // 裁剪保证。禁用态 alpha 合并进同一层（省一个离屏层）。
+            .graphicsLayer {
+                this.shape = shape
+                this.clip = true
+                alpha = if (enabled) 1f else 0.55f
+            }
             .then(materialModifier)
             // 边缘光 / 镜面高光 / 扫掠光带 / 底部内阴影 / 激活增亮 —— 绘制在材质之上、内容之下
             .drawBehind {

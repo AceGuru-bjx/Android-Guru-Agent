@@ -337,6 +337,12 @@ fun GlassDialog(
     val panel: @Composable () -> Unit = {
         GlassSurface(
             modifier = modifier,
+            // v1.4.5 缺陷修复：state 此前只给了 HazeDialog 窗口壳、没传给面板
+            // 本体 —— 对话框玻璃从不采样背景（纯 Frosted），与「跨窗口采样
+            // 背后真实内容」的声明直接矛盾。传 state 后面板挂 hazeEffect，
+            // 经共享 HazeState 采样 Activity 窗口内容（Haze 1.4 GraphicsLayer
+            // 跨窗口保留可采样）。
+            state = state,
             style = style,
             shape = shape
         ) {

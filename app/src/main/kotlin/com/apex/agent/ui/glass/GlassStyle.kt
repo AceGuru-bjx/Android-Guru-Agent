@@ -172,18 +172,23 @@ internal fun glassPalette(style: GlassStyle, accent: Color): GlassPalette {
             sweepColor = Color.White.copy(alpha = style.specularAlpha * 2.4f + 0.12f)
         )
     } else {
-        // 浅色玻璃 v2（用户反馈「白天液态玻璃做的啥也不是」）：
-        // 三层递进 —— ①霜底更通透（scrimAlpha+0.16，原 +0.22 过实像塑料片，
-        // 白底上直接是一块灰板）；②顶部受光带加亮加宽（specular*1.6+0.20，
-        // 配合 GlassSurface 的斜向扫掠形成可辨识的光带）；③下缘定界收窄
-        //（edgeAlpha*0.10，原 0.14 在白天显灰脏边）。层次拉开后玻璃才有
-        // 「材质感」而非「纯色填充」。
+        // 浅色玻璃 v4（v1.4.5「白天模式大幅度修复」）：
+        // 圆角裁剪根因修复后，白天玻璃的三层递进终于可见 —— 配套把材质
+        // 从「乳白实底」调向「真透射」：
+        // ① tint 提升量 +0.14 → +0.08：v3 的实底 tint 在矩形露角修复前
+        //    被方角矩形放大成「一块白板」；现在采样层被正确圆角裁剪，
+        //    降低浓度让底衬的模糊内容透出来 —— 白霜玻璃「磨砂但可透」；
+        // ② 采样背景兜底色 background → surfaceContainerLow：纯白兜底让
+        //    模糊边缘（inflate 出来的边带）在白底上发白光，冷一档后与
+        //    卡片表面自然融合；
+        // ③ 霜底 +0.16 → +0.12：Frosted 档同向减实，靠顶光带与中带
+        //    分隔高光立层次（层次来自光影，不来自把底色做实）。
         GlassPalette(
             dark = dark,
-            hazeBackground = scheme.background,
+            hazeBackground = scheme.surfaceContainerLow,
             // 磨砂层叠：surfaceVariant 比 surface 深一档，白底上才叠得出「一层玻璃」；
             // 再薄叠 primary（0.05）给玻璃一点主题色倾向 —— 只给倾向，不刷屏
-            hazeTint = scheme.surfaceVariant.copy(alpha = style.tintAlpha + 0.14f)
+            hazeTint = scheme.surfaceVariant.copy(alpha = (style.tintAlpha + 0.08f).coerceAtMost(1f))
                 .compositeOverNeutral(scheme.primary.copy(alpha = 0.05f)),
             // 低 API 无 blur 的 scrim 兜底：更实的乳白，内容仍可读
             // （Strong 档相加会 >1f，clamp 防 alpha 越界后 toArgb 打包错位）
@@ -193,7 +198,7 @@ internal fun glassPalette(style: GlassStyle, accent: Color): GlassPalette {
             // Frosted 霜底：乳白偏灰但更透 —— 靠顶光带 + 中带分隔高光补层次，
             // 而不是把底色做实（做实就是「白上贴灰块」，正是被吐槽的观感）
             frostBase = scheme.surfaceVariant.copy(
-                alpha = (style.scrimAlpha + 0.16f).coerceAtMost(1f)
+                alpha = (style.scrimAlpha + 0.12f).coerceAtMost(1f)
             ),
             // 顶部受光提亮：白色 lift 加宽加亮 —— 霜面上亮下实，正是磨砂玻璃的受光方向
             frostLift = Color.White.copy(alpha = style.specularAlpha * 1.6f + 0.20f),

@@ -799,9 +799,18 @@ private fun SpecimenGlass(
                     ambientColor = glow.color, spotColor = glow.color
                 )
             )
-            // 按压缩放：玻璃的「形变」反馈（单次动画值直接映射）
-            .graphicsLayer { val s = 1f - 0.03f * press; scaleX = s; scaleY = s }
-            .clip(shape)
+            // ═══ 层级裁剪 + 按压缩放合并层（矩形露角根因修复 v1.4.5）═══
+            // 与 GlassSurface 同源：graphicsLayer { shape; clip = true } 把
+            // 圆角下推到 RenderNode 层 —— Haze 采样层/scrim 层的矩形绘制
+            // 被硬裁剪，白天模式不再露方角（Modifier.clip 在 RenderEffect
+            // 路径上不可靠）。
+            .graphicsLayer {
+                val s = 1f - 0.03f * press
+                scaleX = s
+                scaleY = s
+                this.shape = shape
+                this.clip = true
+            }
             .then(material)
             // 边缘光 / 顶缘内高光 / 15° 条纹 —— 画在材质之上、内容之下
             .drawBehind {

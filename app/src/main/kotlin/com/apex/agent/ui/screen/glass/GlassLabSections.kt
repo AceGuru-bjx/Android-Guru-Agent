@@ -515,8 +515,10 @@ internal fun ChecklistSection(mode: GlassLabMode) {
     val pass = Color(0xFF22C55E)
     val fallback = Color(0xFFF59E0B)
     val fail = scheme.error
-    // Blur 档运行时判定：API 32+ 才有 RenderEffect GPU 模糊，之下诚实降级 scrim
-    val blurOn = Build.VERSION.SDK_INT >= 32
+    // Blur 档运行时判定：API 31+ 才有 RenderEffect GPU 模糊（Haze canUseGraphicLayers
+    // 的真实阈值 —— Android 12 即 RenderEffect；旧代码写 32 把 12 代机型误判成降级），
+    // 之下诚实降级 scrim
+    val blurOn = Build.VERSION.SDK_INT >= 31
 
     val items = listOf(
         CheckItem(
@@ -528,7 +530,7 @@ internal fun ChecklistSection(mode: GlassLabMode) {
         CheckItem(
             name = "Blur",
             status = if (blurOn) "PASS" else "FALLBACK",
-            note = if (blurOn) "RenderEffect GPU 模糊" else "API 31-: scrim 降级，无 blur",
+            note = if (blurOn) "RenderEffect GPU 模糊（API 31+）" else "API < 31: scrim 降级，无 blur",
             color = if (blurOn) pass else fallback
         ),
         CheckItem(
