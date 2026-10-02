@@ -3,6 +3,8 @@ package com.apex.agent.terminalview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -43,7 +45,9 @@ import kotlin.math.abs
  *  - 长按：起选 → 拖选扩选 → 抬手弹上下文菜单（复制/粘贴/全选）；
  *  - 滚动：单指位移 → 行滚动；甩动 → OverScroller 惯性（`verticalScrollBounce`
  *    开时边界有回弹衰减）；键入自动跳底（Termux `scrollForNewInput`）；
- *  - 捏合：字号 ±（1.25/0.8 阈值防抖）；
+ *  - 捏合：字号 ±（1.25/0.8 阈值防抖）—— **T91 起默认关闭**
+ *    （[TerminalViewSettings.pinchZoomEnabled]=false；捏合事件在 View 层被短路，
+ *    字号调节走宿主设置页 Slider）；
  *  - 双指快击：鼠标模式右键；
  *  - 硬件键：Ctrl+字母 → 控制字节；Alt+键 → ESC 前缀；方向/F 键 → TerminalKey。
  *
@@ -110,10 +114,14 @@ class TerminalView @JvmOverloads constructor(
     private val longPressTimeoutMs: Long
     private val doubleTapTimeoutMs: Long
 
-    // ─── 光标闪烁（主线程 Handler 换相 —— 2 帧/秒；postInvalidateOnAnimation 内部
-    //     走 Choreographer 与 vsync 对齐）───
-    private var blinkOn = true
-    private var blinkScheduled = false
+    // ─── 光标闪烁（[TerminalCursorBlink] —— T92 抽出）───
+    private val cursorBlink = TerminalCursorBlink(
+        handler = mainHandler,
+        canBlink = { settings.cursorBlinks && snapshot?.cursorVisible == true &&
+            hasWindowFocus() && isAttachedToWindow },
+        onInvalidate = { invalidate() },
+        intervalMs = { settings.cursorBlinkMs.toLong() }
+    )
 
     // ─── resize 防抖 ───
     private var resizeRunnable: Runnable? = null
@@ -132,8 +140,28 @@ class TerminalView @JvmOverloads constructor(
     // ─── T92：硬件死键组合重音（欧式键盘 acute/grave/tilde…）───
     private var pendingCombiningAccent = 0
 
-    // ─── 无障碍 ───
-    private var lastA11yAnnounceUptime = 0L
+    // ─── 系统手势排除（#B-④）───
+    // Android 10+ 手势导航在屏幕左/右边缘保留了 quick-switch/返回滑区；
+    // 终端滚回历史/拖选时贴边滑动会被系统抢走。仅在本 View 触摸会话
+    // 进行中动态申请排除（DOWN 时申请、UP/CANCEL 撤销）—— 不做常驻全屏
+    // 排除（Play 对滥用 systemGestureExclusionRects 有审核红线）。
+    private val gestureExclusionRect = Rect()
+    private var gestureExclusionActive = false
+
+    private fun applyGestureExclusion(enable: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (enable == gestureExclusionActive) return
+        gestureExclusionActive = enable
+        if (enable) {
+            gestureExclusionRect.set(0, 0, width, height)
+            systemGestureExclusionRects = listOf(gestureExclusionRect)
+        } else {
+            systemGestureExclusionRects = emptyList()
+        }
+    }
+
+    // ─── 无障碍（[TerminalViewA11y] —— T92 抽出）───
+    private val a11y = TerminalViewA11y(this)
 
     init {
         isFocusable = true
@@ -146,7 +174,10 @@ class TerminalView @JvmOverloads constructor(
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             doubleTapTimeoutMs = ViewConfiguration.getDoubleTapTimeout().toLong(),
             tapTimeoutMs = ViewConfiguration.getTapTimeout().toLong(),
-            flingVelocityThreshold = density * 120f
+            flingVelocityThreshold = density * 120f,
+            // #B-⑥：捏合起手最小指距按密度换算（≈48dp）—— 并指/贴边误触
+            // 起手阶段的距离比率噪声直接冻结捏合输出。
+            minPinchStartDistPx = density * 48f
         )
         longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong()
         doubleTapTimeoutMs = ViewConfiguration.getDoubleTapTimeout().toLong()
@@ -378,11 +409,11 @@ class TerminalView @JvmOverloads constructor(
             lastTitle = t
             client?.onTerminalTitle(t)
         }
-        updateAccessibilityContent(s)
+        a11y.updateContent(s)
         // T92：鼠标模式动态跟随（vim 开关鼠标报告即生效，无需重新触摸）；
         // 首个带光标的快照到达时排闪烁（旧行为要等一次窗口焦点变化才闪）。
         gestureModel.immediateTapEnabled = s.mouseMode.enabled
-        scheduleBlinkIfNeeded()
+        cursorBlink.scheduleIfNeeded()
         invalidate()
     }
 
@@ -458,7 +489,7 @@ class TerminalView @JvmOverloads constructor(
             settings = settings,
             palette = effectivePalette,
             focused = hasWindowFocus(),
-            blinkOn = blinkOn,
+            blinkOn = cursorBlink.on,
             selectionActive = selectionModel.active,
             viewWidthPx = width,
             viewHeightPx = height,
@@ -484,7 +515,7 @@ class TerminalView @JvmOverloads constructor(
             settings = settings,
             palette = effectivePalette,
             focused = false,
-            blinkOn = false,
+            blinkOn = cursorBlink.on,
             selectionActive = false,
             viewWidthPx = width,
             viewHeightPx = height,
@@ -493,36 +524,9 @@ class TerminalView @JvmOverloads constructor(
             rowIdBase = rowIdBase
         )
 
-    // ═════════════════════ 光标闪烁（电池纪律）═════════════════════
-
-    private val blinkToggle = Runnable {
-        blinkScheduled = false
-        blinkOn = !blinkOn
-        invalidate()
-        scheduleBlinkIfNeeded()
-    }
-
-    private fun scheduleBlinkIfNeeded() {
-        val snap = snapshot
-        val canBlink = settings.cursorBlinks && snap != null && snap.cursorVisible &&
-            hasWindowFocus() && isAttachedToWindow
-        if (!canBlink) {
-            blinkOn = true
-            if (blinkScheduled) {
-                mainHandler.removeCallbacks(blinkToggle)
-                blinkScheduled = false
-            }
-            return
-        }
-        if (!blinkScheduled) {
-            blinkScheduled = true
-            mainHandler.postDelayed(blinkToggle, settings.cursorBlinkMs.toLong().coerceAtLeast(200L))
-        }
-    }
-
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
-        scheduleBlinkIfNeeded()
+        cursorBlink.scheduleIfNeeded()
         client?.onTerminalFocus(hasWindowFocus)
         // ★ T89 输入修复：窗口焦点恢复且本 View 持焦点时重拉 IME（Activity
         // 切回/弹层关闭后输入法被系统收走的经典场景；IME 仅在窗口有焦点时
@@ -544,6 +548,11 @@ class TerminalView @JvmOverloads constructor(
         lastTouchX = event.x
         lastTouchY = event.y
         val sample = event.toTouchSample() ?: return super.onTouchEvent(event)
+        // #B-④：触摸会话进行中标记系统手势排除区（UP/CANCEL 撤销）。
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> applyGestureExclusion(true)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> applyGestureExclusion(false)
+        }
         // T90：捏合累子手势结束复位 —— 旧行为残留 1.05..1.24 的累积量带到下一次
         // 小捏合，凭空触发 ±1sp 步进（「缩放一坨」的直接根源之一）。任何手势
         // 结束/降指（UP/CANCEL/POINTER_UP）都视为捏合会话终结。
@@ -636,7 +645,9 @@ class TerminalView @JvmOverloads constructor(
             is TerminalGestureModel.GestureEvent.Fling ->
                 startScrollAnimation(event.velocityYPx)
             is TerminalGestureModel.GestureEvent.Pinch ->
-                handlePinch(event.scale)
+                // T91（D1）：设置未显式开启时在 View 层短路 —— 捏合手势完全沉寂
+                //（不进累子、不驱动 resizeTerminal），避免任何残留路径驱动字号。
+                if (settings.pinchZoomEnabled) handlePinch(event.scale)
             is TerminalGestureModel.GestureEvent.TapSecondFinger ->
                 handleSecondFingerTap(event.x, event.y)
         }
@@ -1164,23 +1175,13 @@ class TerminalView @JvmOverloads constructor(
 
     // ═════════════════════ 无障碍 / 生命周期 ═════════════════════
 
-    private fun updateAccessibilityContent(s: TerminalRenderSnapshot) {
-        val lastLine = s.lines.lastOrNull()?.joinToString("") { it.text }?.takeLast(120)
-        contentDescription = if (lastLine.isNullOrBlank()) "Terminal" else "Terminal: $lastLine"
-        val now = SystemClock.uptimeMillis()
-        // 输出增长播报（2s 限速 —— 连续刷屏不轰炸 TalkBack）
-        if (isAttachedToWindow && now - lastA11yAnnounceUptime > 2000L && !lastLine.isNullOrBlank()) {
-            lastA11yAnnounceUptime = now
-            announceForAccessibility(lastLine.take(80))
-        }
-    }
-
     override fun performClick(): Boolean {
         super.performClick()
         return true
     }
 
     override fun onDetachedFromWindow() {
+        applyGestureExclusion(false)
         mainHandler.removeCallbacksAndMessages(null)
         scroller.abortAnimation()
         super.onDetachedFromWindow()
@@ -1188,7 +1189,7 @@ class TerminalView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        scheduleBlinkIfNeeded()
+        cursorBlink.scheduleIfNeeded()
     }
 
     companion object {

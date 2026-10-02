@@ -47,6 +47,19 @@ class VtParser {
          * （ncurses/旧程序的 8 位序列）才走 C1 控制语义。
          */
         const val RAW_C1_TAG = 1 shl 24
+
+        /** #C-⑦：跨 read 停滞序列的超时复位（ms）。
+         *
+         * 半截序列（如 `nc` 分片只到 `\x1b[38;5`）后流置若罔闻，下一个 PTY read
+         * 可能已是几秒后的正常文本 —— 若不做处理会被当作 CSI 参数继续吞。
+         * 虽然任何 0x40..0x7E 字节（含几乎所有字母）都能把状态机推回 GROUND，
+         * 但纯数字/分号流（hexdump/clear 之类输出）可长期滞留 CSI_PARAM。
+         * 每次 PTY read chunk 到达时（[chunkArrived]）检查：若解析器仍停在中途
+         * 态且距上一 chunk 已超过本阈值 → 复位到 GROUND（丢弃残缺序列）。
+         * 取 1000ms（而非建议的 200ms）：慢速分片（TCP 重传/串口终端）下
+         * 200ms 会把合法序列误杀；长度上限（4096/100k）已把内存风险兑住，
+         * 这里只需兑住“永久滞留”。 */
+        const val SEQUENCE_STALE_TIMEOUT_MS = 1_000L
     }
 
     data class CSISequence(
@@ -108,6 +121,24 @@ class VtParser {
             State.ESC_INTERMEDIATE -> handleEscIntermediate(cp, sink)
         }
     }
+
+    /** #C-⑦：每个 PTY read chunk 到达时调一次（[TerminalCore.feed] 入口）。
+     *
+     * 解析器停在中途态且距上一 chunk 超过 [SEQUENCE_STALE_TIMEOUT_MS] →
+     * 复位到 GROUND（半截序列被丢弃，后续正常文本不再被吞）。
+     * chunk 粒度检查：每 read 一次 System.nanoTime，零热路径开销。 */
+    fun chunkArrived() {
+        val now = System.nanoTime()
+        val last = lastChunkNanos
+        lastChunkNanos = now
+        if (last != 0L && state != State.GROUND &&
+            (now - last) / 1_000_000L > SEQUENCE_STALE_TIMEOUT_MS
+        ) {
+            reset()
+        }
+    }
+
+    private var lastChunkNanos = 0L
 
     /**
      * T92（VT 状态机对齐）：C0 控制在任何序列态都应立即执行（BEL/LF/CR 混进

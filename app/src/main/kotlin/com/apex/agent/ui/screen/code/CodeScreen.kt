@@ -52,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -80,6 +81,7 @@ import com.apex.agent.ui.screen.agent.QuestionCard
 import com.apex.agent.ui.screen.agent.ToolRef
 import com.apex.agent.ui.screen.agent.ToolkitChipsRow
 import com.apex.agent.ui.screen.agent.ToolkitRingButton
+import com.apex.agent.core.code.standard.StandardLogicMode
 import com.apex.agent.core.code.stream.StreamEntry
 import com.apex.agent.core.code.stream.StreamToolCall
 import com.apex.agent.ui.screen.agent.toolkit.OutputFormat
@@ -150,7 +152,10 @@ fun CodeScreen(
             onCreate = { showNewWorkspace = true },
             onDelete = viewModel::deleteWorkspace,
             onClearChat = viewModel::clearConversation,
-            onOpenLongTasks = viewModel::openLongTaskCenter
+            onOpenLongTasks = viewModel::openLongTaskCenter,
+            // v1.5 右上角思考逻辑切换（深潜 = 自研 / 标准 = 标准任务循环）
+            logicMode = state.logicMode,
+            onSwitchLogic = viewModel::setLogicMode
         )
 
         if (state.todos.isNotEmpty()) {
@@ -212,7 +217,12 @@ fun CodeScreen(
         }
 
         state.error?.let { err ->
-            ErrorBar(message = err, onDismiss = viewModel::dismissError)
+            // #209：运行失败类错误（errorRetriable）提供一键重试；运行中不重复触发。
+            ErrorBar(
+                message = err,
+                onRetry = if (state.errorRetriable && !state.isRunning) viewModel::retryLastRun else null,
+                onDismiss = viewModel::dismissError
+            )
         }
 
         // ═══ #197 模式 + 思考档位选择器行（Build/Plan 双档 + 七档思考）═══
@@ -359,9 +369,19 @@ private fun WorkspaceBar(
     onCreate: () -> Unit,
     onDelete: (String) -> Unit,
     onClearChat: () -> Unit,
-    onOpenLongTasks: () -> Unit
+    onOpenLongTasks: () -> Unit,
+    logicMode: StandardLogicMode = StandardLogicMode.DEEP_DIVE,
+    onSwitchLogic: (StandardLogicMode) -> Boolean = { false }
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // v1.5 切换被拒提示（运行中拒绝；2s 自清，行内告警形态）
+    var logicSwitchBlocked by remember { mutableStateOf(false) }
+    LaunchedEffect(logicSwitchBlocked) {
+        if (logicSwitchBlocked) {
+            delay(2000)
+            logicSwitchBlocked = false
+        }
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -457,6 +477,19 @@ private fun WorkspaceBar(
             }
 
             Spacer(Modifier.weight(1f))
+
+            // v1.5 思考逻辑切换（右上角：深潜 = 自研七档 / 标准 = 标准任务循环）
+            CodeLogicModeSelector(
+                current = logicMode,
+                onSwitchBlocked = logicSwitchBlocked,
+                onSelect = { mode ->
+                    val accepted = onSwitchLogic(mode)
+                    if (!accepted) logicSwitchBlocked = true
+                    accepted
+                }
+            )
+
+            Spacer(Modifier.width(4.dp))
 
             // v1.2 长任务中心入口（记录/模板两页签的 ModalBottomSheet）
             IconButton(onClick = onOpenLongTasks, modifier = Modifier.size(28.dp)) {
@@ -793,7 +826,11 @@ private fun ApiMissingFloatingNotice(
 // ═══ 对话框 ═══
 
 @Composable
-private fun ErrorBar(message: String, onDismiss: () -> Unit) {
+private fun ErrorBar(
+    message: String,
+    onRetry: (() -> Unit)?,
+    onDismiss: () -> Unit
+) {
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
         modifier = Modifier.fillMaxWidth()
@@ -817,6 +854,13 @@ private fun ErrorBar(message: String, onDismiss: () -> Unit) {
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
+            // #209：可恢复错误提供「重试」（复用错误条既有 action 按钮模式；
+            // 文案复用 chat_retry，与 Agent 屏 RetryChip 同词）。
+            if (onRetry != null) {
+                TextButton(onClick = onRetry) {
+                    Text(stringResource(R.string.chat_retry))
+                }
+            }
             TextButton(onClick = onDismiss) {
                 Text(stringResource(R.string.code_dismiss))
             }

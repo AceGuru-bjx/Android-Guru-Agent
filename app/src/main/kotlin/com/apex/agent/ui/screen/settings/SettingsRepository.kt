@@ -446,6 +446,13 @@ data class AgentSettings(
      */
     val forceDeepThinking: Boolean = false,
     /**
+     * v1.5 Coding 屏思考逻辑（双引擎路由）："" / "deep_dive" = 深潜
+     * （自研七档思考，v1.2 既有行为）；"standard" = 标准（业界标准 Agent
+     * 任务循环：画像/权限门/子代理/压缩）。Coding 屏右上角选择器写入，
+     * CodeViewModel init 恢复（DualLogicCodeEngine.switchLogic 运行时路由）。
+     */
+    val codeThinkingLogic: String = "",
+    /**
      * v1.2 Coding 模式思考档位（持久化，与聊天页 thinkingLevelOverride 互不
      * 干扰——两模式各自记忆）："" = 未设置（回退 STANDARD）；"auto" = AUTO
      * 自适应；其余 = ThinkingLevel 枚举名小写
@@ -491,6 +498,10 @@ data class AgentSettings(
     val taskCompletionNotify: Boolean = true,
 
     // ── 上下文压缩（对应 AgentConfig，重启应用/新会话后生效）──
+    // Issue #222：本字段不再是水位条/压缩门的直接分母 —— 生效值改为当前默认
+    // 模型 Profile 的 contextWindow（ModelProfile.effectiveContextWindow，切换
+    // 模型时 AgentChatViewModel patchConfig 热更新）；此处仅作 Profile 窗口
+    // 字段缺失/非法（≤0）时的回退值（防分母塌 0）。
     val maxContextTokens: Int = 128_000,
     val compressionThreshold: Float = 0.8f,   // 0.5..0.95
     val preserveRecentTurns: Int = 5,

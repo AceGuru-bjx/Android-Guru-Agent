@@ -321,10 +321,16 @@ class ProotMcpProcessLauncher(
  * 沙箱进程句柄：包一层 java.lang.Process，额外做两件事 ——
  * 1. daemon 线程持续 drain stderr（防管道缓冲区撑满死锁），保留最后 4KB；
  * 2. destroy 时把 stderr 尾部投递到应用日志（启动失败的真因大多在这里）。
+ *
+ * #206 stderr tee：内部 drain 线程是 stderr 的**唯一消费者**；行文本同时
+ * 复制进 [stderrTee]（有界队列），[stderr] 暴露给 [McpStdioTransport] 的
+ * 泄放泵 —— 修复旧实现「transport 与 drain 并发读同一根管道」造成的
+ * 字节撕裂（时间线上的 stderr 行残缺/乱码、诊断尾部丢数据）。
  */
 private class ProotProcessAdapter(private val process: Process) : McpProcessHandle {
 
     private val stderrTail = StringBuilder()
+    private val stderrTee = LineTeeInputStream()
 
     /** stderr 尾部快照（诊断用；最多 4KB 环形缓冲）。 */
     fun recentStderr(): String = synchronized(stderrTail) { stderrTail.toString() }
@@ -332,14 +338,15 @@ private class ProotProcessAdapter(private val process: Process) : McpProcessHand
     private val drain: Thread = thread(name = "proot-mcp-stderr", isDaemon = true) {
         runCatching {
             process.errorStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                val buf = CharArray(512)
                 while (true) {
-                    val n = reader.read(buf)
-                    if (n < 0) break
-                    if (n > 0) appendTail(String(buf, 0, n))
+                    val line = reader.readLine() ?: break
+                    if (line.isEmpty()) continue
+                    appendTail(line + "\n")
+                    stderrTee.offerLine(line + "\n")
                 }
             }
         }
+        stderrTee.closeProducer()
     }
 
     private fun appendTail(chunk: String) {
@@ -355,11 +362,11 @@ private class ProotProcessAdapter(private val process: Process) : McpProcessHand
     override val stdout: InputStream get() = process.inputStream
 
     /**
-     * 原始 stderr 流。注意：内部 drain 线程正在持续消费它，外部不要再并发
-     * 读取 —— 诊断信息请用 [recentStderr]（接口契约要求暴露此流，但
-     * McpStdioTransport 实际只消费 stdin/stdout）。
+     * #206：tee 流（drain 线程喂行的只读消费口）。**不要**返回
+     * process.errorStream —— 那根管道已被内部 drain 独占消费，两读者并发
+     * 会撕裂多字节 UTF-8 序列。
      */
-    override val stderr: InputStream get() = process.errorStream
+    override val stderr: InputStream get() = stderrTee
 
     override fun isAlive(): Boolean = process.isAlive
 
@@ -375,6 +382,53 @@ private class ProotProcessAdapter(private val process: Process) : McpProcessHand
                     "沙箱 MCP 进程已销毁，stderr 尾部（${tail.length} 字符）：$tail"
                 )
             }
+        }
+    }
+}
+
+/**
+ * #206 有界行管道：生产者（drain 线程）offer 行字节，消费者（transport 的
+ * 泄放泵）阻塞 poll。队列满丢最旧（消费方不存在/读得慢都不阻塞生产者，
+ * 慢消费者丢日志好过饿死诊断线程）；生产者关闭且队列读空后返回 EOF。
+ */
+private class LineTeeInputStream : InputStream() {
+    private val queue = java.util.concurrent.ArrayBlockingQueue<ByteArray>(256)
+    private var current: ByteArray? = null
+    private var pos = 0
+
+    @Volatile
+    private var producerClosed = false
+
+    fun offerLine(line: String) {
+        val bytes = line.toByteArray(Charsets.UTF_8)
+        if (!queue.offer(bytes)) {
+            queue.poll() // 丢最旧
+            queue.offer(bytes)
+        }
+    }
+
+    fun closeProducer() {
+        producerClosed = true
+    }
+
+    override fun read(): Int {
+        while (true) {
+            current?.let { b ->
+                if (pos < b.size) return b[pos++].toInt() and 0xFF
+                current = null
+            }
+            val next = try {
+                queue.poll(250, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return -1
+            }
+            if (next != null) {
+                current = next
+                pos = 0
+                continue
+            }
+            if (producerClosed && queue.isEmpty()) return -1
         }
     }
 }

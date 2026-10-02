@@ -1,6 +1,7 @@
 package com.apex.agent.ui.screen.code
 
 import com.apex.agent.core.code.longtask.LongTaskRecord
+import com.apex.agent.core.code.standard.StandardLogicMode
 import com.apex.agent.core.code.stream.CodeStreamSnapshot
 import com.apex.agent.core.code.thinking.CodeThinkingEvolutionTracker
 import com.apex.agent.core.code.thinking.CodeThinkingLevel
@@ -21,7 +22,15 @@ data class CodeUiState(
     val isRunning: Boolean = false,
     val currentIteration: Int = 0,
     val error: String? = null,
+    // #209：当前 error 是否提供「重试」入口 —— 仅引擎运行失败类错误为 true；
+    // 参数校验/状态冲突类（任务运行中、工作区冲突等）保持 false，避免误导重放。
+    val errorRetriable: Boolean = false,
     val pendingQuestion: String? = null,
+
+    // ── v1.5 思考逻辑（双引擎：深潜 = 自研七档 / 标准 = 标准任务循环）──
+    // 右上角选择器直改 + AgentSettings.codeThinkingLogic 持久化；
+    // DualLogicCodeEngine 按此路由 execute/abort/问答。
+    val logicMode: StandardLogicMode = StandardLogicMode.DEEP_DIVE,
 
     // ── #197 执行模式（Coding 屏 Build/Plan 双档）──
     val mode: com.apex.agent.core.engine.AgentMode = com.apex.agent.core.engine.AgentMode.BUILD,

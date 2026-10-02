@@ -1,8 +1,11 @@
 package com.apex.agent.ui.screen.market
 
+import androidx.annotation.StringRes
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,12 +13,14 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -33,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -43,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
+import com.apex.agent.core.tools.mcp.McpServerCatalog
 import com.apex.agent.core.tools.marketplace.ClawHubSource
 
 /**
@@ -519,25 +526,39 @@ private fun SkillSearchAndFilter(state: MarketUiState, viewModel: MarketViewMode
     }
 }
 
-/** 分类过滤 chip 行。 */
+/**
+ * #206 分类过滤 chip 行 —— 从 [SkillCategory] 24 域派生（不再硬编码
+ * ToolCategory 名字表：旧列表 10 个 chip 里 6 个对技能永远筛不出任何
+ * 结果，属死过滤器）。
+ *
+ * 只渲染当前列表里**真实有技能**的域（计数 > 0，含旧值残留的「未分类」
+ * 兜底 chip）；计数从行数据实时统计，安装/卸载后自动更新。
+ */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun CategoryFilterChips(
     selected: String?,
     viewModel: MarketViewModel
 ) {
-    val categories = listOf(
-        "SHELL" to null,
-        "FILE" to R.string.market_cat_file,
-        "WEB" to R.string.market_cat_web,
-        "BROWSER" to R.string.market_cat_browser,
-        "MEMORY" to R.string.market_cat_memory,
-        "SYSTEM" to R.string.market_cat_system,
-        "UI" to null,
-        "AGENT" to null,
-        "UTILITY" to R.string.market_cat_utility,
-        "MCP" to null
-    )
+    val state = viewModel.uiState.collectAsStateWithLifecycle().value
+    // 行数据里真实出现的分类（已安装 + 内置模板），保留 SkillCategory 顺序，
+    // 未知旧值（AGENT/UTILITY 等历史残留）归「未分类」。chip 同时携带
+    // 过滤键（字符串，与 categoryFilter 同域）与域对象（标签渲染）。
+    val counted = remember(state.skills, state.skillTemplates) {
+        buildList {
+            val rows = state.skills + state.skillTemplates
+            val known = LinkedHashMap<com.apex.agent.core.tools.skill.SkillCategory, Int>()
+            var uncategorized = 0
+            rows.forEach { row ->
+                val cat = com.apex.agent.core.tools.skill.SkillCategory.of(row.category)
+                if (cat != null) known[cat] = (known[cat] ?: 0) + 1 else uncategorized++
+            }
+            com.apex.agent.core.tools.skill.SkillCategory.inDisplayOrder()
+                .filter { known.containsKey(it) }
+                .forEach { add(it to (known[it] ?: 0)) }
+            if (uncategorized > 0) add(null to uncategorized)
+        }
+    }
     androidx.compose.foundation.layout.FlowRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -548,13 +569,17 @@ private fun CategoryFilterChips(
             onClick = { viewModel.setCategoryFilter(null) },
             label = { Text(stringResource(R.string.market_cat_all), style = MaterialTheme.typography.labelSmall) }
         )
-        categories.forEach { (name, labelRes) ->
+        counted.forEach { (category, count) ->
+            // 过滤键：域 key；未分类 = 空串之外的哨兵（用旧值不可达的 "__uncategorized__"
+            // 避免与真实域 key 撞车；categoryFilter 存的也是它）
+            val filterKey = category?.key ?: MarketViewModel.UNCATEGORIZED_FILTER
             FilterChip(
-                selected = selected == name,
-                onClick = { viewModel.setCategoryFilter(if (selected == name) null else name) },
+                selected = selected == filterKey,
+                onClick = { viewModel.setCategoryFilter(if (selected == filterKey) null else filterKey) },
                 label = {
                     Text(
-                        labelRes?.let { stringResource(it) } ?: name,
+                        text = (category?.let { stringResource(skillCategoryLabel(it)) }
+                            ?: stringResource(R.string.market_cat_uncategorized)) + " $count",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -562,6 +587,36 @@ private fun CategoryFilterChips(
         }
     }
 }
+
+/** #206 技能域 → 本地化标签资源。 */
+@StringRes
+private fun skillCategoryLabel(category: com.apex.agent.core.tools.skill.SkillCategory): Int =
+    when (category) {
+        com.apex.agent.core.tools.skill.SkillCategory.CAREER -> R.string.market_skill_cat_career
+        com.apex.agent.core.tools.skill.SkillCategory.KNOWLEDGE -> R.string.market_skill_cat_knowledge
+        com.apex.agent.core.tools.skill.SkillCategory.LIFESTYLE -> R.string.market_skill_cat_lifestyle
+        com.apex.agent.core.tools.skill.SkillCategory.EMOTIONAL -> R.string.market_skill_cat_emotional
+        com.apex.agent.core.tools.skill.SkillCategory.SOCIAL -> R.string.market_skill_cat_social
+        com.apex.agent.core.tools.skill.SkillCategory.DATA -> R.string.market_skill_cat_data
+        com.apex.agent.core.tools.skill.SkillCategory.BUSINESS -> R.string.market_skill_cat_business
+        com.apex.agent.core.tools.skill.SkillCategory.FINANCE -> R.string.market_skill_cat_finance
+        com.apex.agent.core.tools.skill.SkillCategory.TECH -> R.string.market_skill_cat_tech
+        com.apex.agent.core.tools.skill.SkillCategory.LANGUAGE -> R.string.market_skill_cat_language
+        com.apex.agent.core.tools.skill.SkillCategory.HEALTH -> R.string.market_skill_cat_health
+        com.apex.agent.core.tools.skill.SkillCategory.FITNESS -> R.string.market_skill_cat_fitness
+        com.apex.agent.core.tools.skill.SkillCategory.EDUCATION -> R.string.market_skill_cat_education
+        com.apex.agent.core.tools.skill.SkillCategory.PARENTING -> R.string.market_skill_cat_parenting
+        com.apex.agent.core.tools.skill.SkillCategory.HOME -> R.string.market_skill_cat_home
+        com.apex.agent.core.tools.skill.SkillCategory.TRAVEL -> R.string.market_skill_cat_travel
+        com.apex.agent.core.tools.skill.SkillCategory.CREATIVE -> R.string.market_skill_cat_creative
+        com.apex.agent.core.tools.skill.SkillCategory.WRITING -> R.string.market_skill_cat_writing
+        com.apex.agent.core.tools.skill.SkillCategory.ENTERTAINMENT -> R.string.market_skill_cat_entertainment
+        com.apex.agent.core.tools.skill.SkillCategory.PRODUCTIVITY -> R.string.market_skill_cat_productivity
+        com.apex.agent.core.tools.skill.SkillCategory.COMMUNICATION -> R.string.market_skill_cat_communication
+        com.apex.agent.core.tools.skill.SkillCategory.SAFETY -> R.string.market_skill_cat_safety
+        com.apex.agent.core.tools.skill.SkillCategory.DIGITAL -> R.string.market_skill_cat_digital
+        com.apex.agent.core.tools.skill.SkillCategory.CODING -> R.string.market_skill_cat_coding
+    }
 
 /** 技能列表卡片 —— 已安装显示能量条/结晶徽章，未安装（内置）显示内置标记。点击已安装技能打开认知详情。 */
 @Composable
@@ -765,6 +820,36 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
         item {
             McpHostSection()
         }
+        // #205 精选目录：头部（分类 chips）+ 每条目一个 item（懒加载友好）。
+        item {
+            McpCatalogHeader(state, viewModel)
+        }
+        // 注意：LazyListScope 作用域不是 @Composable —— 这里不能用 remember；
+        // visibleCatalog 是廉价内存过滤，直接调用即可。
+        val catalogEntries = viewModel.visibleCatalog(state)
+        items(
+            catalogEntries,
+            key = { "catalog-${it.id}" }
+        ) { entry ->
+            McpCatalogEntryCard(
+                entry = entry,
+                installed = viewModel.isCatalogEntryInstalled(entry),
+                onInstall = {
+                    if (entry.envSchema.isNotEmpty()) {
+                        viewModel.openCatalogEnvDialog(entry)
+                    } else {
+                        viewModel.installCatalogEntry(entry, emptyMap())
+                    }
+                }
+            )
+        }
+        if (state.mcpCatalogError != null) {
+            item {
+                MarketHint(
+                    stringResource(R.string.market_mcp_catalog_error, state.mcpCatalogError ?: "")
+                )
+            }
+        }
         item {
             MarketInstallActionCard(
                 title = stringResource(R.string.market_mcp_add_title),
@@ -814,7 +899,9 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
                 viewModel.addMcpServer(config)
                 showAddDialog = false
             },
-            sandboxAvailable = sandboxAvailable
+            sandboxAvailable = sandboxAvailable,
+            // #206 实时预检：重名/URL 协议/裸命令/沙箱未装等在表单内当场点名。
+            validate = viewModel::validateMcpConfig
         )
     }
     if (showImportDialog) {
@@ -826,7 +913,16 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
             }
         )
     }
+    // #205 目录条目的环境变量弹窗（密钥引导表单）。
+    state.catalogEnvEntry?.let { entry ->
+        McpCatalogEnvDialog(
+            entry = entry,
+            onDismiss = viewModel::closeCatalogEnvDialog,
+            onInstall = { values -> viewModel.installCatalogEntry(entry, values) }
+        )
+    }
 }
+
 
 // ═══ 市场 · 连接器 ═══
 

@@ -63,7 +63,13 @@ class McpManager(
      * 服务器连接时注入 [McpClient]。null = 不支持沙箱（此类配置按旧版
      * 宿主直接 fork 处理，通常随后在握手时报「命令不存在」）。
      */
-    private val sandboxProcessLauncher: McpProcessLauncher? = null
+    private val sandboxProcessLauncher: McpProcessLauncher? = null,
+    /**
+     * #205 沙箱就绪探针（存在性探测，不是模拟）：ENV_CHECK 阶段把 rootfs
+     * 真实状态写进事件 detail —— 「rootfs 未就绪」在拉起进程之前就可见，
+     * 而不是等到 launcher 报错才知。null = 宿主未提供（不检查，行为与旧版一致）。
+     */
+    private val sandboxReadinessProbe: (() -> Boolean)? = null
 ) {
     private val clients = LinkedHashMap<String, McpClient>()
     private val configs = LinkedHashMap<String, McpServerConfig>()
@@ -167,6 +173,7 @@ class McpManager(
 
         // #197 真实事件：环境检查（配置形态 + 沙箱就绪态；rootfs 检查同
         // ProotMcpProcessLauncher 的门径 —— 存在性探测，不是模拟）。
+        // #205：沙箱就绪探针注入后就绪态写入 detail（未注入时不猜测）。
         startupListener?.onStartupEvent(
             McpStartupEvent(
                 serverName = name,
@@ -177,6 +184,9 @@ class McpManager(
                         append("stdio 本地进程")
                         if (config.runInSandbox) {
                             append(" · PRoot 沙箱")
+                            sandboxReadinessProbe?.let { probe ->
+                                append(if (probe()) " · rootfs 就绪" else " · rootfs 未就绪（连接将失败，请先安装 Ubuntu 环境）")
+                            }
                         }
                     }
                     McpTransport.HTTP, McpTransport.SSE -> "远端 ${config.transport} · ${config.url}"

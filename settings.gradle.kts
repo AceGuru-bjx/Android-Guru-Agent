@@ -38,6 +38,10 @@ include(":core:logging")
 include(":core:code-tools")
 include(":core:code-engine")
 
+// 标准任务循环文本加速核（C++17 JNI：token 估算 / 行级 diff / 模糊定位；
+// 算法层 host 可测，JNI 桥 Android 平台——与 :terminal-native 同款接线）
+include(":core:code-native")
+
 // Android平台层
 include(":platform:privilege")
 include(":platform:persistence")

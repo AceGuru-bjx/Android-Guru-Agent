@@ -71,6 +71,66 @@ enum class ToolCategory(
 }
 
 /**
+ * #206 工具域 —— 18 个细分类之上的 7 域分组（选择器三级结构：域 → 类 → 工具）。
+ *
+ * **为什么**：Coding 屏的函数调用选择器直接平铺 18 个类，一屏放不下且认知
+ * 负担大；域层把同类能力聚合（执行与系统 / 代码与文件 / 网络与信息 / 记忆
+ * 与上下文 / 交互与界面 / 扩展生态 / 安全与工具），先选域再选类再选工具。
+ *
+ * **单一事实源**：类 → 域的归属只存在于 [domainOf] 的穷举 when 里，
+ * [categories] 是它的反向派生（不会出现两边清单漂移）；新增 ToolCategory
+ * 时编译器强制补映射（when 穷举）。
+ */
+enum class ToolDomain(
+    /** 域的中文标签（选择器一级菜单）。 */
+    val label: String,
+    /** 域的展示顺序。 */
+    val order: Int
+) {
+    /** 命令执行、终端、系统与应用控制、传感器。 */
+    EXECUTION("执行与系统", 10),
+
+    /** 文件树操作与代码托管连接。 */
+    CODE_AND_FILES("代码与文件", 20),
+
+    /** HTTP 网络与浏览器自动化。 */
+    WEB_AND_INFO("网络与信息", 30),
+
+    /** 长期记忆与会话上下文回顾。 */
+    MEMORY_AND_CONTEXT("记忆与上下文", 40),
+
+    /** 面向用户的交互与界面自动化。 */
+    INTERACTION("交互与界面", 50),
+
+    /** 技能 / MCP / 插件生态。 */
+    ECOSYSTEM("扩展生态", 60),
+
+    /** 安全金库与确定性实用工具。 */
+    SAFETY_AND_UTILITIES("安全与工具", 70);
+
+    /** 该域包含的工具类（domainOf 的反向派生，按 ToolCategory 自身顺序）。 */
+    val categories: List<ToolCategory>
+        get() = ToolCategory.inDisplayOrder().filter { domainOf(it) == this }
+
+    companion object {
+        /** 域按展示顺序。 */
+        fun inDisplayOrder(): List<ToolDomain> = entries.sortedBy { it.order }
+
+        /** 类 → 域的归属（穷举映射：新增 ToolCategory 必须在这里补归属）。 */
+        fun domainOf(category: ToolCategory): ToolDomain = when (category) {
+            ToolCategory.SHELL, ToolCategory.TERMINAL, ToolCategory.SYSTEM,
+            ToolCategory.APP, ToolCategory.SENSOR -> EXECUTION
+            ToolCategory.FILE, ToolCategory.GITHUB -> CODE_AND_FILES
+            ToolCategory.WEB, ToolCategory.BROWSER -> WEB_AND_INFO
+            ToolCategory.MEMORY, ToolCategory.CONTEXT -> MEMORY_AND_CONTEXT
+            ToolCategory.AGENT, ToolCategory.UI -> INTERACTION
+            ToolCategory.SKILL, ToolCategory.MCP, ToolCategory.PLUGIN -> ECOSYSTEM
+            ToolCategory.SECURITY, ToolCategory.UTILITY -> SAFETY_AND_UTILITIES
+        }
+    }
+}
+
+/**
  * Risk class of invoking a tool. Drives the v2 execution gate: HIGH-risk
  * tools prompt the user for a session-scoped approval on first use; MEDIUM
  * and LOW tools execute directly (the engine's existing command-level gate

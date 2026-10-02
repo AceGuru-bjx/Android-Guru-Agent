@@ -626,6 +626,16 @@ class TerminalRuntimeImpl(
         return a.observationEngine.styledState
     }
 
+    // T91（D2-D4）：terminal IPC 事件桥 —— 会话存在性守卫后直通 EventBus
+    //（crash-safe 增量订阅语义；订阅不存在会话会惰性建 bus 条目，故先探活）。
+    override fun terminalEventFlow(
+        sessionId: Long,
+        afterCursor: Long
+    ): kotlinx.coroutines.flow.Flow<TerminalEvent>? {
+        sessionManager.assembly(sessionId) ?: return null
+        return eventBus.subscribe(sessionId, afterCursor)
+    }
+
     /**
      * Recover persisted sessions on startup (Spec §39).
      * Returns recovered session ids (now visible via snapshot()).
