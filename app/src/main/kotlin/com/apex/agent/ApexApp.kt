@@ -126,6 +126,9 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
         runCatching { logFileSink.start() }
         runCatching { notifications.ensureChannels(this) }
         runCatching { networkMonitor.isOnline.value } // 触发单例创建 + 回调注册
+        // v1.4.5：更新中枢就绪（应用级增量流水线 + 断点续传 + 启动检测；
+        // 实际网络检查由 ApexRoot 的 LaunchedEffect 触发，保证 UI 已组合）
+        runCatching { com.apex.agent.update.UpdateCenter.ensure(this) }
         initShizuku()
         // attachmentCleanupManager 字段已通过 Hilt @Inject 触发单例创建，
         // schedulePeriodicCleanup() 已在 AttachmentModule 的 @Provides apply block 中调用。

@@ -47,6 +47,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,10 +62,12 @@ import androidx.compose.ui.unit.dp
 import androidx.annotation.StringRes
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.apex.agent.BuildConfig
 import com.apex.agent.R
 import com.apex.agent.ui.component.ContextMeterBar
 import com.apex.agent.ui.component.FeedbackHost
 import com.apex.agent.ui.component.OfflineBanner
+import com.apex.agent.ui.component.UpdateBanner
 import com.apex.agent.ui.glass.GlassIconButton
 import com.apex.agent.ui.screen.about.AboutScreen
 import com.apex.agent.ui.screen.agent.AgentChatScreen
@@ -83,6 +86,7 @@ import com.apex.agent.ui.screen.terminal.TerminalScreen
 import com.apex.agent.ui.screen.templates.TemplateStudioScreen
 import com.apex.agent.ui.screen.usage.UsageDashboardScreen
 import com.apex.agent.ui.screen.vault.VaultScreen
+import com.apex.agent.update.UpdateCenter
 import kotlinx.coroutines.launch
 
 /**
@@ -176,6 +180,18 @@ fun ApexRoot() {
     // ═══ v1.4.4 #6：全局网络状态 —— 离线横幅（所有页面顶部）═══
     val isOnline by agentVm.networkMonitor.isOnline.collectAsStateWithLifecycle()
 
+    // ═══ v1.4.5：新版本浮窗（非强制）—— App 启动静默检查发现新版时顶部提醒 ═══
+    val updateBanner by UpdateCenter.bannerVisible.collectAsStateWithLifecycle()
+
+    // ═══ v1.4.5：启动即检查更新（UpdateCenter 内部 6h 节流；进程重建不重复拉）═══
+    LaunchedEffect(Unit) {
+        UpdateCenter.checkForUpdate(
+            currentVersionCode = BuildConfig.VERSION_CODE,
+            force = false,
+            fromTrigger = "app-start"
+        )
+    }
+
     // ═══ UX-2：系统返回键导航链 ═══
     // 非抽屉一级页（Settings/Terminal/Skill…）按返回 → 回 Agent 聊天主页；
     // Agent 页不拦截（交系统默认行为）。currentDestination 为 rememberSaveable
@@ -264,6 +280,12 @@ fun ApexRoot() {
             Column(modifier = Modifier.padding(padding)) {
                 // ═══ v1.4.4 #6：离线横幅（断网即现，恢复即隐；不影响任何页面布局）═══
                 OfflineBanner(isOnline = isOnline)
+
+                // ═══ v1.4.5：新版本浮窗（非强制 —— 检测到新版且未忽略时顶部提醒）═══
+                UpdateBanner(
+                    visible = updateBanner,
+                    onOpenAbout = { currentDestination = DrawerDestination.About }
+                )
 
                 // ═══ 顶部上下文仪表盘长条（全局）═══
                 // T89：终端页隐藏 —— Agent token 用量与终端会话无关，却吃掉
