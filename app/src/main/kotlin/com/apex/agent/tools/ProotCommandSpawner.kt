@@ -9,6 +9,7 @@ import com.apex.agent.platform.terminal.linux.CpuArchitecture
 import com.apex.agent.platform.terminal.linux.LinuxDistribution
 import com.apex.agent.platform.terminal.linux.RootfsDescriptor
 import com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager
+import com.apex.agent.platform.terminal.proot.PRootArgvCapabilities
 import com.apex.agent.platform.terminal.proot.PRootBind
 import com.apex.agent.platform.terminal.proot.PRootCommand
 import com.apex.agent.platform.terminal.proot.PRootCommandBuilderImpl
