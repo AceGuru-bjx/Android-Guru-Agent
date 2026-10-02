@@ -18,22 +18,61 @@ cd "$(dirname "$0")/.."
 KOTLINC="${KOTLINC:-$HOME/.local/kotlinc/bin/kotlinc}"
 LIBS="${LIBS:-$HOME/kotlin-libs}"
 PLUGIN="$HOME/.local/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar"
+ANDROID_JAR="${ANDROID_JAR:-$HOME/android-sdk/platforms/android-35/android.jar}"
 CP="$LIBS/kotlinx-coroutines-core-jvm-1.9.0.jar:$LIBS/kotlinx-serialization-json-jvm-1.7.3.jar:$LIBS/kotlinx-serialization-core-jvm-1.7.3.jar:$LIBS/annotations-24.1.0.jar:$LIBS/junit-4.13.2.jar:$LIBS/hamcrest-core-1.3.jar:$LIBS/kotlinx-coroutines-test-jvm-1.9.0.jar"
 OUT=$(mktemp -d)
 STUBS=$(mktemp -d)
-mkdir -p "$STUBS/android/util"
-cat > "$STUBS/android/util/Log.kt" <<'STUB'
-// Local JVM-compile stub (never committed) — CI uses the real android.util.Log.
-package android.util
-object Log {
-    @JvmStatic fun v(tag: String, msg: String): Int = 0
-    @JvmStatic fun d(tag: String, msg: String): Int = 0
-    @JvmStatic fun i(tag: String, msg: String): Int = 0
-    @JvmStatic fun w(tag: String, msg: String): Int = 0
-    @JvmStatic fun w(tag: String, msg: String, tr: Throwable?): Int = 0
-    @JvmStatic fun e(tag: String, msg: String): Int = 0
-    @JvmStatic fun e(tag: String, msg: String, tr: Throwable): Int = 0
-    @JvmStatic fun isLoggable(tag: String, level: Int): Boolean = false
+# T92（merge main #254/#282 后）：platform/terminal 新增 service/ 包（AIDL +
+# 前台通知）。本地 JVM 编译用 android.jar（框架真类）+ AIDL/R 的本地 stub
+#（从不提交 —— CI 走 Gradle AIDL 代码生成）。
+AIDL_DIR="$STUBS/com/apex/agent/platform/terminal/service"
+mkdir -p "$AIDL_DIR" "$STUBS/com/apex/agent/platform/terminal"
+cat > "$AIDL_DIR/ITerminalService.kt" <<'STUB'
+// Local JVM-compile stub of the AIDL-generated ITerminalService (never committed).
+package com.apex.agent.platform.terminal.service
+import android.os.Binder
+import android.os.IBinder
+interface ITerminalService {
+    fun createSession(backendId: String?, rows: Int, cols: Int, cwd: String?, envAssignments: MutableList<String>?): String
+    fun write(sessionId: Long, data: ByteArray?)
+    fun writeText(sessionId: Long, text: String?)
+    fun resize(sessionId: Long, rows: Int, cols: Int)
+    fun closeSession(sessionId: Long, force: Boolean)
+    fun listSessions(): String
+    fun ping(): String
+    fun registerCallback(callback: ITerminalCallback?)
+    fun unregisterCallback(callback: ITerminalCallback?)
+    abstract class Stub : Binder(), ITerminalService {
+        companion object {
+            fun asInterface(binder: IBinder): ITerminalService? = null
+        }
+    }
+}
+STUB
+cat > "$AIDL_DIR/ITerminalCallback.kt" <<'STUB'
+// Local JVM-compile stub of the AIDL-generated ITerminalCallback (never committed).
+package com.apex.agent.platform.terminal.service
+import android.os.Binder
+interface ITerminalCallback {
+    fun onOutput(sessionId: Long, data: ByteArray?)
+    fun onExit(sessionId: Long, exitCode: Int, cause: String?)
+    fun onSessionStateChanged(sessionId: Long, state: String?)
+    abstract class Stub : Binder(), ITerminalCallback
+}
+STUB
+cat > "$STUBS/com/apex/agent/platform/terminal/R.kt" <<'STUB'
+// Local JVM-compile stub of the generated R class (never committed).
+package com.apex.agent.platform.terminal
+object R {
+    object string {
+        const val terminal_service_channel_name = 1
+        const val terminal_service_channel_desc = 2
+        const val terminal_service_notif_title = 3
+        const val terminal_service_notif_text = 4
+    }
+    object drawable {
+        const val terminal_service_icon = 1
+    }
 }
 STUB
 
@@ -47,7 +86,7 @@ JAVA_OPTS="-Xmx4g" "$KOTLINC" -J-Xmx4g -jvm-target 17 -nowarn -Xplugin="$PLUGIN"
   terminal-native/src/test/kotlin \
   platform/terminal/src/main/kotlin \
   platform/terminal/src/test/kotlin \
-  -cp "$CP" -d "$OUT/classes" 2>&1 | { grep -E "error:" || true; } | head -60
+  -cp "$CP:$ANDROID_JAR" -d "$OUT/classes" 2>&1 | { grep -E "error:" || true; } | head -60
 
 echo "── OK: $(find $OUT/classes -name '*.class' | wc -l) classes ──"
 rm -rf "$OUT" "$STUBS"

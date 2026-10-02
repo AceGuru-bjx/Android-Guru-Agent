@@ -67,8 +67,17 @@ class EnvironmentProvisioner(
      * 流程：ensureReady（install→bootstrap→capability，幂等且进度不丢）→
      * create(backend="linux-ubuntu")。任一环节失败返回 null（调用方诚实降级到
      * local session —— 输出里会出现真实的 command not found，而非伪造成功）。
+     *
+     * T92：缓存会话**存活校验** —— 旧实现 `ubuntuSessionId?.let { return it }`
+     * 永不过期：会话死亡（EXITED）后每次安装都把命令写进死 PTY → job 挂到
+     * 120s 超时 → SIGKILL → 日志报「等待超时」（与真实根因不符），直到重启
+     * App。死亡即清缓存重建。
      */
     suspend fun ensureUbuntuSession(): Long? {
+        if (ubuntuSessionId != null && !isSessionAlive(ubuntuSessionId!!)) {
+            appendLog("⚠️ 缓存的 Ubuntu 会话已退出 —— 重建会话\n")
+            ubuntuSessionId = null
+        }
         ubuntuSessionId?.let { return it }
         val lc = ubuntuLifecycle ?: return null
         when (val r = lc.ensureReady()) {
@@ -96,6 +105,17 @@ class EnvironmentProvisioner(
         }
         ubuntuSessionId = sessionId
         return sessionId
+    }
+
+    /** T92：会话实时存活探测（终态黑名单：EXITED/LOST/FAILED/BROKEN/CLOSED）。 */
+    private suspend fun isSessionAlive(sessionId: Long): Boolean {
+        val snap = runtime.snapshot(
+            com.apex.agent.platform.terminal.runtime.TerminalRuntime.SnapshotMode.SESSIONS,
+            sessionId = sessionId
+        ).getOrNull() ?: return false
+        return snap.sessions.any { s ->
+            s.session.id == sessionId && s.session.state !in DEAD_SESSION_STATES
+        }
     }
 
     /** Ubuntu 生命周期状态（UI 订阅展示安装/引导进度）。 */
@@ -184,5 +204,17 @@ class EnvironmentProvisioner(
 
     private fun appendLog(text: String) {
         _install.value = _install.value.copy(log = _install.value.log + text)
+    }
+
+    private companion object {
+        /** T92：终态黑名单（EXITED/LOST/FAILED/BROKEN/CLOSED —— 与
+         *  TerminalViewModel.ALIVE_STATES 互补：STOPPING 仍在收尾，写空操作无害）。 */
+        val DEAD_SESSION_STATES = setOf(
+            com.apex.agent.platform.terminal.session.SessionState.EXITED,
+            com.apex.agent.platform.terminal.session.SessionState.LOST,
+            com.apex.agent.platform.terminal.session.SessionState.FAILED,
+            com.apex.agent.platform.terminal.session.SessionState.BROKEN,
+            com.apex.agent.platform.terminal.session.SessionState.CLOSED,
+        )
     }
 }

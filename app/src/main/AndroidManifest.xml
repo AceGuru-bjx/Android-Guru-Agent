@@ -27,6 +27,16 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- Onboarding v2 引导步骤 3「修改系统设置」：声明本身 normal 级，授权走
+         Settings.ACTION_MANAGE_WRITE_SETTINGS 跳本应用专属页 + Settings.System
+         .canWrite() 判态（特殊权限不可运行时弹窗）。 -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <!-- Onboarding v2 引导步骤 4「安装未知来源应用」：UpdateDownloader 的
+         FileProvider + ACTION_VIEW 安装流在 Android 8+ 需要本应用出现在
+         「未知来源」白名单（按应用逐一授权）；声明后引导页才能经
+         PackageManager.canRequestPackageInstalls() 判态并跳
+         ACTION_MANAGE_UNKNOWN_APP_SOURCES 引导页。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
