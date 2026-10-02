@@ -63,6 +63,7 @@ import com.apex.agent.core.engine.UserQuestionGateway
 import com.apex.agent.tools.AskUserChoiceTool
 import com.apex.agent.tools.AskUserTool
 import com.apex.agent.tools.RiskAwareToolGate
+import com.apex.agent.tools.ToolAuditLogger
 import com.apex.agent.permission.PermissionModeGate
 import com.apex.agent.permission.PermissionAwareToolGate
 import com.apex.agent.permission.PermissionSnapshot
@@ -294,9 +295,15 @@ object ToolModule {
 
     @Provides
     @Singleton
+    fun provideToolAuditLogger(@ApplicationContext context: Context): ToolAuditLogger =
+        ToolAuditLogger(context)
+
+    @Provides
+    @Singleton
     fun provideRiskAwareToolGate(
-        gateway: UserQuestionGateway
-    ): RiskAwareToolGate = RiskAwareToolGate(gateway)
+        gateway: UserQuestionGateway,
+        toolAuditLogger: ToolAuditLogger
+    ): RiskAwareToolGate = RiskAwareToolGate(gateway, toolAuditLogger)
 
     /**
      * v1.0 #155：opencode 式权限模式门——模式（BYPASS/DEFAULT/ACCEPT_EDITS/PLAN）
@@ -473,6 +480,7 @@ object ToolModule {
         githubApiService: GithubApiService,
         userQuestionGateway: UserQuestionGateway,
         commandPermissionGate: CommandPermissionGate,
+        toolAuditLogger: ToolAuditLogger,
         privilegeManager: PrivilegeManager,
         privilegeUiProvider: PrivilegeUiProvider,
         // Issue #165：钩子注册表（主执行器插槽 + SubagentStop 派发）
@@ -560,6 +568,11 @@ object ToolModule {
         // 面向模型的最终错误文案（与旧版逐字节一致）。
         val shellExecResult: suspend (String) -> ShellExecResult = { cmd ->
             if (!commandPermissionGate.ensureAllowed(cmd)) {
+                // #F-⑯：工具层审计（拒绝也留痕）；结构化结果见下方 T92 注释。
+                toolAuditLogger.log(ToolAuditLogger.Event(
+                    tool = "shell_execute", decision = "denied_by_user", command = cmd,
+                    detail = "CommandPermissionGate rejected"
+                ))
                 ShellExecResult(
                     success = false,
                     output = "Error: 用户拒绝执行命令。请不要重试相同命令，改用更安全或更低风险的方案，并告知用户原因。",
@@ -567,11 +580,26 @@ object ToolModule {
                     via = VIA_GATE_DENIED
                 )
             } else {
+                val startedAt = System.currentTimeMillis()
                 try {
-                    PrivilegeDetector.executeShell(cmd, workDir = shellWorkDir.currentDir())
+                    val result = PrivilegeDetector.executeShell(cmd, workDir = shellWorkDir.currentDir())
+                    // #F-⑯：结构化审计 —— 命令走了哪个权限通道（root/shizuku/
+                    // shell）、耗时、结果，全部落盘可举证（工具层；平台层逐命令
+                    // 遥测见 PrivilegeDetector —— T92 / #255 双层互补）。
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "shell_execute", decision = "executed", command = cmd,
+                        tier = result.via, durationMs = System.currentTimeMillis() - startedAt,
+                        success = result.success, exitCode = result.exitCode
+                    ))
+                    result
                 } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "shell_execute", decision = "failed", command = cmd,
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        detail = e::class.simpleName
+                    ))
                     ShellExecResult(
                         success = false,
                         output = "Error: 命令执行异常：${e.message}",
@@ -644,8 +672,19 @@ object ToolModule {
                 fallback = PrivilegedCommandSpawner()
             )),
             approvalGate = { cmd ->
-                if (commandPermissionGate.ensureAllowed(cmd)) null
-                else "用户拒绝执行该命令。不要重试相同命令；改用更安全或更低风险的方案，并告知用户原因。"
+                if (commandPermissionGate.ensureAllowed(cmd)) {
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "terminal.exec", decision = "approved", command = cmd,
+                        detail = "CommandPermissionGate allowed"
+                    ))
+                    null
+                } else {
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "terminal.exec", decision = "denied_by_user", command = cmd,
+                        detail = "CommandPermissionGate rejected"
+                    ))
+                    "用户拒绝执行该命令。不要重试相同命令；改用更安全或更低风险的方案，并告知用户原因。"
+                }
             },
             defaultCwd = { shellWorkDir.currentDir() },
             onCommandSucceeded = { cmd, _ -> shellWorkDir.updateAfterSuccess(cmd) }

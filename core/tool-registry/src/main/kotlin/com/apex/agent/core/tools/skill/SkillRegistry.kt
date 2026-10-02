@@ -135,7 +135,9 @@ data class SkillDigest(
     val name: String,
     /** 一行摘要（description 首句，超长截断）。 */
     val summary: String,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    /** #206 分类域（[SkillCategory.key]；未分类 = null）—— 目录抽样与展示分组用。 */
+    val category: String? = null
 )
 
 /**
@@ -542,6 +544,7 @@ class SkillRegistry(
      * 保证目录段体积与技能数量线性且每条 ≤ 一行。
      *
      * #197 双工位：[scope] 非空时目录同样按工位作用域过滤。
+     * #206：[SkillDigest.category] 随附（目录抽样按域均衡的依据）。
      */
     fun getSkillDigests(scope: String? = null): List<SkillDigest> {
         return synchronized(lock) {
@@ -553,11 +556,33 @@ class SkillRegistry(
                         id = skill.manifest.id,
                         name = skill.manifest.name,
                         summary = firstSentence(skill.manifest.description),
-                        tags = skill.manifest.tags.take(4)
+                        tags = skill.manifest.tags.take(4),
+                        category = SkillCategory.sanitize(skill.manifest.category)
                     )
                 }
                 .sortedBy { it.id }
         }
+    }
+
+    /**
+     * #206 分类计数（市场 chips 只渲染有内容的域）：scope 过滤同
+     * [getSkillDigests]；返回按 [SkillCategory.order] 排序的有序 Map，
+     * 键为 null 时代表「未分类」旧值残留。
+     */
+    fun getCategoryCounts(scope: String? = null): List<Pair<SkillCategory?, Int>> {
+        val counts = LinkedHashMap<SkillCategory?, Int>()
+        for (cat in SkillCategory.inDisplayOrder()) counts[cat] = 0
+        counts[null] = 0
+        synchronized(lock) {
+            installedSkills.values
+                .filter { it.enabled }
+                .filter { scope.isNullOrBlank() || it.manifest.scope == "all" || it.manifest.scope == scope }
+                .forEach { skill ->
+                    val cat = SkillCategory.of(skill.manifest.category)
+                    counts[cat] = (counts[cat] ?: 0) + 1
+                }
+        }
+        return counts.entries.map { it.key to it.value }.filter { it.second > 0 }
     }
 
     /** description 首句（首个句号/分号前），超 72 字符截断加省略号。 */

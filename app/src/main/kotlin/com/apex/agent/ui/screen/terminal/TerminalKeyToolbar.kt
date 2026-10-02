@@ -3,6 +3,8 @@ package com.apex.agent.ui.screen.terminal
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,12 +25,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.apex.agent.R
 import com.apex.agent.platform.terminal.io.TerminalKey
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 触屏辅助键行（T89 重做 —— 「一坨按钮」治理）。
@@ -82,7 +86,8 @@ internal fun KeyToolbar(
             // 显式拉起输入法：触屏上"点一下没反应"的兜底入口
             ToolbarKey("⌨", emphasized = true) { onShowKeyboard() }
             // 退格：IME 桥的组合区差分已覆盖多数场景，但触屏仍需确定可用的删除键。
-            ToolbarKey("⌫", emphasized = true) { onKey(TerminalKey.BACKSPACE) }
+            // T92：长按连发 —— 按住删整段、按住方向键连续导航，不用狂点。
+            ToolbarKey("⌫", emphasized = true, repeatOnHold = true) { onKey(TerminalKey.BACKSPACE) }
             ToolbarKey("ESC") { onKey(TerminalKey.ESC) }
             ToolbarKey("TAB") { onKey(TerminalKey.TAB) }
             ToolbarKey("CTRL", highlighted = ctrlActive, onClick = onCtrlToggle)
@@ -90,10 +95,10 @@ internal fun KeyToolbar(
             // SHIFT+方向 = vim 可视选择 / readline 选区；ALT+B/F = 词跳。
             ToolbarKey("SHIFT", highlighted = shiftActive, onClick = onShiftToggle)
             ToolbarKey("ALT", highlighted = altActive, onClick = onAltToggle)
-            ToolbarKey("←") { onKey(TerminalKey.ARROW_LEFT) }
-            ToolbarKey("↑") { onKey(TerminalKey.ARROW_UP) }
-            ToolbarKey("↓") { onKey(TerminalKey.ARROW_DOWN) }
-            ToolbarKey("→") { onKey(TerminalKey.ARROW_RIGHT) }
+            ToolbarKey("←", repeatOnHold = true) { onKey(TerminalKey.ARROW_LEFT) }
+            ToolbarKey("↑", repeatOnHold = true) { onKey(TerminalKey.ARROW_UP) }
+            ToolbarKey("↓", repeatOnHold = true) { onKey(TerminalKey.ARROW_DOWN) }
+            ToolbarKey("→", repeatOnHold = true) { onKey(TerminalKey.ARROW_RIGHT) }
             ToolbarKey(stringResource(R.string.term_paste), emphasized = true) { onPaste() }
             ToolbarKey(
                 label = "FN",
@@ -120,10 +125,10 @@ internal fun KeyToolbar(
                 ToolbarKey("^L") { onControl('l') }
                 ToolbarKey("^U") { onControl('u') }
                 // 导航：htop 帮助、vim 命令模式、mc 菜单
-                ToolbarKey("HOME") { onKey(TerminalKey.HOME) }
-                ToolbarKey("END") { onKey(TerminalKey.END) }
-                ToolbarKey("PGUP") { onKey(TerminalKey.PAGE_UP) }
-                ToolbarKey("PGDN") { onKey(TerminalKey.PAGE_DOWN) }
+                ToolbarKey("HOME", repeatOnHold = true) { onKey(TerminalKey.HOME) }
+                ToolbarKey("END", repeatOnHold = true) { onKey(TerminalKey.END) }
+                ToolbarKey("PGUP", repeatOnHold = true) { onKey(TerminalKey.PAGE_UP) }
+                ToolbarKey("PGDN", repeatOnHold = true) { onKey(TerminalKey.PAGE_DOWN) }
                 // F 键
                 ToolbarKey("F1") { onKey(TerminalKey.F1) }
                 ToolbarKey("F2") { onKey(TerminalKey.F2) }
@@ -147,6 +152,9 @@ private fun ToolbarKey(
     label: String,
     highlighted: Boolean = false,
     emphasized: Boolean = false,
+    /** T92：长按连发（初始 400ms 延迟 + 60ms 周期，Termux extra-keys auto-repeat
+     *  同款节奏）。仅退格/方向/导航类幂等键启用 —— 锁存键/粘贴/FN 不适用。 */
+    repeatOnHold: Boolean = false,
     onClick: () -> Unit
 ) {
     Box(
@@ -160,7 +168,10 @@ private fun ToolbarKey(
                     else -> KeybarChrome.key
                 }
             )
-            .clickable(onClick = onClick)
+            .let { base ->
+                if (repeatOnHold) base.keyRepeatModifier(label, onClick)
+                else base.clickable(onClick = onClick)
+            }
             .padding(horizontal = 11.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -172,6 +183,43 @@ private fun ToolbarKey(
         )
     }
 }
+
+/**
+ * T92：长按连发手势（纯 pointerInput 实现，无自定义协程作用域）。
+ *
+ * 语义：按下立即触发一次；按住 400ms 后以 60ms 周期连发；抬指/取消即停。
+ * 快速点按 = 恰好一次（按下即触发，与 clickable 的 tap 语义一致）。
+ *
+ * 连发调度用**绝对时间戳**（nanoTime）而非逐事件超时重置 —— 按住期间的手指
+ * 抖动事件（~16ms 间隔 < 周期）不会饿死连发计时。
+ */
+private fun Modifier.keyRepeatModifier(label: String, onClick: () -> Unit): Modifier =
+    this.then(
+        Modifier.pointerInput(label) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                onClick()
+                val initialDelayNs = REPEAT_INITIAL_DELAY_MS * 1_000_000L
+                val periodNs = REPEAT_PERIOD_MS * 1_000_000L
+                var nextFireAt = System.nanoTime() + initialDelayNs
+                while (true) {
+                    val now = System.nanoTime()
+                    val waitMs = ((nextFireAt - now).coerceAtLeast(0L)) / 1_000_000L
+                    val event = withTimeoutOrNull(waitMs) { awaitPointerEvent() }
+                    if (event != null && event.changes.all { !it.pressed }) {
+                        break  // 抬指/取消
+                    }
+                    if (System.nanoTime() >= nextFireAt) {
+                        onClick()
+                        nextFireAt = System.nanoTime() + periodNs
+                    }
+                }
+            }
+        }
+    )
+
+private const val REPEAT_INITIAL_DELAY_MS = 400L
+private const val REPEAT_PERIOD_MS = 60L
 
 /** 键栏 chrome 调色（终端内容色由 TerminalColorScheme 提供；键栏自身恒深色）。 */
 internal object KeybarChrome {

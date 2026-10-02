@@ -3,10 +3,13 @@ package com.apex.agent.terminalview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -111,10 +114,14 @@ class TerminalView @JvmOverloads constructor(
     private val longPressTimeoutMs: Long
     private val doubleTapTimeoutMs: Long
 
-    // ─── 光标闪烁（主线程 Handler 换相 —— 2 帧/秒；postInvalidateOnAnimation 内部
-    //     走 Choreographer 与 vsync 对齐）───
-    private var blinkOn = true
-    private var blinkScheduled = false
+    // ─── 光标闪烁（[TerminalCursorBlink] —— T92 抽出）───
+    private val cursorBlink = TerminalCursorBlink(
+        handler = mainHandler,
+        canBlink = { settings.cursorBlinks && snapshot?.cursorVisible == true &&
+            hasWindowFocus() && isAttachedToWindow },
+        onInvalidate = { invalidate() },
+        intervalMs = { settings.cursorBlinkMs.toLong() }
+    )
 
     // ─── resize 防抖 ───
     private var resizeRunnable: Runnable? = null
@@ -124,8 +131,37 @@ class TerminalView @JvmOverloads constructor(
     private var lastTouchY = 0f
     private var wheelAccumPx = 0f
 
-    // ─── 无障碍 ───
-    private var lastA11yAnnounceUptime = 0L
+    // ─── T92：拖动滚动余量累加器（Termux mScrollRemainder）───
+    // 每个 MOVE 事件只携带本帧增量（典型 5~15px < 行高 ~48px），逐事件取整会
+    // 丢弃余量 → 慢速拖动「纹丝不动」只有 fling 能滚。跨事件累加：满一行滚
+    // 一行，余量留给下一帧。
+    private var scrollRemainderPx = 0f
+
+    // ─── T92：硬件死键组合重音（欧式键盘 acute/grave/tilde…）───
+    private var pendingCombiningAccent = 0
+
+    // ─── 系统手势排除（#B-④）───
+    // Android 10+ 手势导航在屏幕左/右边缘保留了 quick-switch/返回滑区；
+    // 终端滚回历史/拖选时贴边滑动会被系统抢走。仅在本 View 触摸会话
+    // 进行中动态申请排除（DOWN 时申请、UP/CANCEL 撤销）—— 不做常驻全屏
+    // 排除（Play 对滥用 systemGestureExclusionRects 有审核红线）。
+    private val gestureExclusionRect = Rect()
+    private var gestureExclusionActive = false
+
+    private fun applyGestureExclusion(enable: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (enable == gestureExclusionActive) return
+        gestureExclusionActive = enable
+        if (enable) {
+            gestureExclusionRect.set(0, 0, width, height)
+            systemGestureExclusionRects = listOf(gestureExclusionRect)
+        } else {
+            systemGestureExclusionRects = emptyList()
+        }
+    }
+
+    // ─── 无障碍（[TerminalViewA11y] —— T92 抽出）───
+    private val a11y = TerminalViewA11y(this)
 
     init {
         isFocusable = true
@@ -138,7 +174,10 @@ class TerminalView @JvmOverloads constructor(
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             doubleTapTimeoutMs = ViewConfiguration.getDoubleTapTimeout().toLong(),
             tapTimeoutMs = ViewConfiguration.getTapTimeout().toLong(),
-            flingVelocityThreshold = density * 120f
+            flingVelocityThreshold = density * 120f,
+            // #B-⑥：捏合起手最小指距按密度换算（≈48dp）—— 并指/贴边误触
+            // 起手阶段的距离比率噪声直接冻结捏合输出。
+            minPinchStartDistPx = density * 48f
         )
         longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong()
         doubleTapTimeoutMs = ViewConfiguration.getDoubleTapTimeout().toLong()
@@ -347,6 +386,13 @@ class TerminalView @JvmOverloads constructor(
         if (s.scrollbackBase < previousBase) {
             // 引擎 reset（RIS/新会话）→ 快照代际重置：贴底重来
             scrollModel.snapToBottom()
+            // T92：选区残留清理 —— 新会话的 rowId 与旧选区不相交时
+            // onSnapshotScrolled 不会清（端点未被淘汰），选区高亮常驻但不可
+            // 复制（首次点按被「清选区」吃掉）。代际重置 = 选区必清。
+            if (selectionModel.active || selectionModel.pending) {
+                selectionModel.clear()
+                notifySelectionChanged(null)
+            }
         } else {
             scrollModel.onContentGrew(mergedRows.size - oldGridRows, wasAtBottom)
         }
@@ -363,7 +409,11 @@ class TerminalView @JvmOverloads constructor(
             lastTitle = t
             client?.onTerminalTitle(t)
         }
-        updateAccessibilityContent(s)
+        a11y.updateContent(s)
+        // T92：鼠标模式动态跟随（vim 开关鼠标报告即生效，无需重新触摸）；
+        // 首个带光标的快照到达时排闪烁（旧行为要等一次窗口焦点变化才闪）。
+        gestureModel.immediateTapEnabled = s.mouseMode.enabled
+        cursorBlink.scheduleIfNeeded()
         invalidate()
     }
 
@@ -439,7 +489,7 @@ class TerminalView @JvmOverloads constructor(
             settings = settings,
             palette = effectivePalette,
             focused = hasWindowFocus(),
-            blinkOn = blinkOn,
+            blinkOn = cursorBlink.on,
             selectionActive = selectionModel.active,
             viewWidthPx = width,
             viewHeightPx = height,
@@ -465,7 +515,7 @@ class TerminalView @JvmOverloads constructor(
             settings = settings,
             palette = effectivePalette,
             focused = false,
-            blinkOn = false,
+            blinkOn = cursorBlink.on,
             selectionActive = false,
             viewWidthPx = width,
             viewHeightPx = height,
@@ -474,36 +524,9 @@ class TerminalView @JvmOverloads constructor(
             rowIdBase = rowIdBase
         )
 
-    // ═════════════════════ 光标闪烁（电池纪律）═════════════════════
-
-    private val blinkToggle = Runnable {
-        blinkScheduled = false
-        blinkOn = !blinkOn
-        invalidate()
-        scheduleBlinkIfNeeded()
-    }
-
-    private fun scheduleBlinkIfNeeded() {
-        val snap = snapshot
-        val canBlink = settings.cursorBlinks && snap != null && snap.cursorVisible &&
-            hasWindowFocus() && isAttachedToWindow
-        if (!canBlink) {
-            blinkOn = true
-            if (blinkScheduled) {
-                mainHandler.removeCallbacks(blinkToggle)
-                blinkScheduled = false
-            }
-            return
-        }
-        if (!blinkScheduled) {
-            blinkScheduled = true
-            mainHandler.postDelayed(blinkToggle, settings.cursorBlinkMs.toLong().coerceAtLeast(200L))
-        }
-    }
-
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
-        scheduleBlinkIfNeeded()
+        cursorBlink.scheduleIfNeeded()
         client?.onTerminalFocus(hasWindowFocus)
         // ★ T89 输入修复：窗口焦点恢复且本 View 持焦点时重拉 IME（Activity
         // 切回/弹层关闭后输入法被系统收走的经典场景；IME 仅在窗口有焦点时
@@ -524,13 +547,28 @@ class TerminalView @JvmOverloads constructor(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         lastTouchX = event.x
         lastTouchY = event.y
-        val sample = toSample(event) ?: return super.onTouchEvent(event)
+        val sample = event.toTouchSample() ?: return super.onTouchEvent(event)
+        // #B-④：触摸会话进行中标记系统手势排除区（UP/CANCEL 撤销）。
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> applyGestureExclusion(true)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> applyGestureExclusion(false)
+        }
         // T90：捏合累子手势结束复位 —— 旧行为残留 1.05..1.24 的累积量带到下一次
         // 小捏合，凭空触发 ±1sp 步进（「缩放一坨」的直接根源之一）。任何手势
         // 结束/降指（UP/CANCEL/POINTER_UP）都视为捏合会话终结。
+        // T92：滚动余量/滚轮累子同步清零 —— 跨手势残留会让下个手势首滚误发
+        // 一行（wheelAccum）或带入旧余量（scrollRemainder）。
         when (event.actionMasked) {
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP ->
+            MotionEvent.ACTION_DOWN -> {
                 pinchScaleAccum = 1f
+                scrollRemainderPx = 0f
+                wheelAccumPx = 0f
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP -> {
+                pinchScaleAccum = 1f
+                scrollRemainderPx = 0f
+                wheelAccumPx = 0f
+            }
         }
         val decisions = gestureModel.feed(sample)
         for (d in decisions) handleGesture(d)
@@ -538,34 +576,31 @@ class TerminalView @JvmOverloads constructor(
         return true
     }
 
-    private fun toSample(event: MotionEvent): TerminalGestureModel.TouchSample? {
-        val action = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> TerminalGestureModel.TouchAction.DOWN
-            MotionEvent.ACTION_MOVE -> TerminalGestureModel.TouchAction.MOVE
-            MotionEvent.ACTION_UP -> TerminalGestureModel.TouchAction.UP
-            MotionEvent.ACTION_CANCEL -> TerminalGestureModel.TouchAction.CANCEL
-            MotionEvent.ACTION_POINTER_DOWN -> TerminalGestureModel.TouchAction.POINTER_DOWN
-            MotionEvent.ACTION_POINTER_UP -> TerminalGestureModel.TouchAction.POINTER_UP
-            else -> return null
-        }
-        val t = event.eventTime.toLong()
-        return when (action) {
-            TerminalGestureModel.TouchAction.POINTER_DOWN, TerminalGestureModel.TouchAction.POINTER_UP -> {
-                val idx = event.actionIndex.coerceIn(0, event.pointerCount - 1)
-                TerminalGestureModel.TouchSample(
-                    event.getX(idx), event.getY(idx), t, action,
-                    event.pointerCount, event.getPointerId(idx)
-                )
-            }
-            else -> {
-                // 多指 MOVE 上报**第二指**坐标（捏合距离跟踪；主指位置由
-                // POINTER_DOWN 时刻的锚点近似 —— 阈值制字号缩放对精度不敏感）
-                val idx = if (action == TerminalGestureModel.TouchAction.MOVE && event.pointerCount >= 2) 1 else 0
-                TerminalGestureModel.TouchSample(
-                    event.getX(idx), event.getY(idx), t, action, event.pointerCount, 0
-                )
+    /**
+     * T92：外接鼠标滚轮（DeX/蓝牙鼠标/桌面模式）—— 旧行为完全无响应。
+     * 每档 3 行（Termux doScroll(±3) 同量级）；鼠标模式下改发 WHEEL 报告
+     *（vim/tmux 里滚轮翻它们的内部缓冲，而非本地 scrollback）。
+     */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_SCROLL &&
+            event.isFromSource(InputDevice.SOURCE_MOUSE)
+        ) {
+            val vscroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            if (vscroll != 0f && cellHeightPx > 0f) {
+                val snap = snapshot
+                if (snap != null && snap.mouseMode.enabled && !settings.mousePassthrough) {
+                    // 滚轮向上（vscroll>0）= WHEEL_UP：不受触摸滚动的符号约定影响
+                    val up = vscroll > 0f
+                    val notches = (abs(vscroll) * 3f).toInt().coerceIn(1, 6)
+                    repeat(notches) { sendWheelEvents(up) }
+                } else {
+                    // 本地滚动：滚轮向上看更老 = 手指下拖等价（正 delta）
+                    handleScrollDelta(vscroll * 3f * cellHeightPx)
+                }
+                return true
             }
         }
+        return super.onGenericMotionEvent(event)
     }
 
     /** 手势模型的时间转换需要宿主排程（长按/单击确认 tick）。 */
@@ -594,8 +629,12 @@ class TerminalView @JvmOverloads constructor(
                 if (settings.doubleTapSelectsWord) handleDoubleTap(event.x, event.y)
                 else handleTap(event.x, event.y)
             }
-            is TerminalGestureModel.GestureEvent.LongPress ->
+            is TerminalGestureModel.GestureEvent.LongPress -> {
+                // T92：长按触觉反馈（Termux performHapticFeedback(LONG_PRESS)）——
+                // 选词起选的物理确认；无振动器设备静默。
+                performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                 beginSelectionAt(event.x, event.y)
+            }
             is TerminalGestureModel.GestureEvent.DragStart -> Unit // 起点已由 LongPress 落位
             is TerminalGestureModel.GestureEvent.DragMove ->
                 extendSelectionAt(event.x, event.y)
@@ -642,7 +681,12 @@ class TerminalView @JvmOverloads constructor(
             repeat(notches.coerceIn(1, 6)) { client?.onTerminalKey(key, 0) }
             return
         }
-        val rows = TerminalScrollModel.rowsForDelta(deltaYPx, cellHeightPx)
+        // T92：余量累加（Termux mScrollRemainder）—— 单帧 MOVE 增量几乎总小于
+        // 一行高，旧行为逐事件取整丢余量 → 慢/中速拖动不滚动（只能靠 fling）。
+        // 跨事件累加：总位移满一行滚一行，余量滚到下一帧。
+        val total = deltaYPx + scrollRemainderPx
+        val rows = TerminalScrollModel.rowsForDelta(total, cellHeightPx)
+        scrollRemainderPx = total - rows * cellHeightPx
         if (rows != 0 && scrollModel.scrollBy(-rows)) {
             notifyScrollChanged()
             invalidate()
@@ -650,6 +694,21 @@ class TerminalView @JvmOverloads constructor(
     }
 
     private fun startScrollAnimation(velocityYPx: Float) {
+        // T92：鼠标模式 fling = 滚轮连发（Termux mouseTrackingAtStartOfFling）。
+        // 旧行为 fling 一律滚本地 scrollback/回弹 —— vim 开鼠标模式时拖动能翻
+        // 但一甩就滚本地历史，与刚发生的滚轮语义打架。
+        val snap = snapshot
+        if (snap != null && snap.mouseMode.enabled && !settings.mousePassthrough) {
+            // 行数与速度成比例、限 ±半屏（避免一次甩动轰炸几百行滚轮事件）
+            val rowsBySpeed = (abs(velocityYPx) / cellHeightPx * 0.25f).toInt()
+            val rows = rowsBySpeed.coerceIn(1, snap.rows / 2).coerceAtLeast(1)
+            val up = velocityYPx < 0f
+            repeat(rows) {
+                sendWheelEvents(up)
+                // 每行一次可短暂停顿 —— 直接连发，事件量 ≤ 半屏可控
+            }
+            return
+        }
         if (!scrollModel.canScroll()) {
             // 无滚动量 + 开回弹 → 视觉反馈（fling 撞底）
             if (settings.verticalScrollBounce) {
@@ -694,6 +753,9 @@ class TerminalView @JvmOverloads constructor(
 
     private fun handlePinch(scale: Float) {
         if (!settings.pinchZoomEnabled) return
+        // T92：选区激活时豁免 —— 选区中双指误触会触发 ±1sp 字号步进 →
+        // resize + rewrap + 选区跳位（Termux 直接 return 同款）。
+        if (selectionModel.active || selectionModel.pending) return
         pinchScaleAccum *= scale.coerceIn(0.5f, 2f)
         when {
             pinchScaleAccum >= 1.25f -> {
@@ -783,55 +845,78 @@ class TerminalView @JvmOverloads constructor(
     }
 
     private fun handleDoubleTap(x: Float, y: Float) {
-        val at = cellAt(x, y) ?: return
-        val (row, col) = at
-        val cells = mergedRows.getOrNull(row) ?: return
-        // 列 → 字符索引（宽字符占 2 列 1 词元），选词后映射回 VT 列
-        val text = cells.joinToString("") { it.text }
-        val charIdx = charIndexOfCol(cells, col)
-        if (charIdx >= text.length) return
-        val (ws, we) = selectionModel.expandToWord(rowIdBase + row, charIdx, text)
-        val fromCol = colOfCharIndex(cells, ws)
-        val toCol = colOfCharIndex(cells, we)
-        selectionModel.start(rowIdBase + row, fromCol)
-        selectionModel.extend(rowIdBase + row, toCol)
+        val bounds = wordSelectionAt(x, y) ?: return
+        selectionModel.start(rowIdBase + bounds.first.first, bounds.first.second)
+        selectionModel.extend(rowIdBase + bounds.second.first, bounds.second.second)
         notifySelectionChanged(currentSelectedText())
         invalidate()
     }
 
+    /**
+     * T92：词选公共路径（几何在 [TerminalWordGeometry]；双击与长按共用 ——
+     * 长按起选即整词）。返回 ((起始行, 起始列), (结束行, 结束列))（合并网格行 + VT 列）。
+     */
+    private fun wordSelectionAt(x: Float, y: Float): Pair<Pair<Int, Int>, Pair<Int, Int>>? {
+        val at = cellAt(x, y) ?: return null
+        val (row, col) = at
+        val cells = mergedRows.getOrNull(row) ?: return null
+        val span = TerminalWordGeometry.wordSpanAt(cells, col) { idx, text ->
+            selectionModel.expandToWord(rowIdBase + row, idx, text)
+        } ?: return null
+        return (row to span.first) to (row to span.second)
+    }
+
     private fun beginSelectionAt(x: Float, y: Float) {
-        val at = cellAt(x, y) ?: return
-        selectionModel.start(rowIdBase + at.first, at.second)
+        // T92：长按 = 词选起手（Termux TextSelectionCursorController）：长按落点
+        // 立即扩词两侧扫到非词字符 —— 旧行为只落单 cell（首帧无高亮、复制不到
+        // 整词）。
+        val word = wordSelectionAt(x, y)
+        if (word != null) {
+            selectionModel.start(rowIdBase + word.first.first, word.first.second)
+            selectionModel.extend(rowIdBase + word.second.first, word.second.second)
+        } else {
+            val at = cellAt(x, y) ?: return
+            selectionModel.start(rowIdBase + at.first, at.second)
+        }
+        notifySelectionChanged(currentSelectedText())
         invalidate()
     }
 
     private fun extendSelectionAt(x: Float, y: Float) {
         if (!selectionModel.pending && !selectionModel.active) return
-        val at = cellAt(x, y) ?: return
+        // T92：拖选边缘自动翻屏（Termux updatePosition 边缘滚动）—— 手指拖出
+        // 视口上/下沿时逐 MOVE 滚一行，选区端点跟随新几何延伸（旧行为端点被
+        // cellAt 钉死在视口边，选不到视口外内容）。
+        var ey = y
+        val edge = cellHeightPx
+        if (y < edge && scrollModel.topRow > -scrollModel.maxScrollUp) {
+            if (scrollModel.scrollBy(-1)) {
+                notifyScrollChanged(); invalidate()
+            }
+            ey = edge
+        } else if (y > height - edge && !scrollModel.isAtBottom) {
+            if (scrollModel.scrollBy(1)) {
+                notifyScrollChanged(); invalidate()
+            }
+            ey = height - edge
+        }
+        val at = cellAt(x, ey) ?: return
         selectionModel.extend(rowIdBase + at.first, at.second)
         invalidate()
     }
 
     private fun finishSelectionWithMenu() {
         if (!selectionModel.active) return
-        notifySelectionChanged(currentSelectedText())
-        val items = ArrayList<TerminalContextMenuItem>(4)
-        if (!currentSelectedText().isNullOrEmpty()) {
-            items.add(TerminalContextMenuItem(TerminalContextMenuItem.ID_COPY, "Copy"))
-        }
-        items.add(TerminalContextMenuItem(TerminalContextMenuItem.ID_PASTE, "Paste"))
-        items.add(TerminalContextMenuItem(TerminalContextMenuItem.ID_SELECT_ALL, "Select all"))
-        items.add(TerminalContextMenuItem(TerminalContextMenuItem.ID_CLEAR_SELECTION, "Clear"))
-        client?.onTerminalContextMenu(items, lastTouchX, lastTouchY)
+        val text = currentSelectedText()
+        notifySelectionChanged(text)
+        client?.onTerminalContextMenu(
+            defaultSelectionMenuItems(!text.isNullOrEmpty()), lastTouchX, lastTouchY
+        )
     }
 
     private fun showContextMenuFor(url: String, x: Float, y: Float) {
-        val items = listOf(
-            TerminalContextMenuItem(TerminalContextMenuItem.ID_OPEN_LINK, "Open link"),
-            TerminalContextMenuItem(TerminalContextMenuItem.ID_COPY_LINK, "Copy link")
-        )
         lastDetectedUrl = url
-        client?.onTerminalContextMenu(items, x, y)
+        client?.onTerminalContextMenu(urlMenuItems(), x, y)
     }
 
     /** 最近一次 URL 自动识别的命中（宿主菜单点击 ID_COPY_LINK/OPEN_LINK 后调
@@ -910,11 +995,16 @@ class TerminalView @JvmOverloads constructor(
         val mode = snap.mouseMode.tracking
         if (mode == MouseTrackingMode.OFF) return
         val type = if (up) TerminalMouseEventType.WHEEL_UP else TerminalMouseEventType.WHEEL_DOWN
-        // 位置：屏幕中部（滚轮无指点语义 —— 与 xterm 报告焦点行近似）
-        val row = (snap.rows / 2 + 1).coerceAtLeast(1)
+        // T92：滚轮报告位置取**最近触点/指点位置**（tmux 分屏下路由到正确的
+        // pane；旧行为恒报屏幕中心 —— 分屏下必错 pane）。
+        val at = cellAt(lastTouchX, lastTouchY)
+        val row = if (at != null) (at.first - snap.scrollback.size + 1).coerceAtLeast(1)
+        else (snap.rows / 2 + 1).coerceAtLeast(1)
+        val col = if (at != null) (at.second + 1).coerceAtLeast(1)
+        else (snap.cols / 2 + 1).coerceAtLeast(1)
         client?.onTerminalMouse(
-            col = (snap.cols / 2 + 1).coerceAtLeast(1),
-            row = row,
+            col = col.coerceIn(1, snap.cols),
+            row = row.coerceIn(1, snap.rows),
             type = type,
             mods = 0,
             mouseMode = mode,
@@ -935,39 +1025,12 @@ class TerminalView @JvmOverloads constructor(
         return mergedRow to grid.columnAt(cells, x.coerceIn(0f, grid.widthPx))
     }
 
-    /** VT 列 → 字符索引（宽字符：跨 2 列共享同一词元起点）。 */
-    private fun charIndexOfCol(cells: List<RenderCell>, col: Int): Int {
-        var colAcc = 0
-        var charIdx = 0
-        var i = 0
-        while (i < cells.size && colAcc < col) {
-            val span = if (cells[i].flags and RenderCell.FLAG_WIDE != 0) 2 else 1
-            colAcc += span
-            charIdx += cells[i].text.length
-            i++
-        }
-        return charIdx
-    }
-
-    /** 字符索引 → VT 列（charIndexOfCol 的逆映射）。 */
-    private fun colOfCharIndex(cells: List<RenderCell>, charIdx: Int): Int {
-        var col = 0
-        var acc = 0
-        var i = 0
-        while (i < cells.size && acc < charIdx) {
-            col += if (cells[i].flags and RenderCell.FLAG_WIDE != 0) 2 else 1
-            acc += cells[i].text.length
-            i++
-        }
-        return col
-    }
-
-    /** 命中词文本（URL 自动识别）。 */
+    /** 命中词文本（URL 自动识别；几何在 [TerminalWordGeometry]）。 */
     private fun wordTextAt(row: Int, col: Int): String? {
         val cells = mergedRows.getOrNull(row) ?: return null
-        val text = cells.joinToString("") { it.text }
+        val text = TerminalWordGeometry.textAt(cells)
         if (text.isEmpty()) return null
-        val charIdx = charIndexOfCol(cells, col).coerceAtMost(text.length - 1)
+        val charIdx = TerminalWordGeometry.charIndexOfCol(cells, col).coerceAtMost(text.length - 1)
         val (ws, we) = selectionModel.expandToWord(0, charIdx, text)
         if (we <= ws) return null
         return text.substring(ws.coerceIn(0, text.length), we.coerceIn(0, text.length))
@@ -1001,38 +1064,59 @@ class TerminalView @JvmOverloads constructor(
         return super.onKeyDown(keyCode, event)
     }
 
-    /** IME 的 sendKeyEvent 与 onKeyDown 共用（返回 true = 消费）。 */
+    /** IME 的 sendKeyEvent 与 onKeyDown 共用（返回 true = 消费）。纯决策在 [TerminalKeyEventRouter]。 */
     fun dispatchHardwareKeyEvent(event: KeyEvent): Boolean {
-        val mods = mutableSetOf<TerminalKeyInputModel.KeyModifier>()
-        if (event.isCtrlPressed) mods.add(TerminalKeyInputModel.KeyModifier.CTRL)
-        if (event.isShiftPressed) mods.add(TerminalKeyInputModel.KeyModifier.SHIFT)
-        if (event.isAltPressed) mods.add(TerminalKeyInputModel.KeyModifier.ALT)
-        if (event.isMetaPressed) mods.add(TerminalKeyInputModel.KeyModifier.META)
-        val hw = TerminalKeyInputModel.HardwareKey(
-            keyCodeLabel = KeyEvent.keyCodeToString(event.keyCode),
-            mods = mods,
-            unicodeChar = event.unicodeChar
+        val pre = TerminalKeyEventRouter.preMap(
+            event, pendingCombiningAccent, scrollModel.maxScrollUp > 0
         )
-        return when (val mapped = keyModel.map(hw)) {
-            is TerminalKeyInputModel.MappedInput.TerminalKeyInput -> {
-                client?.onTerminalKey(mapped.key, mapped.mods)
+        return when (pre) {
+            is TerminalKeyEventRouter.PreMap.PageScroll -> {
+                val dy = if (pre.up) -grid.viewRows else grid.viewRows
+                if (scrollModel.scrollBy(dy)) {
+                    notifyScrollChanged()
+                    invalidate()
+                }
+                true
+            }
+            is TerminalKeyEventRouter.PreMap.DeadAccent -> {
+                pendingCombiningAccent = pre.accent
+                true
+            }
+            is TerminalKeyEventRouter.PreMap.ComposedAccent -> {
+                pendingCombiningAccent = 0
+                client?.onTerminalWrite(pre.text)
                 onUserTypedSomething()
                 true
             }
-            is TerminalKeyInputModel.MappedInput.ControlChar -> {
-                client?.onTerminalControlChar(mapped.code)
-                onUserTypedSomething()
-                true
+            is TerminalKeyEventRouter.PreMap.Hardware -> {
+                if (pre.clearAccent) pendingCombiningAccent = 0
+                val hw = TerminalKeyInputModel.HardwareKey(
+                    keyCodeLabel = pre.keyCodeLabel,
+                    mods = pre.mods,
+                    unicodeChar = pre.unicodeChar
+                )
+                when (val mapped = keyModel.map(hw)) {
+                    is TerminalKeyInputModel.MappedInput.TerminalKeyInput -> {
+                        client?.onTerminalKey(mapped.key, mapped.mods)
+                        onUserTypedSomething()
+                        true
+                    }
+                    is TerminalKeyInputModel.MappedInput.ControlChar -> {
+                        client?.onTerminalControlChar(mapped.code)
+                        onUserTypedSomething()
+                        true
+                    }
+                    is TerminalKeyInputModel.MappedInput.CharInput -> {
+                        val payload = if (mapped.mods and KeyModifiers.ALT != 0) {
+                            "\u001B${mapped.text}" // Alt → ESC 前缀（bash 词跳等）
+                        } else mapped.text
+                        client?.onTerminalWrite(payload)
+                        onUserTypedSomething()
+                        true
+                    }
+                    TerminalKeyInputModel.MappedInput.Unmapped -> false
+                }
             }
-            is TerminalKeyInputModel.MappedInput.CharInput -> {
-                val payload = if (mapped.mods and KeyModifiers.ALT != 0) {
-                    "\u001B${mapped.text}" // Alt → ESC 前缀（bash 词跳等）
-                } else mapped.text
-                client?.onTerminalWrite(payload)
-                onUserTypedSomething()
-                true
-            }
-            TerminalKeyInputModel.MappedInput.Unmapped -> false
         }
     }
 
@@ -1091,23 +1175,13 @@ class TerminalView @JvmOverloads constructor(
 
     // ═════════════════════ 无障碍 / 生命周期 ═════════════════════
 
-    private fun updateAccessibilityContent(s: TerminalRenderSnapshot) {
-        val lastLine = s.lines.lastOrNull()?.joinToString("") { it.text }?.takeLast(120)
-        contentDescription = if (lastLine.isNullOrBlank()) "Terminal" else "Terminal: $lastLine"
-        val now = SystemClock.uptimeMillis()
-        // 输出增长播报（2s 限速 —— 连续刷屏不轰炸 TalkBack）
-        if (isAttachedToWindow && now - lastA11yAnnounceUptime > 2000L && !lastLine.isNullOrBlank()) {
-            lastA11yAnnounceUptime = now
-            announceForAccessibility(lastLine.take(80))
-        }
-    }
-
     override fun performClick(): Boolean {
         super.performClick()
         return true
     }
 
     override fun onDetachedFromWindow() {
+        applyGestureExclusion(false)
         mainHandler.removeCallbacksAndMessages(null)
         scroller.abortAnimation()
         super.onDetachedFromWindow()
@@ -1115,7 +1189,7 @@ class TerminalView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        scheduleBlinkIfNeeded()
+        cursorBlink.scheduleIfNeeded()
     }
 
     companion object {

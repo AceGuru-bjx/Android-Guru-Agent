@@ -1071,6 +1071,7 @@ Android-Guru-Agent/
 | [docs/persona-cards.md](docs/persona-cards.md) | **P95 角色卡**：SillyTavern V1/V2/PNG tEXt 导入/Lorebook 触发（对标 operit 角色卡 + rikka AssistantImporter） |
 | [docs/provider-share.md](docs/provider-share.md) | **P96 供应商分享**：四层洋葱 URI/Key 脱敏/GZIP/QR 版本估算（对标 rikka QR 分享） |
 | [docs/capsule-stream.md](docs/capsule-stream.md) | **胶囊流式输出系统**：Coding 工作流时间轴 / 双通道架构 / 幂等与检查点 / 验收矩阵 |
+| [docs/dual-logic-engines.md](docs/dual-logic-engines.md) | **双思考逻辑引擎**：Coding 屏右上角「深潜/标准」切换 / DualLogicCodeEngine 门面路由 / 标准任务循环（五画像·权限三态门·task 子代理·上下文压缩·C++ 文本核）/ `/logic` 斜杠命令 / 现场隔离 |
 | [docs/agent-life-skills-and-memory.md](docs/agent-life-skills-and-memory.md) | **全能 Agent**：46 内置技能矩阵 × 渐进披露（目录+会话装备+自动装备）/ 聊天自动记忆管线（双速捕获+主动召回）/ 首轮问候极简 / 网页自动化 wait_for+页面类型推断 |
 
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
