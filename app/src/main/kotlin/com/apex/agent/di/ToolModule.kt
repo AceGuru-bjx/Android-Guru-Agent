@@ -811,23 +811,10 @@ object ToolModule {
         //    （SRP 预算：#290 合并后本文件 1221 行超 1200，纯 JVM 工具族边界天然清晰）═══
         registerUtilityTools(registry, workspaceDir)
 
-        // ═══ 10. Terminal PTY — ATR 2.0 (9 new Agent-Native + 4 legacy compat + T73 ×2) ═══
-        // 9 new Agent-Native tools (Spec §34) — non-blocking, incremental, event-driven.
-        // T-audit：会话级工具审计接线 —— 与 shell_execute 同一 #F-⑯ 标准。signal
-        //（SIGKILL 杀进程组）/ run（交互会话注入命令）/ close（关会话）是破坏力
-        // 最大的通道，create/write/resize/snapshot 顺手补齐；observe/wait 为纯
-        // 只读探针不记（审计噪声换取可举证性已足）。
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCreateTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalRunTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalObserveTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWaitTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalWriteTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSignalTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalResizeTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSnapshotTool(terminalRuntime)))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCloseTool(terminalRuntime)))))
-        // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
+        // ═══ 10. Terminal PTY 前排 9+1 工具 —— 注册体拆至 ToolModuleRegistrySections.kt（SRP 预算）═══
+        // T-audit（#289）：signal/run/close 等七通道审计经 [auditedTerminalTool] 注入（见拆分文件）
+        registerTerminalPtyTools(registry, terminalRuntime, toolAuditLogger)
+
         // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
         // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
         //（rootfs 就绪 → Ubuntu；否则回退 su>Shizuku>local-sh）—— 探到的就是
@@ -907,22 +894,8 @@ object ToolModule {
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyReadTool(terminalRuntime))))
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyListTool(terminalRuntime))))
 
-        // ═══ 11. GitHub (7，无条件注册) ═══
-        // P2-11（6-c）：原以 githubTokenManager.isConnected() 条件注册——Token 是
-        // 运行时状态而注册表是启动期快照，先连 Token 也需重启 App 才生效（死开关）。
-        // 无条件注册；未连接时 GithubApiService.authHeader() 抛
-        // "未连接 GitHub，请先配置 Token"，SafeAgentTool 兜底转错误串，Agent 可感知并引导用户连接。
-        registry.register(SafeAgentTool(GithubGetUserTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListReposTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubReadFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubWriteFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubCreateIssueTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListIssuesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchCodeTool(githubApiService)))
-        // 分支列表（写入非默认分支前探查）与仓库搜索（按关键词找仓库）。
-        // 根因修复补齐：searchCode 只能搜代码，找仓库需 /search/repositories。
-        registry.register(SafeAgentTool(GithubListBranchesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchReposTool(githubApiService)))
+        // ═══ 11. GitHub (9，无条件注册) —— 注册体拆至 ToolModuleRegistrySections.kt（同上 SRP 预算）═══
+        registerGithubTools(registry, githubApiService)
 
         // ═══ 11b. 消息连接器（微信/飞书/Telegram，2 个工具）═══
         // connector_list：列出启用的连接器与凭据状态；connector_send_message：
@@ -1190,25 +1163,3 @@ object ToolModule {
  * 记 tool / command（参数截断）/ decision / durationMs / success，与
  * shell_execute 的 executed/failed 词汇表对齐。审计异常静默（绝不阻断工具本身）。
  */
-private fun auditedTerminalTool(
-    audit: ToolAuditLogger,
-    tool: com.apex.agent.platform.terminal.tools.TerminalTool
-): com.apex.agent.platform.terminal.tools.TerminalTool =
-    object : com.apex.agent.platform.terminal.tools.TerminalTool by tool {
-        override suspend fun invoke(arguments: String): String {
-            val startedAt = System.currentTimeMillis()
-            val result = runCatching { tool.invoke(arguments) }
-            runCatching {
-                audit.log(
-                    ToolAuditLogger.Event(
-                        tool = tool.id,
-                        decision = if (result.isSuccess) "executed" else "failed",
-                        command = arguments.take(512),
-                        durationMs = System.currentTimeMillis() - startedAt,
-                        success = result.isSuccess
-                    )
-                )
-            }
-            return result.getOrThrow()
-        }
-    }
