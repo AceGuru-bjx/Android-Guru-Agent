@@ -2,8 +2,11 @@ package com.apex.agent.platform.privilege.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
+import android.graphics.HardwareBuffer
 import android.graphics.Path
 import android.graphics.Rect
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
@@ -29,6 +32,9 @@ class ApexAccessibilityService : AccessibilityService() {
             private set
 
         fun isRunning(): Boolean = instance != null
+
+        /** #236 心跳门控用：keepAlive=false 的 JSON 快速判别（与 BootReceiver 同款）。 */
+        private val KEEP_ALIVE_OFF_REGEX = Regex("\"keepAlive\"\\s*:\\s*false")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -178,6 +184,47 @@ class ApexAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * #239：Android 11+ 无障碍截图（API 30 `AccessibilityService.takeScreenshot`）
+     * 的真实现 —— 旧实现是空壳（DefaultPrivilegeManager 里直接 `return false` 且
+     * 无诊断信息，还把 root 回退链短路成不可达）。
+     *
+     * suspendCancellableCoroutine 桥接异步回调；HardwareBuffer → 软件 ARGB_8888
+     * 拷贝（buffer close 后位图仍可用）。低版本/服务未连接/回调失败 → null，
+     * 调用方（DefaultPrivilegeManager.takeScreenshot）回退 root screencap 通道。
+     */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    suspend fun takeScreenshotBitmap(): Bitmap? {
+        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            runCatching {
+                takeScreenshot(
+                    // 直通 executor：回调在 binder 线程上执行（仅做位图拷贝 +
+                    // resume，无阻塞操作）—— 不为每次截图新建线程（线程泄漏）。
+                    java.util.concurrent.Executor { it.run() },
+                    object : AccessibilityService.TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                            val bmp = screenshot.hardwareBuffer?.let { hb ->
+                                try {
+                                    Bitmap.wrapHardwareBuffer(hb, HardwareBuffer.RGBA_8888)
+                                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                                } finally {
+                                    hb.close()
+                                }
+                            }
+                            if (cont.isActive) cont.resume(bmp) {}
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            if (cont.isActive) cont.resume(null) {}
+                        }
+                    }
+                )
+            }.onFailure {
+                if (cont.isActive) cont.resume(null) {}
+            }
+        }
+    }
+
+    /**
      * 全局操作
      */
     fun performBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
@@ -203,6 +250,10 @@ class ApexAccessibilityService : AccessibilityService() {
         val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
         val alive = am.runningAppProcesses?.any { it.processName == packageName } ?: false
         if (!alive) {
+            // #236（心跳门控）：Keep Alive 关闭时用户已明确拒绝常驻 —— 无障碍
+            // “不死心跳”不再拉起前台服务（与 BootReceiver 同款 SharedPreferences
+            // 正则快读；解析失败视为开，宁可多拉一次也不静默违背用户预期）。
+            if (!keepAliveEnabled()) return
             try {
                 val intent = android.content.Intent().apply {
                     setClassName(packageName, "$packageName.service.ApexCoreService")
@@ -214,6 +265,17 @@ class ApexAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
+    }
+
+    /** 快读主进程 apex_settings/agent_settings_v2 的 keepAlive 布尔（缺省/损坏 → true）。
+     * 与 app 模块 BootReceiver.keepAliveEnabled 同款模式（本模块无法依赖 app 层类，
+     * 双端实现由 CI 双向注释锁定同步）。 */
+    private fun keepAliveEnabled(): Boolean {
+        val raw = runCatching {
+            getSharedPreferences("apex_settings", Context.MODE_PRIVATE)
+                .getString("agent_settings_v2", null)
+        }.getOrNull() ?: return true
+        return !KEEP_ALIVE_OFF_REGEX.containsMatchIn(raw ?: "")
     }
 
     private fun traverseNode(

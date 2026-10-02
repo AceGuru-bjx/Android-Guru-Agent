@@ -305,23 +305,29 @@ object TerminalModule {
     @Provides
     @Singleton
     fun provideTerminalRuntime(
+        @ApplicationContext context: android.content.Context,
         native: NativePty,
         policy: TerminalPolicy,
         store: SessionMetadataStore,
         backends: ExecutionBackendRegistry,
         workspaceBinder: LinuxWorkspaceManager,
         provisioner: RootfsProvisioner
-    ): TerminalRuntime = TerminalRuntimeImpl(
-        native, policy,
-        backendRegistry = backends,
-        persistenceStore = store,
-        workspaceBinder = workspaceBinder,
-        // T81 (U-10)：rootfs 活跃会话绑定（provisioner.remove 门禁）。
-        rootfsBinder = com.apex.agent.platform.terminal.ubuntu.RootfsUsageBinderImpl(provisioner),
-        // T82：Shell Marker Protocol —— 每个前台 job 携带 OSC 633 marker（真实
-        // 退出码 + jobId）；prompt 启发式降级为 fallback。生产默认开启。
-        enableShellMarkers = true
-    )
+    ): TerminalRuntime {
+        // #F-⑰：native VT 引擎黑匣子接线（幂等）—— 上一次未干净收尾的 feed
+        // trail 在此归因（logcat + .crash 留档）；必须在首个引擎创建前调用。
+        com.apex.agent.vtnative.VtFeedTrail.install(java.io.File(context.filesDir, "logs"))
+        return TerminalRuntimeImpl(
+            native, policy,
+            backendRegistry = backends,
+            persistenceStore = store,
+            workspaceBinder = workspaceBinder,
+            // T81 (U-10)：rootfs 活跃会话绑定（provisioner.remove 门禁）。
+            rootfsBinder = com.apex.agent.platform.terminal.ubuntu.RootfsUsageBinderImpl(provisioner),
+            // T82：Shell Marker Protocol —— 每个前台 job 携带 OSC 633 marker（真实
+            // 退出码 + jobId）；prompt 启发式降级为 fallback。生产默认开启。
+            enableShellMarkers = true
+        )
+    }
 
     /** Compat facade: old TerminalManager API → new Runtime (settle-time DELETED). Spec §35. */
     @Provides
