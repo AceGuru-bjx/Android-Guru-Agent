@@ -90,7 +90,7 @@ private fun ExtraKeyButton(
                     //（经 VM 的 sendInput → 黑白名单门禁 + 历史记录，零旁路）。
                     ExtraKeysConfig.MacroKind.CMD -> onText(key.payload + "\r")
                     ExtraKeysConfig.MacroKind.KEY -> resolveTerminalKey(key.payload)?.let(onKey)
-                    ExtraKeysConfig.MacroKind.CTRL -> onControl(key.payload[0])
+                    ExtraKeysConfig.MacroKind.CTRL -> key.payload.firstOrNull()?.let(onControl)
                     ExtraKeysConfig.MacroKind.PASTE -> onPaste()
                 }
             }
