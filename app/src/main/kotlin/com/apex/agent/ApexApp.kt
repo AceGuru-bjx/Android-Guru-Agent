@@ -26,7 +26,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.drop
 import rikka.shizuku.Shizuku
@@ -93,10 +92,6 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
     /** #210/#212：特权状态真源 —— Shizuku 回调里调 refreshStatus() 回灌 StateFlow。 */
     @Inject
     lateinit var privilegeManager: PrivilegeManager
-
-    /** #236 收尾：设置仓库（agentSettings 流驱动 Keep Alive 服务同步）。 */
-    @Inject
-    lateinit var settingsRepository: com.apex.agent.ui.screen.settings.SettingsRepository
 
     /** #236 收尾：设置仓库（agentSettings 流驱动 Keep Alive 服务同步）。 */
     @Inject
