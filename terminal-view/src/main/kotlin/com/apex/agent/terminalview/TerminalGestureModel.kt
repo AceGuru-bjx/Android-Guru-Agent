@@ -1,5 +1,7 @@
 package com.apex.agent.terminalview
 
+import android.view.MotionEvent
+
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -147,6 +149,14 @@ class TerminalGestureModel(
     /** 是否在等单击确认/双击窗口（View 据此排确认 tick）。 */
     val awaitingTapConfirm: Boolean get() = state == State.TAP_PENDING
 
+    /**
+     * T92：**即时点击模式** —— 鼠标报告开启时 View 置位：UP 立即派发 [Tap]
+     *（跳过双击确认窗，vim 点击定位不再等 ~300ms；真鼠标没有「双击窗口」，
+     * 双击 = 两次独立点击）。默认关（普通模式下单击延迟派发给双击选词让路）。
+     * 态内每帧可改（vim 开/关鼠标模式的动态跟随）。
+     */
+    var immediateTapEnabled: Boolean = false
+
     /** 复位（CANCEL/宿主主动取消）。 */
     fun reset() {
         state = State.IDLE
@@ -188,7 +198,6 @@ class TerminalGestureModel(
         }
         return out
     }
-
     // ─── 状态转换 ───
 
     private fun onDown(s: TouchSample, out: MutableList<GestureEvent>) {
@@ -216,9 +225,18 @@ class TerminalGestureModel(
             State.DOWN -> {
                 val moved = hypot(s.x - downX, s.y - downY) > tapSlopPx
                 if (moved) {
-                    if (doubleTapCandidate) doubleTapCandidate = false // 移动即废双击
-                    state = State.SCROLLING
-                    out.add(GestureEvent.Scroll(s.y - downY)) // 首段携带锚点以来的位移
+                    if (doubleTapCandidate) {
+                        // T92：双击候选 + 移动 = 「双击后拖动扩选」（Termux 手柄拖选
+                        // 的无手柄近似）—— 废双击改拖选，不进滚动。
+                        doubleTapCandidate = false
+                        state = State.DRAGGING
+                        dragStarted = false
+                        out.add(GestureEvent.DragStart(s.x, s.y))
+                        out.add(GestureEvent.DragMove(s.x, s.y))
+                    } else {
+                        state = State.SCROLLING
+                        out.add(GestureEvent.Scroll(s.y - downY)) // 首段携带锚点以来的位移
+                    }
                     pushVel(s.tMs, s.y)
                 } else {
                     lastX = s.x; lastY = s.y // 长按位置跟随（微移不影响长按判定）
@@ -253,6 +271,10 @@ class TerminalGestureModel(
                     state = State.IDLE
                     doubleTapCandidate = false
                     out.add(GestureEvent.DoubleTap(s.x, s.y))
+                } else if (immediateTapEnabled) {
+                    // T92：鼠标模式 —— UP 即点击（不等双击窗；真鼠标同款）。
+                    state = State.IDLE
+                    out.add(GestureEvent.Tap(s.x, s.y))
                 } else {
                     state = State.TAP_PENDING
                     doubleTapCandidate = false
@@ -371,5 +393,40 @@ class TerminalGestureModel(
 
     private companion object {
         const val VEL_BUFFER = 16
+    }
+}
+
+/**
+ * T92：MotionEvent → [TerminalGestureModel.TouchSample]（纯映射 —— 从
+ * TerminalView 抽出，SRP 行预算；本文件原零 android 依赖，此为唯一框架接口）。
+ *
+ * 多指 MOVE 上报**第二指**坐标（捏合距离跟踪；主指位置由 POINTER_DOWN 时刻
+ * 的锚点近似 —— 阈值制字号缩放对精度不敏感）。
+ */
+internal fun MotionEvent.toTouchSample(): TerminalGestureModel.TouchSample? {
+    val action = when (actionMasked) {
+        MotionEvent.ACTION_DOWN -> TerminalGestureModel.TouchAction.DOWN
+        MotionEvent.ACTION_MOVE -> TerminalGestureModel.TouchAction.MOVE
+        MotionEvent.ACTION_UP -> TerminalGestureModel.TouchAction.UP
+        MotionEvent.ACTION_CANCEL -> TerminalGestureModel.TouchAction.CANCEL
+        MotionEvent.ACTION_POINTER_DOWN -> TerminalGestureModel.TouchAction.POINTER_DOWN
+        MotionEvent.ACTION_POINTER_UP -> TerminalGestureModel.TouchAction.POINTER_UP
+        else -> return null
+    }
+    val t = eventTime
+    return when (action) {
+        TerminalGestureModel.TouchAction.POINTER_DOWN, TerminalGestureModel.TouchAction.POINTER_UP -> {
+            val idx = actionIndex.coerceIn(0, pointerCount - 1)
+            TerminalGestureModel.TouchSample(
+                getX(idx), getY(idx), t, action,
+                pointerCount, getPointerId(idx)
+            )
+        }
+        else -> {
+            val idx = if (action == TerminalGestureModel.TouchAction.MOVE && pointerCount >= 2) 1 else 0
+            TerminalGestureModel.TouchSample(
+                getX(idx), getY(idx), t, action, pointerCount, 0
+            )
+        }
     }
 }

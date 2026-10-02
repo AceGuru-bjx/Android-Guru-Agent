@@ -104,6 +104,10 @@ class ScreenBuffer(
         }
         if (leadSplitBefore) cells[row][fromCol - 1] = TerminalCell.BLANK.copy(style = style)
         if (trailSplitAfter) cells[row][last + 1] = TerminalCell.BLANK.copy(style = style)
+        // T92（reflow 断链）：全宽擦除 = 该行内容不复存在 —— 软换行接续标志必须
+        // 同步断链（与 eraseRows 对齐）。旧实现残留 wrapped=true：ncurses「擦行
+        // 重绘更短内容」+ 之后 resize → 已清空的行与下一逻辑行错误拼接。
+        if (fromCol <= 0 && last >= cols - 1) wrapFlags[row] = false
     }
 
     /** Erase entire rows range. */
