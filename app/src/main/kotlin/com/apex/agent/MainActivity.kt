@@ -27,6 +27,7 @@ import com.apex.agent.service.CoreServiceGate
 import com.apex.agent.share.SharedIntake
 import com.apex.agent.ui.ApexRoot
 import com.apex.agent.ui.language.LanguageManager
+import com.apex.agent.ui.screen.onboarding.OnboardingFlow
 import com.apex.agent.ui.screen.onboarding.OnboardingScreen
 import com.apex.agent.ui.screen.settings.SettingsRepository
 import com.apex.agent.ui.theme.AccentPalette
@@ -101,7 +102,15 @@ class MainActivity : ComponentActivity() {
         // keepAlive 默认开（前台服务常驻语义）；厂商 ROM 的电池优化会在后台杀
         // 服务导致长任务中断。Manifest 已声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，
         // 首启且未在白名单时发起系统豁免请求；用户拒绝过就不再骚扰（SP 记问）。
-        maybeRequestBatteryOptimizationExemption()
+        //
+        // Onboarding v2 门控：引导页第 3 页已含「忽略电池优化」步骤 ——
+        // 引导未完成（新装 + 升级后首启重看）时压制本一次性弹窗，避免
+        // 系统对话框叠在引导页上；完成引导但跳过该步骤的用户，由本
+        // 兜底在下次冷启动补问一次。
+        val s = settingsRepository.agentSettings.value
+        if (s.onboardingCompleted && s.onboardingVersion >= OnboardingFlow.CURRENT_VERSION) {
+            maybeRequestBatteryOptimizationExemption()
+        }
 
         // 语言切换：设置中心 language 与当前已应用语言不同 → recreate 重新走
         // attachBaseContext（新实例以新语言包裹，stringResource 即时取新资源）。
@@ -140,15 +149,34 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
                     ) {
-                        // 新手引导：首次启动（或升级后首次）先走四页 Onboarding，
-                        // 完成标记持久化在 SettingsRepository.onboardingCompleted。
-                        if (settings.onboardingCompleted) {
+                        // 新手引导：首次启动（或升级到新引导版本后的首启）先走
+                        // 五页 Onboarding；完成标记持久化在 AgentSettings
+                        // （onboardingCompleted + onboardingVersion 双字段 ——
+                        // 版本低于当前引导版的老用户重看一次，新权限步骤与
+                        // 工作区选择借引导页布道，与 v1 重看语义一致）。
+                        if (settings.onboardingCompleted &&
+                            settings.onboardingVersion >= OnboardingFlow.CURRENT_VERSION
+                        ) {
                             ApexRoot()
                         } else {
                             OnboardingScreen(
+                                workspaceScope = settings.workspaceScope,
+                                workspaceFolderName = settings.workspaceFolderName,
+                                onWorkspaceSelected = { scope, folderUri, folderName ->
+                                    settingsRepository.updateAgentSettings {
+                                        copy(
+                                            workspaceScope = scope,
+                                            workspaceFolderUri = folderUri,
+                                            workspaceFolderName = folderName
+                                        )
+                                    }
+                                },
                                 onFinished = {
                                     settingsRepository.updateAgentSettings {
-                                        copy(onboardingCompleted = true)
+                                        copy(
+                                            onboardingCompleted = true,
+                                            onboardingVersion = OnboardingFlow.CURRENT_VERSION
+                                        )
                                     }
                                 }
                             )
