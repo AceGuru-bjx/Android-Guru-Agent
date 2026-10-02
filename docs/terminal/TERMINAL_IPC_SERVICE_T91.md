@@ -182,9 +182,10 @@ FakeNativePty 全链路）：create 编码双态 / 事件驱动首输出 / write
 （Pinch 短路）/ `TerminalViewSettingsTest.kt`（新增）。
 
 **platform/terminal**：
-- proot/：`PRootBackend.kt`（PRootDialect + builder 方言参数）、
-  `PRootEnvTrampoline.kt`（契约双方言形状）、`NativeLibraryPRootBinaryProvider.kt`
-  （能力探针 + 记忆化）、`LinuxPRootBackend.kt`（verify 方言参与 argv）；
+- proot/：`PRootBackend.kt`（PRootArgvCapabilities 能力对 + builder 能力参数，
+  0c9b41ea 前身 PRootDialect 已废弃）、`PRootEnvTrampoline.kt`（契约双能力
+  形状）、`NativeLibraryPRootBinaryProvider.kt`（双能力探针 + 记忆化）、
+  `LinuxPRootBackend.kt`（verify 能力参与 argv）；
 - runtime/：`TerminalRuntime.kt`（additive：terminalEventFlow）、
   `TerminalRuntimeImpl.kt`（EventBus 直通实现）；
 - service/（新增）：`ITerminalService.aidl` / `ITerminalCallback.aidl` /
@@ -194,7 +195,7 @@ FakeNativePty 全链路）：create 编码双态 / 事件驱动首输出 / write
   `res/values{,-zh}/strings.xml`；
 - 构建：`build.gradle.kts`（buildFeatures.aidl）、`AndroidManifest.xml`
   （service 声明 + 库自包含权限）；
-- 测试：`PRootDialectAdaptationTest.kt` / `TerminalIpcControllerTest.kt`（新增）、
+- 测试：`PRootArgvCapabilitiesTest.kt` / `TerminalIpcControllerTest.kt`（新增）、
   三个 E2E 去适配层、两个工具测试 FakeRuntime 补新接口方法。
 
 **app**：`TerminalModule.kt`（runtime 创建即 install Registry）。

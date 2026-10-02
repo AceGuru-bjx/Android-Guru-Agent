@@ -213,7 +213,10 @@ class GuestFilesystem(
             launch,
             AbsolutePath(ctx.prootBinary.absolutePath),
             AbsolutePath(ctx.rootfsDir.absolutePath),
-            AbsolutePath(ctx.workspaceDir.absolutePath)
+            AbsolutePath(ctx.workspaceDir.absolutePath),
+            // T92：探针实测能力门（ctx.capabilities 随上下文流转 —— 与 apt/
+            // 终端会话同款版本自适应，非交互路径不再默认 Termux 基线）
+            capabilities = ctx.capabilities
         )
         val result = executor.execute(command, timeoutMs = timeoutMs)
         val ok = !result.timedOut && result.exitCode == 0

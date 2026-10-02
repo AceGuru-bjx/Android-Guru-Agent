@@ -624,7 +624,10 @@ class UbuntuAptPackageManager(
         val binaryPath = binaryProvider.locate().getOrElse { e ->
             throw RuntimeException("AptError:PROOT_UNAVAILABLE — ${e.message}", e)
         }
-        binaryProvider.verify(binaryPath).getOrElse { e ->
+        // T92（D5 完成度）：verify 产物不再丢弃 —— capabilities 参与 argv 构造
+        //（与 LinuxPRootBackend 同款能力门；此前 apt 路径默认 Termux 基线，
+        // 二进制升级/替换后 apt 拒启而终端会话正常，静默分叉）。
+        val binaryInfo = binaryProvider.verify(binaryPath).getOrElse { e ->
             throw RuntimeException("AptError:PROOT_VERIFY_FAILED — ${e.message}", e)
         }
         val rootfsPath = rootfs.location
@@ -663,7 +666,15 @@ class UbuntuAptPackageManager(
             fakeRoot = true,
             killOnExit = true
         )
-        return commandBuilder.build(launch, binaryPath, rootfsPath, AbsolutePath(workspaceDir.absolutePath))
+        return commandBuilder.build(
+            launch,
+            binaryPath,
+            rootfsPath,
+            AbsolutePath(workspaceDir.absolutePath),
+            // T92：探针实测能力门（upstream 5.1.0 等不带 --kill-on-exit 的
+            // 二进制不再拒启；Termux 捆绑基线 argv 逐字节不变）
+            capabilities = binaryInfo.capabilities
+        )
     }
 
     // ──────────────────────────────────────────────────────────────────

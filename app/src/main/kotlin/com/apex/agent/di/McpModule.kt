@@ -18,6 +18,7 @@ import com.apex.agent.mcp.builtin.thinking.BuiltinThinkingMcpBootstrap
 import com.apex.agent.mcp.builtin.thinking.BuiltinThinkingMcpServer
 import com.apex.agent.mcp.builtin.thinking.BuiltinThinkingMcpTransport
 import com.apex.agent.mcp.proot.ProotMcpProcessLauncher
+import com.apex.agent.platform.terminal.proot.PRootCapabilitySource
 import com.apex.agent.platform.terminal.proot.PRootHostEnvironment
 import com.apex.agent.search.mcp.BuiltinSearchMcpBootstrap
 import com.apex.agent.search.mcp.BuiltinSearchMcpServer
@@ -60,6 +61,8 @@ object McpModule {
         // v0.2 #149：PRoot 沙箱 launcher 的宿主环境（libproot 路径 + host env）
         hostEnvironment: PRootHostEnvironment,
         rootfsBaseDir: File,
+        // T92（D5 完成度）：argv 能力源（launcher 手工内联 argv 的能力门输入）
+        capabilitySource: PRootCapabilitySource,
         // 共享知识图谱单例（memory MCP 与聊天自动记忆同图同源，见 provideKnowledgeGraphStore）
         knowledgeGraphStore: com.apex.agent.mcp.builtin.memory.KnowledgeGraphStore
     ): McpManager {
@@ -95,7 +98,10 @@ object McpModule {
                 hostEnv = hostEnvironment.hostEnv(),
                 libprootPath = hostEnvironment.prootBinary.absolutePath,
                 rootfsDir = rootfsBaseDir,
-                isRootfsReady = { File(rootfsBaseDir, "current").exists() }
+                isRootfsReady = { File(rootfsBaseDir, "current").exists() },
+                // T92：argv 能力门（--kill-on-exit/-- 按探针实测拼接，
+                // 与终端会话/apt 同款版本自适应 —— 此前硬编码是最后一个残留点）
+                capabilities = capabilitySource::invoke
             ),
             // #205 沙箱就绪探针：与 launcher 门禁同源（current 标记文件）——
             // ENV_CHECK 事件里如实呈现 rootfs 状态，未装好在拉进程前就可见。

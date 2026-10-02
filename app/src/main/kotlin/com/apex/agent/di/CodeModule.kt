@@ -9,6 +9,7 @@ import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.codetools.git.GitCommandRunner
 import com.apex.agent.core.codetools.tools.CodeTodoTool
 import com.apex.agent.git.ProotGitCommandRunner
+import com.apex.agent.platform.terminal.proot.PRootCapabilitySource
 import com.apex.agent.platform.terminal.proot.PRootHostEnvironment
 import com.apex.agent.core.engine.AgentConfig
 import com.apex.agent.core.engine.AgentEngine
@@ -91,7 +92,8 @@ object CodeModule {
         @ApplicationContext context: Context,
         hostEnvironment: PRootHostEnvironment,
         rootfsBaseDir: File,
-        workspaceRoots: CodeWorkspaceRoots
+        workspaceRoots: CodeWorkspaceRoots,
+        capabilitySource: PRootCapabilitySource
     ): GitCommandRunner {
         return ProotGitCommandRunner(
             hostEnv = hostEnvironment.hostEnv(),
@@ -99,7 +101,9 @@ object CodeModule {
             rootfsDir = rootfsBaseDir,
             isRootfsReady = { File(rootfsBaseDir, "current").exists() },
             workspaceRoots = workspaceRoots,
-            persistentHomeDir = File(context.filesDir, "linux/home")
+            persistentHomeDir = File(context.filesDir, "linux/home"),
+            // T92：argv 能力门（与终端会话/apt 同款版本自适应）
+            capabilities = capabilitySource::invoke
         )
     }
 

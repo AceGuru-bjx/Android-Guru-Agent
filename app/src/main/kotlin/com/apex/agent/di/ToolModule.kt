@@ -494,6 +494,8 @@ object ToolModule {
         // P0 修复（用户反馈"Ubuntu 用不了/Shell 用不了"）：terminal.exec 的
         // Ubuntu 沙箱通道依赖（ProotCommandSpawner）。
         hostEnvironment: PRootHostEnvironment,
+        // T92（D5 完成度）：argv 能力源（两处 ProotCommandSpawner 的能力门输入）
+        capabilitySource: com.apex.agent.platform.terminal.proot.PRootCapabilitySource,
         // 注：rootfsTarget 已在上方参数区声明（同一类型），本地与远端 CI 红修复同款合并去重
         skillRegistry: SkillRegistry,
         // v2: MCP 三工具接线 + 风险门（HIGH 风险工具首次调用弹用户确认）+ 使用统计。
@@ -601,7 +603,9 @@ object ToolModule {
                 isRootfsReady = { File(rootfsBaseDir, "current").exists() },
                 defaultWorkspaceDir = File(context.filesDir, "linux/workspaces/default"),
                 persistentHomeDir = File(context.filesDir, "linux/home"),
-                fallback = PrivilegedCommandSpawner()
+                fallback = PrivilegedCommandSpawner(),
+                // T92：argv 能力门（与终端会话/apt 同款版本自适应）
+                capabilities = capabilitySource::invoke
             )),
             approvalGate = { cmd ->
                 if (commandPermissionGate.ensureAllowed(cmd)) null
@@ -759,7 +763,9 @@ object ToolModule {
                             isRootfsReady = { File(rootfsBaseDir, "current").exists() },
                             defaultWorkspaceDir = File(context.filesDir, "linux/workspaces/default"),
                             persistentHomeDir = File(context.filesDir, "linux/home"),
-                            fallback = PrivilegedCommandSpawner()
+                            fallback = PrivilegedCommandSpawner(),
+                            // T92：argv 能力门（探针与 terminal.exec 同款链路同款能力源）
+                            capabilities = capabilitySource::invoke
                         ))
                         val result = probeEngine.execute(
                             com.apex.agent.platform.terminal.exec.ExecRequest(

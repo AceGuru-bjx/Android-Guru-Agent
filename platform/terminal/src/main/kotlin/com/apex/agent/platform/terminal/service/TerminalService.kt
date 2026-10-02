@@ -132,12 +132,16 @@ class TerminalService : Service() {
     }
 
     /**
-     * binder 回调适配（oneway —— 派发从不阻塞 PTY 泵；异常全吞防单客户端拖垮）。
+     * binder 回调适配（oneway —— 派发从不阻塞 PTY 泵）。
      *
      * 相等性按底层 binder 代理（BinderProxy 以 native 身份实现 equals/hashCode
      * —— 同一客户端的两次注册/注销调用拿到的是同一 binder 身份）：register 与
      * unregister 各自 new 一个适配器，若按对象身份判等，注销永远匹配不到注册
      * 条目 → 回调泄漏。以 remote 为准，Set 语义成立。
+     *
+     * T92：回调抛异常（binder oneway 缓冲耗尽/客户端死亡）不再无限全吞 ——
+     * 控制器对连续失败计数并剔除（[TerminalIpcController] 防御性纪律），
+     * 单次失败仍吞（单客户端崩溃不得拖垮 PTY 泵）。
      */
     private class BinderCallback(private val remote: ITerminalCallback) : TerminalIpcController.Callback {
         override fun onOutput(sessionId: Long, data: ByteArray) {

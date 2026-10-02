@@ -11,6 +11,7 @@ import com.apex.agent.platform.terminal.linux.RootfsProvider
 import com.apex.agent.platform.terminal.proot.LinuxPRootBackend
 import com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider
 import com.apex.agent.platform.terminal.proot.PRootBinaryProvider
+import com.apex.agent.platform.terminal.proot.PRootCapabilitySource
 import com.apex.agent.platform.terminal.proot.PRootHostEnvironment
 import com.apex.agent.platform.terminal.runtime.ExecutionBackendRegistry
 import com.apex.agent.platform.terminal.runtime.LocalShellBackend
@@ -228,6 +229,18 @@ object TerminalModule {
         hostEnv = hostEnv,
         supportedAbis = { Build.SUPPORTED_ABIS.toList() }
     )
+
+    /**
+     * T92（D5 完成度）：argv 能力源 —— app 模块三类 argv 构造点
+     * （ProotCommandSpawner / ProotGitCommandRunner / ProotMcpProcessLauncher）
+     * 的非挂起能力读取桥。构造即后台预取（provider 记忆化，无重复 exec）；
+     * 预取窗口内读取 = 保守省略基线（省略形状在任何 proot 上均合法）。
+     */
+    @Provides
+    @Singleton
+    fun providePRootCapabilitySource(
+        provider: PRootBinaryProvider
+    ): PRootCapabilitySource = PRootCapabilitySource(provider)
 
     /**
      * T75: Linux workspace 管理 —— per-session 隔离文件区（bind → guest /workspace）。

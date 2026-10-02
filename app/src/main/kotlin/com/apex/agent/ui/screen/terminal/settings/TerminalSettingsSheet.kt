@@ -295,7 +295,9 @@ private fun CommandListEditor(title: String, items: List<String>, onAdd: (String
     if (items.isNotEmpty()) {
         Spacer(Modifier.height(6.dp))
         LazyColumn(modifier = Modifier.height((items.size.coerceAtMost(4) * 36).dp)) {
-            items(items) { cmd ->
+            // #245：items 无 key 时流式刷新/删除会使行内状态错位 —— 列表源是
+            // Set<String>（去重保证），内容即稳定 key
+            items(items, key = { it }) { cmd ->
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("• $cmd", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                     TextButton(onClick = { onRemove(cmd) }) { Text(stringResource(R.string.term_remove), color = MaterialTheme.colorScheme.error) }

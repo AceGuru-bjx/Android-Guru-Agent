@@ -31,6 +31,13 @@ import java.util.concurrent.TimeUnit
  *    是 Termux 方言的子集）。任一路径 exit 0 即判支持（设备 /bin/sh 可能
  *    不存在 → 回退 /system/bin/sh；CI runner 反之）。
  *  - 两探针不可判定（exec 异常/超时）→ 保守省略该项。
+ *
+ * T92（审计修复）：三探针统一 **先幂等 [PRootHostEnvironment.prepare] 再 exec** ——
+ * 此前探针直接 `hostEnv()`，而 hostEnv 契约要求先 prepare；首次安装/清缓存后
+ * `libtalloc.so.2` symlink 与 `PROOT_TMP_DIR` 均不存在 → proot exec 因动态链接
+ * 失败**确定性非零退出（false，非 null）** → 记忆化 UPSTREAM_SAFE → 整个进程
+ * 生命周期内设备 argv 静默丢 `--kill-on-exit` 与 `--`（与「设备 argv 逐字节
+ * 不变」的 T91 承诺冲突）。prepare 失败 → 探针返回 null（不可判定，不 exec）。
  */
 class NativeLibraryPRootBinaryProvider(
     private val hostEnv: PRootHostEnvironment,
@@ -168,18 +175,35 @@ class NativeLibraryPRootBinaryProvider(
         /** 探针单次有界等待（无界挂起不可判定 —— 与 E2E 探针同款防御）。 */
         private const val PROBE_TIMEOUT_SECONDS = 10L
 
+        /**
+         * T92（审计修复）：探针前置 —— 幂等 prepare 成功后才取 host env。
+         *
+         * prepare 失败（staging 目录/二进制缺失）→ null：环境未就绪属于
+         * **不可判定**而非「不支持」，绝不 exec（避免链接失败的确定性非零退出
+         * 被误认成 unknown option → 能力被永久记忆化为 false）。
+         */
+        private fun probeEnv(hostEnv: PRootHostEnvironment): Map<String, String>? =
+            hostEnv.prepare().getOrNull()?.let { hostEnv.hostEnv() }
+
         /** 默认版本探针：真实 exec `<binary> --version`（Android/JVM 通用）。 */
         private fun defaultVersionProbe(binary: File, hostEnv: PRootHostEnvironment): String? {
             return try {
-                val envMap = hostEnv.hostEnv()
+                val envMap = probeEnv(hostEnv) ?: return null
                 val pb = ProcessBuilder(listOf(binary.absolutePath, "--version"))
                 pb.environment().clear()
                 pb.environment().putAll(envMap)
                 val proc = pb.start()
                 val out = proc.inputStream.bufferedReader().readText().trim()
                 val err = proc.errorStream.bufferedReader().readText().trim()
-                proc.waitFor()
-                out.ifBlank { err }.ifBlank { null }
+                // T92：有界等待 —— 无界 waitFor 会把一次挂死的 --version 钉死在
+                // verify（每次会话创建都调）上，进而钉死 create/availability。
+                val exited = proc.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                if (!exited) {
+                    runCatching { proc.destroyForcibly() }
+                    null
+                } else {
+                    out.ifBlank { err }.ifBlank { null }
+                }
             } catch (e: Exception) {
                 null
             }
@@ -192,7 +216,7 @@ class NativeLibraryPRootBinaryProvider(
          */
         private fun defaultKillOnExitProbe(binary: File, hostEnv: PRootHostEnvironment): Boolean? {
             return try {
-                val envMap = hostEnv.hostEnv()
+                val envMap = probeEnv(hostEnv) ?: return null
                 val pb = ProcessBuilder(
                     listOf(binary.absolutePath, KILL_ON_EXIT_OPTION, "--version")
                 )
@@ -224,7 +248,7 @@ class NativeLibraryPRootBinaryProvider(
          * 省略 `--` —— 省略形状在任何 proot 上均合法，仅丢失显式分界。
          */
         private fun defaultSeparatorProbe(binary: File, hostEnv: PRootHostEnvironment): Boolean? {
-            val envMap = hostEnv.hostEnv()
+            val envMap = probeEnv(hostEnv) ?: return null
             for (shell in SEPARATOR_PROBE_SHELLS) {
                 val supported = try {
                     val pb = ProcessBuilder(

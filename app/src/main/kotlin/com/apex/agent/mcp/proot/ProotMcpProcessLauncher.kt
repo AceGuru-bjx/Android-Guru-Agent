@@ -6,6 +6,7 @@ import com.apex.agent.core.tools.mcp.McpException
 import com.apex.agent.core.tools.mcp.McpProcessHandle
 import com.apex.agent.core.tools.mcp.McpProcessLauncher
 import com.apex.agent.platform.terminal.environment.LinuxEnvironmentManager
+import com.apex.agent.platform.terminal.proot.PRootArgvCapabilities
 import com.apex.agent.platform.terminal.proot.PRootEnvTrampoline
 import com.apex.agent.platform.terminal.proot.SharedStorageBridge
 import com.apex.agent.platform.terminal.proot.SystemBindProfile
@@ -105,7 +106,16 @@ class ProotMcpProcessLauncher(
      */
     private val rootfsDir: File,
     /** rootfs 就绪门禁（false = 未安装或不可用，launch 会抛引导性异常）。 */
-    private val isRootfsReady: () -> Boolean
+    private val isRootfsReady: () -> Boolean,
+    /**
+     * T92（D5 完成度）：argv 能力源（PRootCapabilitySource —— 非挂起读取）。
+     * 本类是唯一**不走** [com.apex.agent.platform.terminal.proot.PRootCommandBuilder]
+     * 的 argv 构造点（argv 手工内联拼装）—— 能力门在此处手工实现：
+     * `--kill-on-exit` 与 `--` 仅在探针实测支持时拼接（省略形状在任何
+     * proot 上均合法 —— env trampoline 首 token `/usr/bin/env` 天然分界）。
+     * 默认 Termux 基线仅保既有测试夹具语义；生产 DI 注入真实源。
+     */
+    private val capabilities: () -> PRootArgvCapabilities = { PRootArgvCapabilities.TERMUX_BUNDLED }
 ) : McpProcessLauncher {
 
     /** 共享存储桥：与 app TerminalModule 同款 host 目录约定。 */
@@ -216,30 +226,35 @@ class ProotMcpProcessLauncher(
     }
 
     /**
-     * 完整 argv：libproot + -r/-0/--kill-on-exit + binds + -w + env trampoline + 命令。
+     * 完整 argv：libproot + -r/-0 + binds + -w + env trampoline + 命令。
      *
      * T88 根治：guest env 不再经 proot `-E`（捆绑的 5.1.107 不支持，运行时报
      * `proot error: unknown option '-E'`），改用 [PRootEnvTrampoline]
      * 的 `/usr/bin/env -i K=V … cmd` 形态（Termux proot-distro 同款）。
+     *
+     * T92（D5 完成度）：`--kill-on-exit` 与 `--` 改为能力门控（探针实测支持
+     * 才拼接 —— 此前硬编码，是 -E 事故同构风险的最后一个残留点；省略
+     * `--` 时 trampoline 首 token `/usr/bin/env` 是非选项 token，天然分界）。
      */
     internal fun buildArgv(
         rootfs: File,
         command: List<String>,
         requestEnv: Map<String, String>
     ): List<String> {
+        val caps = capabilities()
         val argv = mutableListOf<String>()
         argv.add(libprootPath)
         argv.add("-r")
         argv.add(rootfs.absolutePath)
         argv.add("-0")
-        argv.add("--kill-on-exit")
+        if (caps.supportsKillOnExit) argv.add("--kill-on-exit")
         for ((hostPath, guestPath) in buildBinds()) {
             argv.add("-b")
             argv.add("$hostPath:$guestPath")
         }
         argv.add("-w")
         argv.add(GUEST_CWD)
-        argv.add("--")
+        if (caps.supportsOptionSeparator) argv.add("--")
         argv.addAll(PRootEnvTrampoline.guestPrefix(guestEnv(requestEnv)))
         argv.addAll(command)
         return argv

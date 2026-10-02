@@ -38,6 +38,9 @@ class TerminalIpcControllerTest {
     private lateinit var controller: TerminalIpcController
     private var installed: TerminalRuntimeImpl? = null
 
+    /** T92：剔除测试专用低阈值控制器（阈值 3 → 确定性收敛）。 */
+    private lateinit var evictionController: TerminalIpcController
+
     /** 录制回调（线程安全 —— 事件收集在 Dispatchers.Default 上派发）。 */
     private class RecordingCallback : TerminalIpcController.Callback {
         val outputs = ConcurrentLinkedQueue<Pair<Long, String>>()
@@ -68,11 +71,18 @@ class TerminalIpcControllerTest {
             scope = scope,
             createTimeoutMs = 5_000L
         )
+        evictionController = TerminalIpcController(
+            runtimeProvider = { installed },
+            scope = scope,
+            createTimeoutMs = 5_000L,
+            callbackEvictionThreshold = 3
+        )
     }
 
     @After
     fun tearDown() {
         controller.shutdown()
+        evictionController.shutdown()
         runCatching { kotlinx.coroutines.runBlocking { runtime.shutdown() } }
         scope.cancel()
     }
@@ -243,5 +253,108 @@ class TerminalIpcControllerTest {
         Thread.sleep(300)
         val after = cb.outputs.count { it.second.contains("after-unregister") }
         assertEquals("unregistered callback must not receive new output", before, after)
+    }
+
+    // ─── T92：回调失败计数与剔除（oneway 静默丢数据防线） ───
+
+    /** 恒抛回调（模拟 binder oneway 缓冲耗尽 / 死客户端）—— 记录被调用次数。 */
+    private class DeadCallback(val calls: java.util.concurrent.atomic.AtomicInteger) : TerminalIpcController.Callback {
+        override fun onOutput(sessionId: Long, data: ByteArray) {
+            calls.incrementAndGet()
+            throw RuntimeException("binder async buffer exhausted / dead client")
+        }
+        override fun onExit(sessionId: Long, exitCode: Int, cause: String) {
+            calls.incrementAndGet()
+            throw RuntimeException("dead")
+        }
+        override fun onSessionStateChanged(sessionId: Long, state: String) {
+            calls.incrementAndGet()
+            throw RuntimeException("dead")
+        }
+    }
+
+    @Test
+    fun `T92 dead callback is evicted after consecutive failures while healthy one keeps streaming`() {
+        // 低阈值控制器（3）：FakeNativePty 是命令解释型 fake —— 用 `echo x`
+        // 产生真实输出事件（每个 echo 至少一个 OutputProduced）
+        val healthy = RecordingCallback()
+        evictionController.registerCallback(healthy)
+        val deadCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        evictionController.registerCallback(DeadCallback(deadCalls))
+        val sid = evictionController.createSession("local", 24, 80, null, null).toLong()
+
+        // 40 次 echo 输出（+初始提示）远超阈值 3 —— 死回调必被剔除。
+        // 健康侧断言用字符计数（事件可能合并 —— 字节数不受影响）
+        repeat(40) { evictionController.writeText(sid, "echo x\n") }
+        assertTrue(
+            "健康回调持续收到输出（PTY 泵不被死回调拖垮）",
+            awaitTrue(timeoutMs = 10_000L) {
+                healthy.outputs.filter { it.first == sid }.sumOf { it.second.count { c -> c == 'x' } } >= 30
+            }
+        )
+        // 等死回调的失败计数稳定（达到阈值后不再增长）
+        assertTrue(
+            "死回调失败计数必须达到剔除阈值",
+            awaitTrue(timeoutMs = 10_000L) { deadCalls.get() >= 3 }
+        )
+        val settled = deadCalls.get()
+        Thread.sleep(300)
+        assertEquals("剔除后不再向死回调派发", settled, deadCalls.get())
+
+        // 再写 5 次：健康回调继续收（剔除不影响在场订阅者），死回调零增长
+        // （zz 是唯一标记 —— 初始提示 "FakeNativePty shell ready" 不含 z）
+        repeat(5) { evictionController.writeText(sid, "echo zz\n") }
+        assertTrue(
+            awaitTrue(timeoutMs = 10_000L) {
+                healthy.outputs.filter { it.first == sid }.sumOf { it.second.count { c -> c == 'z' } } >= 5
+            }
+        )
+        Thread.sleep(300)
+        assertEquals("剔除是终态（连续失败计数不再增长）", settled, deadCalls.get())
+    }
+
+    @Test
+    fun `T92 intermittent callback failures are forgiven (strike reset on success)`() {
+        // 间歇性失败（每 3 次 1 失败 —— 连续失败永不超过 1，远低于阈值 3）
+        // 不误杀：成功一次即清零计数。断言语义是「存活 + 持续接收」而非
+        // 事件计数（runtime 输出事件按读取周期批量合并，次数不等于写入数）。
+        val flakyReceived = java.util.concurrent.atomic.AtomicInteger(0)
+        val flaky = object : TerminalIpcController.Callback {
+            override fun onOutput(sessionId: Long, data: ByteArray) {
+                val n = flakyReceived.incrementAndGet()
+                if (n % 3 == 0) throw RuntimeException("transient binder pressure")
+            }
+            override fun onExit(sessionId: Long, exitCode: Int, cause: String) {}
+            override fun onSessionStateChanged(sessionId: Long, state: String) {}
+        }
+        evictionController.registerCallback(flaky)
+        val healthy = RecordingCallback()
+        evictionController.registerCallback(healthy)
+        val sid = evictionController.createSession("local", 24, 80, null, null).toLong()
+
+        // 第一批：flaky 收到事件（部分失败）但不被剔除
+        repeat(30) { evictionController.writeText(sid, "echo x\n") }
+        assertTrue(
+            "flaky 收到首批事件（间歇失败不阻断接收）",
+            awaitTrue(timeoutMs = 10_000L) { flakyReceived.get() > 0 }
+        )
+        assertTrue(
+            awaitTrue(timeoutMs = 10_000L) {
+                healthy.outputs.filter { it.first == sid }.sumOf { it.second.count { c -> c == 'x' } } >= 20
+            }
+        )
+        val midCount = flakyReceived.get()
+
+        // 第二批：flaky 仍在接收（未被误杀）—— 事件数继续增长
+        repeat(30) { evictionController.writeText(sid, "echo zz\n") }
+        assertTrue(
+            "间歇失败回调未被误杀（成功清零 strike，继续接收）",
+            awaitTrue(timeoutMs = 10_000L) { flakyReceived.get() > midCount }
+        )
+        assertTrue(
+            awaitTrue(timeoutMs = 10_000L) {
+                healthy.outputs.filter { it.first == sid }.sumOf { it.second.count { c -> c == 'z' } } >= 5
+            }
+        )
     }
 }
