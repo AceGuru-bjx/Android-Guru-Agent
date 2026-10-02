@@ -208,7 +208,10 @@ object CodeModule {
         skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore,
         // v1.5 标准线：独立记忆通道 + C++ 文本加速核
         @Named("codeStandard") standardMemory: CodeConversationMemory,
-        standardTextKernel: StandardTextKernel
+        standardTextKernel: StandardTextKernel,
+        // #230 收尾：标准线专用执行器（仅环境门 —— StandardModeEngine 自带
+        // opencode 式权限门，共用主执行器的组合门会双弹窗）
+        @javax.inject.Named("standardEngineTools") standardToolExecutor: ToolExecutor
     ): AgentEngine {
         val codeConfig = AgentConfig(
             mode = AgentMode.BUILD,
@@ -252,7 +255,9 @@ object CodeModule {
         val standard = StandardModeEngine(
             runtime = modelRuntime,
             toolRegistry = toolRegistry,
-            toolExecutor = toolExecutor,
+            // #230：标准线走引擎级权限门 + 仅环境门的执行器（防双弹窗）；
+            // 深潜线（delegate = ApexAgentEngine，无引擎级门）继续用主执行器。
+            toolExecutor = standardToolExecutor,
             memory = standardMemory,
             contextProvider = codeContextProvider,
             rulesProvider = RulesProvider(),

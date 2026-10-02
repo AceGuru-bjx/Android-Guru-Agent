@@ -733,7 +733,22 @@ object ToolModule {
         registry.register(SafeAgentTool(UiTapTool(shellExec, privilegeUiProvider)))
         registry.register(SafeAgentTool(UiSwipeTool(shellExec, privilegeUiProvider)))
         registry.register(SafeAgentTool(UiDumpTool(shellExec, privilegeUiProvider)))
-        registry.register(SafeAgentTool(ScreenshotTool(shellExec)))
+        // #240 收尾：通知栏 open/close 的 LLM 面（a11y GLOBAL_ACTION / cmd statusbar）
+        registry.register(SafeAgentTool(UiNotificationsTool(shellExec, privilegeUiProvider)))
+        // Issue #239：screenshot 工具接特权链（无障碍 API 30+ → root
+        // screencap+base64 回退）—— 旧行为恒走裸 shell，无障碍开启但无 root
+        // 的设备截图永远失败。适配 ScreenshotResult → 工具中立形状。
+        registry.register(SafeAgentTool(ScreenshotTool(
+            shellExec,
+            privilegedScreenshot = {
+                val r = privilegeManager.takeScreenshot()
+                if (r.success && r.imageBytes != null) {
+                    ScreenshotTool.PrivilegedScreenshot(r.imageBytes, null)
+                } else {
+                    ScreenshotTool.PrivilegedScreenshot(null, r.error ?: "privileged screenshot failed")
+                }
+            }
+        )))
         registry.register(SafeAgentTool(InputTextTool(shellExec)))
 
         // ═══ 8. 传感器 (2) ═══
@@ -1093,6 +1108,49 @@ object ToolModule {
         // deep_link/image_info/image_convert）。
         // 插件注册：PluginManager 加载插件后动态注册（plugin-web-automation → 15 个 browser_*，
         // REPLACE 覆盖内置注册；卸载时降级为 HostFallbackTool 宿主直调，不挖空）。
+    }
+
+    @Provides
+    @Singleton
+    @javax.inject.Named("standardEngineTools")
+    fun provideStandardEngineToolExecutor(
+        registry: ToolRegistry,
+        toolUsageTracker: ToolUsageTracker,
+        environmentState: ToolEnvironmentState,
+        traceRecorder: ToolTraceRecorder,
+        circuitBreaker: ToolCircuitBreaker,
+        hookRegistry: HookRegistry,
+        secretRedactor: SecretRedactor
+    ): ToolExecutor {
+        // Issue #230 收尾（防双弹窗）：StandardModeEngine 自带 opencode 式权限门
+        //（规则 → 会话记忆 → 模式兜底 → ASK 弹窗，见 executeOneToolCall）。
+        // #230 起 executeStream 也会咨询执行器门控 —— 标准线若共用主执行器
+        //（PermissionAwareToolGate 组合门），同一动作会被问两次。这里给
+        // 标准线装配**仅环境门**的 v3 执行器：限流/熔断/超时/重试/追踪/钩子/
+        // 脱敏全部保留，权限确认归引擎层独占。深潜线（CodeAgentEngine 包装
+        // ApexAgentEngine —— 无引擎级门）与 Agent 聊天线继续用主执行器。
+        return SecretRedactingExecutor(
+            delegate = ToolExecutorBuilder(registry)
+                .gate(ToolEnvironmentGate(environmentState))
+                .usageTracker(toolUsageTracker)
+                .policyResolver(DefaultToolRunPolicyResolver(TERMINAL_TOOL_RUN_POLICIES))
+                .rateLimiter(ToolRateLimiter())
+                .breaker(circuitBreaker)
+                .tracer(traceRecorder)
+                .apply {
+                    beforeToolHooks { toolId, args ->
+                        hookRegistry.dispatch(HookEvent.PreToolUse(toolId, args))
+                            .takeUnless { it.isNoOp }
+                    }
+                    afterToolHooks { toolId, args, result, isError, durationMs ->
+                        hookRegistry.dispatch(
+                            HookEvent.PostToolUse(toolId, args, result, isError, durationMs)
+                        )
+                    }
+                }
+                .build(),
+            redactor = secretRedactor
+        )
     }
 
     @Provides
