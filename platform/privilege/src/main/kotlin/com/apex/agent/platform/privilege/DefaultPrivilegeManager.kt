@@ -224,6 +224,13 @@ class DefaultPrivilegeManager @Inject constructor(
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
                 UiResult(true)
             }
+            // #240 收尾：收起通知栏 —— 无障碍无专用 GLOBAL_ACTION，BACK 的
+            // 系统语义就是收合 shade（状态栏展开时 BACK = collapse）。手势派发
+            // 在已展开时是同一效果；未展开时 BACK 退一层（与用户手动按返回一致）。
+            is UiAction.CloseNotifications -> {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                UiResult(true)
+            }
             is UiAction.Click -> {
                 // 使用手势API点击坐标
                 val path = android.graphics.Path().apply {
@@ -259,6 +266,9 @@ class DefaultPrivilegeManager @Inject constructor(
             // 正解（API 24+，等价 service call statusbar 1；无障碍通道走
             // GLOBAL_ACTION_NOTIFICATIONS 不受影响）。
             is UiAction.OpenNotifications -> "cmd statusbar expand-notifications"
+            // #240 收尾：收合通知栏（与 expand 对称；`input keyevent 4`（BACK）
+            // 也可达但语义间接 —— statusbar 直控不受当前焦点影响）。
+            is UiAction.CloseNotifications -> "cmd statusbar collapse"
             is UiAction.ClickNode -> return UiResult(false, "ClickNode requires accessibility")
         }
         val result = executeViaRoot(command, 5000)
