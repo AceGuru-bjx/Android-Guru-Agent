@@ -70,10 +70,17 @@ data class TerminalViewSettings(
     val verticalScrollBounce: Boolean = true,
     /** 触摸滚动是否经过鼠标编码透传（mouseMode 开时单指拖动也报 MOTION；Termux off）。 */
     val mousePassthrough: Boolean = false,
-    /** 双指捏合调字号开关。
+    /**
+     * 双指捏合调字号开关 —— **T91（D1）默认关闭**。
      *
-     * 默认 **false**：捏合与双指滚动/选区手势天然冲突，误触率远高于收益
-     * （用户反馈「缩放一坨」后的修复决策）；需要时宿主显式置 true。 */
+     * 关闭理由（用户反馈「缩放一坨」的定性收敛；#282 深度修复批次同结论）：
+     *  - 捏合与双指拖动/鼠标模式的手势上下文天然冲突，T90 修的
+     *    pinchScaleAccum 残积只是症状层；默认关闭后该路径成为死代码，
+     *    稳定性上限拉满；
+     *  - 字号调节已有更受控的入口 —— 宿主设置页 Slider
+     *    （TerminalSettingsSheet → ViewModel.setFontSize，8..24sp 链路）；
+     *  - 宿主如确要恢复捏合，构造 settings 时显式 `copy(pinchZoomEnabled = true)`。
+     */
     val pinchZoomEnabled: Boolean = false,
     /** 双击选词开关（关闭后双击=单击语义）。 */
     val doubleTapSelectsWord: Boolean = true,

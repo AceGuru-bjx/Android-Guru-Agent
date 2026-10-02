@@ -12,6 +12,11 @@ android {
     namespace = "com.apex.agent.platform.terminal"
     compileSdk = 35
 
+    // T91（D2-D4）：AIDL 契约（ITerminalService / ITerminalCallback）编译开关
+    buildFeatures {
+        aidl = true
+    }
+
     defaultConfig {
         minSdk = 26
 
