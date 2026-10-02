@@ -60,8 +60,8 @@ FSM 旁路回放 → 梦境巩固）、Root/Shizuku/无障碍三级权限链、�
 
 <a href="#tools"><img src="https://img.shields.io/badge/🧰_tools-109-ff69b4" alt="109 Tools"/></a>
 <a href="#engine"><img src="https://img.shields.io/badge/🧠_agent_modes-6-00C2D1" alt="6 Modes"/></a>
-<a href="#architecture"><img src="https://img.shields.io/badge/📦_gradle_modules-14-8A2BE2" alt="14 Modules"/></a>
-<a href="#testing"><img src="https://img.shields.io/badge/🧪_tests-74_files-2EA44F" alt="74 Tests"/></a>
+<a href="#architecture"><img src="https://img.shields.io/badge/📦_gradle_modules-20-8A2BE2" alt="20 Modules"/></a>
+<a href="#testing"><img src="https://img.shields.io/badge/🧪_tests-252_files_·_4k_用例-2EA44F" alt="252 Tests"/></a>
 <a href="#cs-mem"><img src="https://img.shields.io/badge/🧠_memory-cs--mem-00C2D1" alt="cs-mem"/></a>
 <a href="#terminal-runtime"><img src="https://img.shields.io/badge/sandbox-PRoot_Ubuntu_24.04-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu"/></a>
 <img src="https://img.shields.io/badge/ABI-arm64·x86__64·v7a-3DDC84" alt="ABI"/>
@@ -78,6 +78,13 @@ FSM 旁路回放 → 梦境巩固）、Root/Shizuku/无障碍三级权限链、�
 <a href="#docs-index"><img src="https://img.shields.io/badge/📚_docs-deep_dives-0077B5" alt="Docs"/></a>
 <a href="#faq"><img src="https://img.shields.io/badge/❓_FAQ-6_问答-8B5CF6" alt="FAQ"/></a>
 <a href="#glossary"><img src="https://img.shields.io/badge/🧭_glossary-术语速查-6E7681" alt="Glossary"/></a>
+
+**分享与交流**
+
+<a href="https://twitter.com/intent/tweet?text=%F0%9F%A4%96%20Android%20Guru%20Agent%20%E2%80%94%20%E8%B7%91%E5%9C%A8%E6%89%8B%E6%9C%BA%E4%B8%8A%E7%9A%84%E8%87%AA%E4%B8%BB%E6%99%BA%E8%83%BD%E4%BD%93%EF%BC%88109%20%E5%B7%A5%E5%85%B7%20%C2%B7%20Ubuntu%20%E7%BB%88%E7%AB%AF%20%C2%B7%20cs-mem%20%E8%AE%B0%E5%BF%86%EF%BC%89&url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent"><img src="https://img.shields.io/badge/分享-Twitter-1DA1F2?logo=x&logoColor=white" alt="Share on Twitter"/></a>
+<a href="https://t.me/share/url?url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent&text=%F0%9F%A4%96%20Android%20Guru%20Agent%20%E2%80%94%20%E8%AE%BE%E5%A4%87%E4%B8%8A%E7%9A%84%E8%87%AA%E4%B8%BB%E6%99%BA%E8%83%BD%E4%BD%93"><img src="https://img.shields.io/badge/分享-Telegram-26A5E4?logo=telegram&logoColor=white" alt="Share on Telegram"/></a>
+<a href="https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2FAceGuru-mjh%2FAndroid-Guru-Agent&title=Android%20Guru%20Agent%20%E2%80%94%20Autonomous%20AI%20agent%20on-device"><img src="https://img.shields.io/badge/分享-Reddit-FF4500?logo=reddit&logoColor=white" alt="Share on Reddit"/></a>
+<a href="https://github.com/AceGuru-mjh?tab=followers"><img src="https://img.shields.io/github/followers/AceGuru-mjh?label=Follow&style=flat-square&logo=github" alt="Follow"/></a>
 
 </div>
 
@@ -186,6 +193,7 @@ Root → Shizuku → 沙箱 Shell 自动降级<br/>无 Root 也能执行特权�
 - [📁 仓库结构与代码规模](#structure)
 - [🗺️ 路线图](#roadmap) · [📄 文档索引](#docs-index)
 - [❓ FAQ](#faq) · [🧭 术语速查](#glossary) · [🤝 贡献指南](#contributing)
+- [📊 开发者统计](#dev-stats) · [⭐ Star History](#star-history) · [👥 贡献者](#contributors)
 
 </td>
 </tr>
@@ -256,21 +264,24 @@ flowchart TB
     subgraph CORE["⚙️ core:* — 纯 JVM · 零 Android 依赖"]
         direction LR
         ENGINE["agent-engine<br/>六模式 ReAct 循环<br/>TaskOrchestrator<br/>P7 三级压缩"]
-        TOOLS["tool-registry<br/>57 内置工具 · schema 即校验<br/>SkillRegistry · MCP 客户端"]
+        TOOLS["tool-registry<br/>内置工具 · schema 即校验<br/>SkillRegistry · MCP 客户端 · Hub 源"]
         LLM["llm-adapter<br/>OpenAI 兼容 SSE<br/>多模型运行时 · 角色路由"]
         LOGC["logging<br/>结构化日志"]
+        CODEENG["code-engine<br/>编码工位引擎<br/>长任务韧性 · 子代理 · 胶囊流"]
     end
 
     subgraph PLAT["🧱 platform:* — Android 平台层"]
         direction LR
         PRIV["privilege<br/>Root / Shizuku / Shell<br/>三级权限链"]
         PERSIST["persistence<br/>前台服务 + 看门狗"]
-        TERM["terminal<br/>Ubuntu rootfs · PRoot<br/>原生 PTY · 19 工具"]
+        TERM["terminal<br/>Ubuntu rootfs · PRoot<br/>原生 PTY · 25 工具"]
         CSMEM["cs-mem 认知记忆<br/>蒸馏 · 旁路回放 · 梦境<br/>Room 图数据库"]
+        MCPH["mcp-host<br/>逆向 MCP Host<br/>:8765 · Bearer · 白名单"]
     end
 
     VTE["🖥️ terminal-emulator<br/>自研 VT100 / ANSI 模拟器"]
     VTN["🚀 terminal-native<br/>apex-vt-native C++17 引擎<br/>（JNI 零分配热路径）"]
+    TVW["🪟 terminal-view<br/>Compose 画布渲染 · 手势 · IME"]
 
     subgraph PLUG["🧩 plugin-sdk — AIDL 跨进程"]
         PAPI["plugin-api · IApexPlugin"]
@@ -289,30 +300,38 @@ flowchart TB
     ENGINE -->|会话记忆观察| CSMEM
     TERM --> VTE
     VTE -.native 加速.-> VTN
+    TERM --> TVW
+    MCPH -->|工具暴露·同一门控链| TOOLS
     PHOST -->|插件工具注册| TOOLS
     PERSIST -.前台保活.-> APP
     PAPI -.契约.-> PHOST
     PLUGINS -.实现.-> PAPI
 ```
 
-**14 个 Gradle 模块**（单一仓库 `settings.gradle.kts`）：
+**20 个 Gradle 模块**（单一仓库 `settings.gradle.kts`）：
 
 | 模块 | 类型 | 职责 |
 |------|:---:|------|
 | `:app` | Android App | Compose UI（抽屉导航 8 屏）、Hilt 装配、浏览器/GitHub 工具、悬浮球 |
 | `:core:agent-engine` | 纯 JVM | ReAct 引擎（Plan/Build 等六模式）、任务编排器、上下文压缩、会话记忆 |
-| `:core:tool-registry` | 纯 JVM | 57 个内置工具（schema 即校验 + 风险门 + 使用统计）+ 工具执行器 + SkillRegistry + MCP 客户端 |
+| `:core:tool-registry` | 纯 JVM | 内置工具（schema 即校验 + 风险门 + 使用统计）+ 工具执行器 + SkillRegistry + MCP 客户端 + Hub 源 |
 | `:core:llm-adapter` | 纯 JVM | OpenAI 兼容流式客户端 + 多模型运行时（角色路由/能力校验/错误分类） |
 | `:core:logging` | 纯 JVM | 结构化日志（LogCategory/LogLevel/LogRecord） |
+| `:core:code-tools` | 纯 JVM | 编码工具包：文件编辑 / git / 诊断 / TODO |
+| `:core:code-engine` | 纯 JVM | 编码工位专用引擎：长任务韧性 / 子代理 / 胶囊流式 / 思考档位 |
 | `:platform:privilege` | Android Lib | Root/Shizuku/普通三级权限链 + 无障碍服务 + 进程流工厂 |
 | `:platform:persistence` | Android Lib | 前台服务 + WorkManager 看门狗（被杀自动拉起） |
-| `:platform:terminal` | Android Lib | 终端运行时 2.0：rootfs 供给、PRoot 后端、原生 PTY、Ubuntu 生命周期编排、18 个工具 |
+| `:platform:terminal` | Android Lib | 终端运行时 2.0：rootfs 供给、PRoot 后端、原生 PTY、Ubuntu 生命周期编排、25 个工具 |
 | `:platform:cs-mem` | Android Lib | 认知记忆系统（本仓库的差异化核心，见下节） |
-| `:terminal-emulator` | Android Lib | 自研 VT100/ANSI 终端模拟器（vendored，ATR Phase 2）+ `TerminalEngine` 引擎抽象 |
+| `:platform:code-workspace` | Android Lib | 编码工作区：安全根目录与生命周期 |
+| `:platform:mcp-host` | 纯 JVM | 逆向 MCP Host：把手机工具暴露给 PC 客户端（零第三方依赖） |
+| `:terminal-emulator` | 纯 Kotlin | 自研 VT100/ANSI 终端模拟器（零依赖）+ `TerminalEngine` 引擎抽象 |
 | `:terminal-native` | Android Lib | apex-vt-native C++17 零分配 VT 引擎（vendored + JNI，运行时回退 Kotlin） |
+| `:terminal-view` | Android Lib | Compose 终端视图层：画布渲染 / 手势 / 选区 / IME 连接 |
 | `:plugin-sdk:plugin-api` | Android Lib | AIDL `IApexPlugin` + PluginContract 常量 |
 | `:plugin-sdk:plugin-host` | Android Lib | 插件发现/绑定/工具桥接 |
-| `:plugins:plugin-workflow` | Android App | 参考插件 APK（`workflow/save、execute、list` 三工具） |
+| `:plugins:plugin-workflow` | Android App | 参考插件 APK（工作流三工具） |
+| `:plugins:plugin-web-automation` | Android App | 参考插件 APK：浏览器自动化工具目录 |
 
 > [!NOTE]
 > 📌 `ComposeFoundry/` 是**独立的 Gradle 工程**（有自己的 `settings.gradle.kts`），
@@ -729,6 +748,25 @@ linux_bootstrap / linux_status / linux_packages / linux_network / ubuntu_install
 → `skill_list` 确认，全程 LLM 自主闭环。市场货架含**工具 / 技能 / MCP /
 插件 / 连接器**五类。
 
+### 官方 Hub 仓库生态（技能 / MCP 分发）
+
+APK 内置技能只保留 **13 个核心**（8 个 coding 强技能 + 3 个 agent 通用 +
+2 个双工位文档技能），其余 **62 个生活/通用技能全部迁往官方技能仓库**
+[apex-skill-hub](https://github.com/AceGuru-mjh/apex-skill-hub)；MCP 同理
+——内置仅保留 5 台进程内必要服务器（github / search / fs / memory /
+thinking），沙箱与远端 MCP 目录迁往
+[apex-mcp-hub](https://github.com/AceGuru-mjh/apex-mcp-hub)。市场里
+「官方仓库」源直连 raw.githubusercontent.com 拉取 `index.json` 注册表
+（学习 opencode 的远程注册表模式：元数据小体积索引 + 技能正文按需单文件
+下载），一键安装，装完与本地技能同权管理。升级用户由
+`pruneStaleBundled` 白名单反向迁移自动清理旧内置残留。
+
+**斜杠门控**：聊天输入框 `/` 菜单的 Skills 分组只出现**已安装且已开启**
+的技能；MCP 分组只出现**已安装且正在运行**的服务器——未安装/未启动的
+不可选用（市场 → MCP 里安装并启动）。MCP 在市场内有**配置 / 启动 / 停止**
+完整闭环（含 BUILTIN 服务器的配置对话框：作用域 / 启停 / 连接 /
+GitHub Token）。
+
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
 ---
@@ -848,7 +886,10 @@ chmod +x gradlew
 > 不想自己构建？**直接下载正式版**：[发布仓库 Releases](https://github.com/AceGuru-mjh/Android-Guru-Agent-Release/releases/latest)
 > （arm64 / universal 两个变体；**PR 合并进 main 即自动构建发布**，无需打 tag）。
 > 已装用户可在 App「设置 → 关于 → 检查更新」直接升级 —— 支持增量补丁
-> （~14MB vs 全量 300MB+）与高速节点/镜像加速下载。
+> （~14MB vs 全量 300MB+）与高速节点/镜像加速下载；补丁下载后**应用内自动
+> 合成新版本并拉起安装**（纯 Kotlin VCDIFF 解码器，零命令行），跨任意多个
+> 小版本自动按 [patches.json](https://github.com/AceGuru-mjh/Android-Guru-Agent-Release/blob/main/patches.json)
+> 补丁链逐段升级。
 > 也可以用 CI 的 `app-debug-apk` 工件（debug 构建，保留 14 天）；或参考
 > `.github/workflows/ci.yml` 的 `Configure pre-installed Android SDK` 步骤配置环境。
 
@@ -887,7 +928,7 @@ chmod +x gradlew
 <a id="testing"></a>
 ## 🧪 测试与质量保障
 
-**74 个测试文件**（69 JVM 单测 + 5 真机仪器测试）+ 三道静态门禁：
+**252 个测试文件**（246 JVM 单测 + 6 真机仪器测试，≈4,008 个 `@Test` 用例）+ 三道静态门禁：
 
 | 模块 | 单测 | 亮点 |
 |------|------|------|
@@ -910,7 +951,7 @@ chmod +x gradlew
 
 > [!TIP]
 > 📖 完整测试文档：[docs/TESTING.md](docs/TESTING.md)（理念 / 矩阵 / 替身规范 /
-> FAQ / 74 文件清单）。
+> FAQ / 文件清单 —— 清单撰写时 74 文件，主干现已 252，待同步）。
 
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
@@ -968,12 +1009,12 @@ Android-Guru-Agent/
 
 | 指标 | 数值 |
 |------|-----:|
-| Kotlin 主源码 | 367 个文件 / 64,842 行 |
-| Kotlin 测试源码 | 74 个文件 / 19,769 行 |
-| C++（终端 PTY/JNI 桥） | 6 个文件 / 1,121 行 |
-| Gradle 模块 | 13 |
-| 内置工具 | 100 |
-| 测试代码 / 主源码比例 | ≈ 30% |
+| Kotlin 主源码 | 802 个文件 / 183,615 行 |
+| Kotlin 测试源码 | 252 个文件 / 64,116 行（≈4,008 个 `@Test` 用例） |
+| C++（终端 PTY/JNI/VT 原生层） | 37 个文件 / 10,650 行 |
+| Gradle 模块 | 20 |
+| 内置工具 | 109 |
+| 测试代码 / 主源码比例 | ≈ 35% |
 
 <p align="right"><a href="#readme-top" title="返回顶部">⬆️ 返回顶部</a></p>
 
@@ -1007,7 +1048,7 @@ Android-Guru-Agent/
 | 文档 | 内容 |
 |------|------|
 | [docs/tool-system-v3.md](docs/tool-system-v3.md) | **工具系统 v3**：执行硬化八层（超时/重试/限流/熔断/追踪/批量/组合动作/环境门控），MCP·LangGraph·Anthropic CU·Mobile-Agent-E 对标 |
-| [docs/TESTING.md](docs/TESTING.md) | **测试总指南**：理念/矩阵/替身规范/FAQ/74 文件清单 |
+| [docs/TESTING.md](docs/TESTING.md) | **测试总指南**：理念/矩阵/替身规范/FAQ/文件清单（撰写时 74，现已 252，待同步） |
 | [docs/liquid-glass-system.md](docs/liquid-glass-system.md) | **Liquid Glass 玻璃组件系统**：架构/七档材质/组件 API/真实性验收矩阵 |
 | [docs/memory-and-workflow-research.md](docs/memory-and-workflow-research.md) | **记忆与工作流调研报告**：对标 MemGPT/Mem0/A-MEM/Zep/Voyager/Claude Code/OpenHands/SWE-agent |
 | [docs/terminal-api.md](docs/terminal-api.md) | 终端 API 契约 |
@@ -1144,6 +1185,46 @@ debug APK 工件（每次构建保留 14 天），零环境开箱体验。
 
 ---
 
+<a id="dev-stats"></a>
+## 📊 开发者统计
+
+<div align="center">
+
+<!-- github-readme-stats：统计卡 + 语言占比（tokyonight 主题与仓库名片一致） -->
+
+<a href="https://github.com/AceGuru-mjh">
+  <img height="165" src="https://github-readme-stats.vercel.app/api?username=AceGuru-mjh&show_icons=true&hide_border=true&theme=tokyonight&include_all_commits=true&count_private=true" alt="GitHub Stats"/>
+</a>
+<a href="https://github.com/AceGuru-mjh">
+  <img height="165" src="https://github-readme-stats.vercel.app/api/top-langs/?username=AceGuru-mjh&layout=compact&hide_border=true&theme=tokyonight&langs_count=8" alt="Top Languages"/>
+</a>
+
+<br/>
+
+<!-- streak-stats：连续贡献热力 -->
+<a href="https://github.com/AceGuru-mjh">
+  <img width="640" src="https://streak-stats.demolab.com?user=AceGuru-mjh&hide_border=true&theme=tokyonight&date_format=%5BY.%5Dn.j" alt="GitHub Streak"/>
+</a>
+
+<br/>
+
+<!-- profile-trophy：成就奖杯 -->
+<a href="https://github.com/ryo-ma/github-profile-trophy">
+  <img width="1000" src="https://github-profile-trophy.vercel.app/?username=AceGuru-mjh&theme=tokyonight&no-frame=true&no-bg=true&margin-w=8&margin-h=8&column=7" alt="GitHub Trophies"/>
+</a>
+
+<br/>
+
+<!-- activity-graph：贡献活动曲线 -->
+<a href="https://github.com/ashutosh00710/github-readme-activity-graph">
+  <img width="920" src="https://github-readme-activity-graph.vercel.app/graph?username=AceGuru-mjh&theme=tokyo-night&hide_border=true&area=true&custom_title=%E8%B4%A1%E7%8C%AE%E6%B4%BB%E5%8A%A8%E6%9B%B2%E7%BA%BF" alt="Contribution Activity Graph"/>
+</a>
+
+</div>
+
+---
+
+<a id="star-history"></a>
 ## ⭐ Star History
 
 <div align="center">
@@ -1157,6 +1238,7 @@ debug APK 工件（每次构建保留 14 天），零环境开箱体验。
 
 ---
 
+<a id="contributors"></a>
 ## 👥 贡献者
 
 <a href="https://github.com/AceGuru-mjh/Android-Guru-Agent/graphs/contributors">

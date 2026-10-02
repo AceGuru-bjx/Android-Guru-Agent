@@ -15,16 +15,8 @@
     <string name="term_cd_close_session">关闭会话</string>
     <string name="term_no_session">未连接会话</string>
     <string name="term_waiting_input">⌨ 等待输入</string>
-    <string name="term_banner_failed_title">Ubuntu 环境异常</string>
-    <string name="term_banner_not_installed_title">Ubuntu 开发环境未解包</string>
-    <string name="term_banner_failed_desc">上次解包/引导失败，可重试</string>
-    <string name="term_banner_not_installed_desc">完整的 Linux 环境：gcc / python3 / git / vim / man 开箱即用（内置离线解包，约 2~5 分钟）</string>
     <string name="term_retry">重试</string>
-    <string name="term_unpack">解包</string>
     <string name="term_env_center">环境中心</string>
-    <string name="term_installing_banner">Ubuntu rootfs 离线解包中…（约 2~5 分钟，可后台等待）</string>
-    <string name="term_bootstrapping_banner">Ubuntu 初始化：apt 源 / 网络 / 基础包…（离线时自动降级可用）</string>
-    <string name="term_converging_banner">Ubuntu 环境收敛中…</string>
     <string name="term_settings_title">终端设置</string>
     <string name="term_appearance">终端外观</string>
     <string name="term_font_size">字号</string>
@@ -120,6 +112,7 @@
     <string name="term_notice_ubuntu_unavailable">Ubuntu 环境不可用：%1$s</string>
     <string name="term_notice_create_failed">会话创建失败：%1$s</string>
     <string name="term_notice_no_session_input">没有活跃会话，输入未送达（请新建会话）</string>
+    <string name="term_notice_fallback_session">Ubuntu 环境暂不可用（%1$s）— 已切换 Android Shell，可直接输入命令；Ubuntu 可在环境中心重试</string>
     <string name="term_notice_blocked">⛔ 命令已被黑白名单拦截：%1$s（未执行；Ctrl+C 或 Ctrl+U 清除当前行）</string>
     <string name="term_notice_input_failed">输入失败：%1$s</string>
     <string name="term_notice_paste_blocked">⛔ 粘贴内容首行命中黑白名单：%1$s（已拦截）</string>

@@ -43,19 +43,21 @@ object ExtraKeysConfig {
     /** 行数上限。 */
     const val MAX_ROWS = 4
 
-    /** 默认布局（高频：Ubuntu 引导修复 + 常用解释器 + 导航）。 */
+    /** 默认布局（高频：Ubuntu 引导修复 + 常用解释器 + 导航）—— 「恢复默认」按钮
+     * 的目标；新用户初始为空（T89：默认 8 宏键与 KeyToolbar 主行 TAB/^L/粘贴
+     * 重复，双行键区泛滥成「一坨按钮」，改为用户显式添加）。 */
     val DEFAULT_LAYOUT: List<List<ExtraKey>> = listOf(
         listOf(
             ExtraKey("apt-fix", MacroKind.CMD, "apt-fix"),
             ExtraKey("py3", MacroKind.TEXT, "python3"),
             ExtraKey("ls", MacroKind.CMD, "ls -alF"),
             ExtraKey("h", MacroKind.CMD, "history 25"),
-            ExtraKey("git st", MacroKind.CMD, "git status"),
-            ExtraKey("TAB", MacroKind.KEY, "TAB"),
-            ExtraKey("^L", MacroKind.CTRL, "l"),
-            ExtraKey("⌘粘贴", MacroKind.PASTE, "")
+            ExtraKey("git st", MacroKind.CMD, "git status")
         )
     )
+
+    /** 新用户默认：不预置宏键（空行 → ExtraKeysBar 零占位）。 */
+    val EMPTY_LAYOUT: List<List<ExtraKey>> = emptyList()
 
     /**
      * 解析持久化文本 → 布局（行以空行分隔；行内以 `;;` 分隔键）。

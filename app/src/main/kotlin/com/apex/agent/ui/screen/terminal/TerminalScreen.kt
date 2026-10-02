@@ -25,12 +25,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Layers
@@ -41,34 +39,26 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,29 +69,33 @@ import com.apex.agent.R
 import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
 import com.apex.agent.ui.screen.terminal.history.TerminalHistorySheet
 import com.apex.agent.ui.screen.terminal.scheme.TerminalSchemePickerSheet
-import com.apex.agent.ui.screen.terminal.settings.TerminalSettingsDrawer
+import com.apex.agent.ui.screen.terminal.settings.TerminalSettingsSheet
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
- * 终端页 v2（T85 — Apex Console 重做）。
+ * 终端主屏（T89 大修 —— 用户反馈「页面一坨 / Ubuntu 用不了 / 没法输入命令」
+ * 的系统性重构）。
  *
- * 旧版布局问题（用户实测反馈）：顶栏 + tab 条 + 状态条 + Ubuntu 横幅四层堆叠，
- * 浅色 Material 顶栏与深色终端区割裂；「未解包」横幅等用户行动而不是自动预备。
+ * ## T89 结构决策（旧 → 新）
  *
- * 新设计（对齐 Termux / JuiceSSH 的「控制台优先」范式）：
- *  - **整页深色控制台**（ConsoleTheme，薄荷强调色对齐 App neon-mint 主题），
- *    顶栏 / 会话条 / 状态条与终端区视觉连续，不再浅深割裂；
- *  - **顶栏**：汉堡 + 标题 + 当前后端副标题（mono），动作区 = 新建 / 环境中心 / 终端设置；
- *  - **会话条**：仅多会话（≥2）时出现 —— 单会话零干扰（Termux 同款哲学）；
- *  - **状态条**：细 mono 行（会话状态 / 前台 job / 等待输入 / 反馈）；
- *  - **主区**：有会话 → 全幅终端 grid；无会话 → [EnvironmentPanel]（环境准备
- *    进度 / 失败重试 / 空态快捷入口）—— 取代旧的「未解包横幅 + 终端未启动占位」
- *    双重死区；
- *  - **环境自动预备**：ApexApp 启动即后台解包（T85），READY 后 ViewModel 自动
- *    拉起 Ubuntu 会话 —— 用户进页即见真实 bash，零点击。
+ *  - **砍层叠条带**：旧版竖屏顶部堆 4~7 层（状态 inset + OfflineBanner +
+ *    ContextMeterBar + ConsoleTopBar + SessionStrip + StatusStrip 21dp 调试行），
+ *    键区再叠 80dp（45 键长滚 + 8 宏键）。新版：单一紧凑顶栏（副标题承载
+ *    后端/环境状态）+ 会话条（多会话才出现）+ 终端 + 键区（见 KeyToolbar 重做）。
+ *    状态栏调试噪音（#id STATE rows×cols）删除；
+ *  - **notice 全局可见**：旧版 notice 只渲染在 StatusStrip 里且仅在有会话时
+ *    出现 —— 而会话创建失败/Ubuntu 不可用恰恰发生在**无会话**时，用户全程
+ *    盲飞。新版 notice 恒渲染为顶栏下横幅（错误红/信息 mint，可点击关闭）；
+ *  - **单弹层范式**：旧版「设置=侧抽屉（套在 App 全局 drawer 里的双层侧滑）、
+ *    环境/配色/历史=bottom sheet、新建=AlertDialog」三种范式混学。新版配置
+ *    类统一 bottom sheet（[TerminalConsoleTheme] 深色控制台主题），新建会话
+ *    保留 AlertDialog（快速二选一的标准容器）；
+ *  - **环境进度不遮内容**：旧版 UbuntuBusyStrip 浮在终端 BottomCenter 盖住
+ *    最后几行输出/提示符。新版并入顶栏下方 2dp 细进度线 + 副标题百分比；
+ *  - **终端永可用**：配合 VM 的 LOCAL 降级兜底（Ubuntu 失败自动拉 Android
+ *    shell），主区不再有「无会话 + 键盘无响应」死区。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TerminalScreen(
     onOpenNavDrawer: () -> Unit,
@@ -117,9 +111,8 @@ fun TerminalScreen(
     val blacklist by viewModel.blacklist.collectAsStateWithLifecycle()
     val whitelist by viewModel.whitelist.collectAsStateWithLifecycle()
 
-    val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
     var showNewSessionDialog by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showEnvironmentCenter by remember { mutableStateOf(false) }
     var showSchemePicker by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
@@ -127,7 +120,7 @@ fun TerminalScreen(
     // 保持屏幕常亮：看长任务输出（编译 / apt / 训练日志）时不被息屏打断 ——
     // Termux 默认持有 wakelock，这里用等价的 window flag，交给用户开关。
     val keepScreenOn = settings.keepScreenOn
-    val view = androidx.compose.ui.platform.LocalView.current
+    val view = LocalView.current
     DisposableEffect(keepScreenOn) {
         val window = (view.context as? android.app.Activity)?.window
         if (window != null) {
@@ -145,186 +138,256 @@ fun TerminalScreen(
         if (showEnvironmentCenter) viewModel.refreshRootfsSize()
     }
 
-    // 反馈条自动消隐
+    // 反馈横幅自动消隐（错误类稍长——降级提示含操作指引）
     LaunchedEffect(notice) {
         if (notice != null) {
-            delay(5000)
+            delay(8000)
             viewModel.consumeNotice()
         }
     }
 
     val activeTab = sessions.firstOrNull { it.id == activeId }
     val hasSession = activeId != null && activeTab != null
+    val envBusy = ubuntu.phase in setOf(
+        UbuntuLifecycleCoordinator.Phase.INSTALLING,
+        UbuntuLifecycleCoordinator.Phase.BOOTSTRAPPING
+    )
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            TerminalSettingsDrawer(
-                settings = settings,
-                onSettings = viewModel::updateSettings,
-                schemeName = viewModel.currentSchemeDisplayName(),
-                onOpenSchemePicker = { showSchemePicker = true },
-                boldAsBright = viewModel.boldAsBright.collectAsStateWithLifecycle().value,
-                onBoldAsBright = viewModel::setBoldAsBright,
-                onOpenHistory = { showHistory = true },
-                extraKeys = viewModel.extraKeys.collectAsStateWithLifecycle().value,
-                onAddExtraKey = viewModel::addExtraKey,
-                onRemoveExtraKey = viewModel::removeExtraKey,
-                onResetExtraKeys = viewModel::resetExtraKeys,
-                blacklist = blacklist,
-                whitelist = whitelist,
-                onAddBlack = viewModel::addBlacklist,
-                onRemoveBlack = viewModel::removeBlacklist,
-                onAddWhite = viewModel::addWhitelist,
-                onRemoveWhite = viewModel::removeWhitelist,
-                onClose = { scope.launch { drawerState.close() } }
-            )
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ConsoleTheme.bg)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(ConsoleTheme.bg)
-        ) {
-            // ═══ 顶栏（深色控制台；外层 Scaffold 已提供 status bar inset）═══
-            ConsoleTopBar(
-                activeTab = activeTab,
-                ubuntuPhase = ubuntu.phase,
-                ubuntuPercent = ubuntuProgress?.percent ?: 0,
-                onOpenNavDrawer = onOpenNavDrawer,
-                onNewSession = { showNewSessionDialog = true },
-                onOpenCenter = { showEnvironmentCenter = true },
-                onOpenSettings = { scope.launch { drawerState.open() } }
-            )
+        // ═══ 顶栏（单一紧凑层：导航 + 状态 + 动作）═══
+        ConsoleTopBar(
+            activeTab = activeTab,
+            ubuntuPhase = ubuntu.phase,
+            ubuntuPercent = ubuntuProgress?.percent ?: 0,
+            semantic = semantic,
+            onOpenNavDrawer = onOpenNavDrawer,
+            onNewSession = { showNewSessionDialog = true },
+            onOpenCenter = { showEnvironmentCenter = true },
+            onOpenSettings = { showSettings = true }
+        )
 
-            // ═══ 会话条（≥2 个会话才显示 —— 单会话零干扰）═══
-            if (sessions.size >= 2) {
-                SessionStrip(
-                    sessions = sessions,
-                    activeId = activeId,
-                    onSelect = viewModel::selectSession,
-                    onClose = viewModel::closeSession
+        // ═══ 环境收敛细进度线（不遮内容 —— 替代旧浮条）═══
+        if (envBusy) {
+            val percent = ubuntuProgress?.percent ?: 0
+            val determinate = percent > 0
+            if (determinate) {
+                LinearProgressIndicator(
+                    progress = { percent.coerceIn(0, 100) / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = ConsoleTheme.accent,
+                    trackColor = ConsoleTheme.accentSoft
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = ConsoleTheme.accent,
+                    trackColor = ConsoleTheme.accentSoft
                 )
             }
+        }
 
-            // ═══ 状态条（有活跃会话时；细 mono 行）═══
-            if (semantic != null) {
-                StatusStrip(semantic = semantic, notice = notice)
-            }
+        // ═══ notice 横幅（恒可见 —— 无会话时也反馈；点击关闭）═══
+        if (notice != null) {
+            NoticeBanner(text = notice!!, onDismiss = viewModel::consumeNotice)
+        }
 
-            // ═══ 主区：终端 / 环境面板 ═══
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                if (hasSession) {
-                    // T88（3）：:terminal-view Canvas 直绘（替换 LazyColumn+BasicText
-                    // 渲染链 —— 滚动/选区/IME/鼠标上报全部下放 View 层）。
-                    TerminalViewHost(
-                        viewModel = viewModel,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    // T87：死会话覆盖层 —— 会话进程已退出时不再让用户对着
-                    // 死 PTY 敲字（旧体验：每次输入弹「输入失败」却无路可走）。
-                    if (activeTab != null && !activeTab.isAlive) {
-                        DeadSessionOverlay(
-                            isUbuntu = activeTab.isUbuntu,
-                            onRestart = viewModel::restartActiveSession,
-                            onClose = { viewModel.closeSession(activeTab.id) }
-                        )
-                    }
-                } else {
-                    EnvironmentPanel(
-                        phase = ubuntu.phase,
-                        progress = ubuntuProgress,
-                        lastError = ubuntu.lastError,
-                        onRetry = viewModel::installUbuntu,
-                        onNewUbuntu = { viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU) },
-                        onNewLocal = { viewModel.createSession(TerminalViewModel.BACKEND_LOCAL) },
-                        onOpenCenter = { showEnvironmentCenter = true }
+        // ═══ 会话条（≥2 个会话才显示 —— 单会话零干扰）═══
+        if (sessions.size >= 2) {
+            SessionStrip(
+                sessions = sessions,
+                activeId = activeId,
+                onSelect = viewModel::selectSession,
+                onClose = viewModel::closeSession
+            )
+        }
+
+        // ═══ 主区：终端 / 环境面板 ═══
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            if (hasSession) {
+                // T88（3）：:terminal-view Canvas 直绘（滚动/选区/IME/鼠标上报
+                // 全部下放 View 层）。
+                TerminalViewHost(
+                    viewModel = viewModel,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // T87：死会话覆盖层 —— 会话进程已退出时不再让用户对着
+                // 死 PTY 敲字（旧体验：每次输入弹「输入失败」却无路可走）。
+                if (activeTab != null && !activeTab.isAlive) {
+                    DeadSessionOverlay(
+                        isUbuntu = activeTab.isUbuntu,
+                        onRestart = viewModel::restartActiveSession,
+                        onClose = { viewModel.closeSession(activeTab.id) }
                     )
                 }
-
-                // 有会话但环境仍在后台收敛（用户先用 Android Shell）→ 细进度条贴底
-                if (hasSession && ubuntu.phase in setOf(
-                        UbuntuLifecycleCoordinator.Phase.INSTALLING,
-                        UbuntuLifecycleCoordinator.Phase.BOOTSTRAPPING
-                    )
-                ) {
-                    UbuntuBusyStrip(
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                        phase = ubuntu.phase,
-                        progress = ubuntuProgress
-                    )
-                }
+            } else {
+                EnvironmentPanel(
+                    phase = ubuntu.phase,
+                    progress = ubuntuProgress,
+                    lastError = ubuntu.lastError,
+                    onRetry = viewModel::installUbuntu,
+                    onNewUbuntu = { viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU) },
+                    onNewLocal = { viewModel.createSession(TerminalViewModel.BACKEND_LOCAL) },
+                    onOpenCenter = { showEnvironmentCenter = true }
+                )
             }
         }
     }
 
     if (showNewSessionDialog) {
-        NewSessionDialog(
-            onDismiss = { showNewSessionDialog = false },
-            onUbuntu = {
-                showNewSessionDialog = false
-                viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
-            },
-            onLocal = {
-                showNewSessionDialog = false
-                viewModel.createSession(TerminalViewModel.BACKEND_LOCAL)
-            }
+        TerminalConsoleTheme {
+            NewSessionDialog(
+                onDismiss = { showNewSessionDialog = false },
+                onUbuntu = {
+                    showNewSessionDialog = false
+                    viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
+                },
+                onLocal = {
+                    showNewSessionDialog = false
+                    viewModel.createSession(TerminalViewModel.BACKEND_LOCAL)
+                }
+            )
+        }
+    }
+
+    // ═══ 终端设置（T89：侧抽屉 → bottom sheet，单弹层范式）═══
+    if (showSettings) {
+        TerminalSettingsSheet(
+            settings = settings,
+            onSettings = viewModel::updateSettings,
+            schemeName = viewModel.currentSchemeDisplayName(),
+            onOpenSchemePicker = { showSchemePicker = true },
+            boldAsBright = viewModel.boldAsBright.collectAsStateWithLifecycle().value,
+            onBoldAsBright = viewModel::setBoldAsBright,
+            onOpenHistory = { showHistory = true },
+            extraKeys = viewModel.extraKeys.collectAsStateWithLifecycle().value,
+            onAddExtraKey = viewModel::addExtraKey,
+            onRemoveExtraKey = viewModel::removeExtraKey,
+            onResetExtraKeys = viewModel::resetExtraKeys,
+            blacklist = blacklist,
+            whitelist = whitelist,
+            onAddBlack = viewModel::addBlacklist,
+            onRemoveBlack = viewModel::removeBlacklist,
+            onAddWhite = viewModel::addWhitelist,
+            onRemoveWhite = viewModel::removeWhitelist,
+            onClose = { showSettings = false }
         )
     }
 
     // ═══ 环境中心（顶栏图层入口）═══
     if (showEnvironmentCenter) {
-        EnvironmentCenterSheet(
-            onDismiss = { showEnvironmentCenter = false },
-            ubuntu = ubuntu,
-            progress = ubuntuProgress,
-            rootfsSize = viewModel.rootfsSize.collectAsStateWithLifecycle().value,
-            onInstallUbuntu = viewModel::installUbuntu,
-            onCancelUbuntuInstall = viewModel::cancelUbuntuInstall,
-            onRepairUbuntu = viewModel::repairUbuntu,
-            onRemoveUbuntu = viewModel::removeUbuntu,
-            onCreateUbuntuSession = {
-                showEnvironmentCenter = false
-                viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
-            },
-            useMirror = viewModel.useMirror.collectAsStateWithLifecycle().value,
-            onToggleMirror = viewModel::setUseMirror,
-            depItems = viewModel.depItems,
-            install = viewModel.install.collectAsStateWithLifecycle().value,
-            onInstallDep = viewModel::installDep,
-            onInstallAll = viewModel::installAll,
-            onInstallAndroid = viewModel::installAndroidOnly
-        )
+        TerminalConsoleTheme {
+            EnvironmentCenterSheet(
+                onDismiss = { showEnvironmentCenter = false },
+                ubuntu = ubuntu,
+                progress = ubuntuProgress,
+                rootfsSize = viewModel.rootfsSize.collectAsStateWithLifecycle().value,
+                onInstallUbuntu = viewModel::installUbuntu,
+                onCancelUbuntuInstall = viewModel::cancelUbuntuInstall,
+                onRepairUbuntu = viewModel::repairUbuntu,
+                onRemoveUbuntu = viewModel::removeUbuntu,
+                onCreateUbuntuSession = {
+                    showEnvironmentCenter = false
+                    viewModel.createSession(TerminalViewModel.BACKEND_UBUNTU)
+                },
+                useMirror = viewModel.useMirror.collectAsStateWithLifecycle().value,
+                onToggleMirror = viewModel::setUseMirror,
+                depItems = viewModel.depItems,
+                install = viewModel.install.collectAsStateWithLifecycle().value,
+                onInstallDep = viewModel::installDep,
+                onInstallAll = viewModel::installAll,
+                onInstallAndroid = viewModel::installAndroidOnly
+            )
+        }
     }
 
     // ═══ T87：配色方案选择器 ═══
     if (showSchemePicker) {
-        TerminalSchemePickerSheet(
-            currentSchemeId = viewModel.colorSchemeId.collectAsStateWithLifecycle().value,
-            onPick = { viewModel.setColorScheme(it) },
-            onDismiss = { showSchemePicker = false }
-        )
+        TerminalConsoleTheme {
+            TerminalSchemePickerSheet(
+                currentSchemeId = viewModel.colorSchemeId.collectAsStateWithLifecycle().value,
+                onPick = { viewModel.setColorScheme(it) },
+                onDismiss = { showSchemePicker = false }
+            )
+        }
     }
 
     // ═══ T87：命令历史 ═══
     if (showHistory) {
-        TerminalHistorySheet(
-            entries = viewModel.commandHistoryEntries.collectAsStateWithLifecycle().value,
-            onPick = { cmd ->
-                viewModel.sendInput(cmd)
-                showHistory = false
-            },
-            onClear = { viewModel.clearCommandHistory() },
-            onDismiss = { showHistory = false }
+        TerminalConsoleTheme {
+            TerminalHistorySheet(
+                entries = viewModel.commandHistoryEntries.collectAsStateWithLifecycle().value,
+                onPick = { cmd ->
+                    viewModel.sendInput(cmd)
+                    showHistory = false
+                },
+                onClear = { viewModel.clearCommandHistory() },
+                onDismiss = { showHistory = false }
+            )
+        }
+    }
+}
+
+// ═══════════════════════ notice 横幅 ═══════════════════════
+
+/**
+ * 终端操作反馈横幅（T89：恒可见 —— 替代旧版「埋在状态条里且无会话时消失」的
+ * 反馈通道）。错误语义（含「不可用/失败/拦截/已退出」字样）→ 红系；其余 →
+ * mint 信息色。点击整体关闭。
+ */
+@Composable
+private fun NoticeBanner(text: String, onDismiss: () -> Unit) {
+    val isError = text.contains("失败") || text.contains("不可用") || text.contains("拦截") ||
+        text.contains("已退出") || text.contains("error", true) ||
+        text.contains("failed", true) || text.contains("failure", true) ||
+        text.contains("unavailable", true) || text.contains("denied", true)
+    val bg = if (isError) ConsoleTheme.dangerSoft else ConsoleTheme.accentSoft
+    val fg = if (isError) ConsoleTheme.danger else ConsoleTheme.accent
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .clickable(onClick = onDismiss)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            if (isError) Icons.Default.Warning else Icons.Default.CheckCircle,
+            contentDescription = null,
+            tint = fg,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text,
+            modifier = Modifier.weight(1f),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            color = fg,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Icon(
+            Icons.Default.Close,
+            contentDescription = stringResource(R.string.term_close),
+            tint = ConsoleTheme.dim,
+            modifier = Modifier.size(14.dp)
         )
     }
 }
 
-// ═══════════════════════ T87：死会话覆盖层 ═══════════════════════
+// ═══════════════════════ 死会话覆盖层 ═══════════════════════
 
 /**
  * 会话已退出覆盖层（半透明盖在终端 grid 上）。
@@ -342,7 +405,7 @@ private fun DeadSessionOverlay(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xB00E1411)),
+            .background(ConsoleTheme.bg.copy(alpha = 0.70f)),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -387,39 +450,6 @@ private fun DeadSessionOverlay(
     }
 }
 
-// ═══════════════════════ 控制台主题 ═══════════════════════
-
-/**
- * 终端页控制台配色（自含深色调色 —— 与 [TerminalViewHost] 的终端内容区一致，
- * 不随 App 浅/深主题漂移；强调色取 App dark 主题 primary「neon mint」0xFF4EE9B0）。
- */
-internal object ConsoleTheme {
-    /** 页面底色（顶栏/条带下的 chrome 层）。 */
-    val bg = Color(0xFF0C1210)
-    /** 顶栏 / 状态条底色。 */
-    val bar = Color(0xFF111815)
-    /** 会话 chip 底色。 */
-    val chip = Color(0xFF18211C)
-    /** 活跃 chip 底色。 */
-    val chipActive = Color(0xFF1F3429)
-    /** 分隔线。 */
-    val stroke = Color(0xFF233029)
-    /** 主文本（提亮至近白 —— 与 TerminalViewHost 前景纯白统一，终端「白色字体」反馈）。 */
-    val text = Color(0xFFF2F7F4)
-    /** 次级文本。 */
-    val dim = Color(0xFF7E948A)
-    /** 强调（neon mint —— App dark primary）。 */
-    val accent = Color(0xFF4EE9B0)
-    /** 强调弱底（选中态 / 进度底）。 */
-    val accentSoft = Color(0xFF1B382D)
-    /** 警示（amber —— App dark secondary）。 */
-    val amber = Color(0xFFFFB454)
-    /** 危险（magenta —— App dark tertiary）。 */
-    val danger = Color(0xFFFF6B9D)
-    /** 危险弱底。 */
-    val dangerSoft = Color(0xFF38182A)
-}
-
 // ═══════════════════════ 顶栏 ═══════════════════════
 
 @Composable
@@ -427,6 +457,7 @@ private fun ConsoleTopBar(
     activeTab: TerminalViewModel.SessionTab?,
     ubuntuPhase: UbuntuLifecycleCoordinator.Phase,
     ubuntuPercent: Int,
+    semantic: com.apex.agent.platform.terminal.state.TerminalSemanticState?,
     onOpenNavDrawer: () -> Unit,
     onNewSession: () -> Unit,
     onOpenCenter: () -> Unit,
@@ -454,8 +485,12 @@ private fun ConsoleTopBar(
                 fontWeight = FontWeight.SemiBold,
                 color = ConsoleTheme.text
             )
-            // 副标题：当前后端 / 环境收敛进度（mono，一行）
+            // 副标题（一行）：会话后端 / 前台 job / 环境进度 —— 旧 StatusStrip
+            // 的调试噪音（#id STATE rows×cols）删除，保留用户可读信号。
             val subtitle = when {
+                activeTab != null && !activeTab.isAlive -> stringResource(R.string.term_session_dead_title)
+                activeTab != null && semantic?.foregroundJob != null ->
+                    "▶ ${semantic?.foregroundJob?.command?.take(24)}"
                 activeTab != null && activeTab.isUbuntu -> "ubuntu 24.04 · bash"
                 activeTab != null -> "android shell"
                 ubuntuPhase in setOf(
@@ -564,89 +599,35 @@ private fun SessionChip(
                 color = ConsoleTheme.text
             )
             Text(
-                if (tab.title != null) "#${tab.id} $agentBadge${if (tab.isUbuntu) "Ubuntu" else "Android"}" else tab.state,
+                if (tab.title != null) "#${tab.id} $agentBadge${if (tab.isUbuntu) "Ubuntu" else "Android"}" else sessionStateLabel(tab.state),
                 fontSize = 9.sp,
                 fontFamily = FontFamily.Monospace,
                 color = ConsoleTheme.dim,
                 maxLines = 1
             )
         }
+        // 关闭钮：24dp 视觉 + padding 撑到 ≥32dp 触控（旧 18dp 触控区低于阈值）
         Icon(
             Icons.Default.Close, stringResource(R.string.term_cd_close_session),
             Modifier
-                .size(18.dp)
+                .size(24.dp)
                 .clip(CircleShape)
                 .clickable(onClick = onClose)
-                .padding(3.dp),
+                .padding(4.dp),
             tint = ConsoleTheme.dim
         )
     }
 }
 
-// ═══════════════════════ 状态条 ═══════════════════════
-
-@Composable
-private fun StatusStrip(
-    semantic: com.apex.agent.platform.terminal.state.TerminalSemanticState?,
-    notice: String?
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(ConsoleTheme.bar)
-            .padding(horizontal = 12.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        if (semantic == null) {
-            Text(
-                stringResource(R.string.term_no_session),
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                color = ConsoleTheme.dim
-            )
-        } else {
-            Text(
-                "#${semantic.session.id} ${semantic.session.state.name} ${semantic.session.rows}×${semantic.session.cols}",
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                color = ConsoleTheme.dim,
-                maxLines = 1
-            )
-            // 前台 job
-            semantic.foregroundJob?.let { job ->
-                Text(
-                    "▶ ${job.command.take(26)}",
-                    fontSize = 10.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = ConsoleTheme.accent,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            // 等待输入（prompt 检测）
-            if (semantic.prompt?.detected == true || semantic.input.state.name == "HIGH_CONFIDENCE") {
-                Text(
-                    stringResource(R.string.term_waiting_input),
-                    fontSize = 10.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = ConsoleTheme.amber,
-                    maxLines = 1
-                )
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        if (notice != null) {
-            Text(
-                notice,
-                fontSize = 10.sp,
-                color = ConsoleTheme.danger,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(0.72f, fill = false)
-            )
-        }
-    }
+/** 会话状态 → 本地化短标签（旧版直接显示英文枚举名）。 */
+private fun sessionStateLabel(state: String): String = when (state.uppercase(Locale.US)) {
+    "CREATED", "STARTING" -> "…"
+    "READY", "RUNNING" -> "RUN"
+    "WAITING_INPUT" -> "INPUT"
+    "INTERRUPTED" -> "INT"
+    "EXITED", "CLOSED" -> "EXIT"
+    "BROKEN" -> "BROKEN"
+    else -> state.take(6)
 }
 
 // ═══════════════════════ 环境面板（无会话时的主区）═══════════════════════
@@ -654,7 +635,7 @@ private fun StatusStrip(
 /**
  * 无会话时的主区面板 —— 三个形态：
  *  - **准备中**（NOT_INSTALLED/INSTALLING/ROOTFS_READY/BOOTSTRAPPING/RECOVERING）：
- *    三步进度（解压内置环境 → 配置系统 → 初始化工具链）+ 百分比/字节 + 当前阶段消息。
+ *    三步进度（解压内置环境 → 配置系统 → 初始化工具链）+ 百分比/字节 + 当前阶段消息；
  *    T85 自动预备语义：App 启动即后台进行，用户无需任何操作，完成后自动进终端；
  *  - **失败**（FAILED）：错误详情 + 重试 + 环境中心；
  *  - **就绪空态**（READY，会话被用户全部关闭）：快捷新建入口。
@@ -849,8 +830,9 @@ private fun EnvironmentPreparingContent(
     }
     Spacer(Modifier.height(18.dp))
 
-    // ── 次级入口：不等环境，先用 Android Shell / 环境中心 ──
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    // ── 次级入口：不等环境，先用 Android Shell / 环境中心（纵向堆叠，
+    //    旧版两个横排 TextButton 在窄屏溢出）──
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         TextButton(onClick = onNewLocal) {
             Icon(Icons.Default.Android, null, Modifier.size(15.dp), tint = ConsoleTheme.dim)
             Spacer(Modifier.width(6.dp))
@@ -995,41 +977,6 @@ private fun EnvironmentReadyEmptyContent(
     }
 }
 
-// ═══════════════════════ 有会话时的环境收敛细条 ═══════════════════════
-
-@Composable
-private fun UbuntuBusyStrip(
-    modifier: Modifier = Modifier,
-    phase: UbuntuLifecycleCoordinator.Phase,
-    progress: UbuntuLifecycleCoordinator.LifecycleProgress?
-) {
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xE6101714))
-            .padding(horizontal = 14.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp)
-    ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(12.dp),
-            strokeWidth = 1.4.dp,
-            color = ConsoleTheme.accent
-        )
-        Text(
-            if (phase == UbuntuLifecycleCoordinator.Phase.INSTALLING) {
-                stringResource(R.string.term_busy_unpacking, progress?.percent ?: 0)
-            } else {
-                stringResource(R.string.term_busy_bootstrap)
-            },
-            fontSize = 11.sp,
-            color = ConsoleTheme.dim,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
 // ═══════════════════════ 新建会话对话框 ═══════════════════════
 
 @Composable
@@ -1044,13 +991,13 @@ private fun NewSessionDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SessionTypeCard(
-                    icon = { Icon(Icons.Default.Terminal, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp)) },
+                    icon = { Icon(Icons.Default.Terminal, null, tint = MaterialTheme3Colors.accent, modifier = Modifier.size(22.dp)) },
                     title = stringResource(R.string.term_ubuntu_session),
                     desc = stringResource(R.string.term_session_ubuntu_desc),
                     onClick = onUbuntu
                 )
                 SessionTypeCard(
-                    icon = { Icon(Icons.Default.Android, null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(22.dp)) },
+                    icon = { Icon(Icons.Default.Android, null, tint = MaterialTheme3Colors.amber, modifier = Modifier.size(22.dp)) },
                     title = "Android Shell",
                     desc = stringResource(R.string.term_session_android_desc),
                     onClick = onLocal
@@ -1074,7 +1021,7 @@ private fun SessionTypeCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(MaterialTheme3Colors.chip)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1082,11 +1029,11 @@ private fun SessionTypeCard(
     ) {
         icon()
         Column {
-            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ConsoleTheme.text)
             Text(
                 desc,
                 fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = ConsoleTheme.dim,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1094,7 +1041,13 @@ private fun SessionTypeCard(
     }
 }
 
+/** AlertDialog 在 TerminalConsoleTheme 内的 Material 色锚（语义同名 console 色）。 */
+private object MaterialTheme3Colors {
+    val accent = ConsoleTheme.accent
+    val amber = ConsoleTheme.amber
+    val chip = ConsoleTheme.chip
+}
+
 /** 字节 → MB 文本（1 位小数）。 */
 private fun formatMb(bytes: Long): String =
     String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
-

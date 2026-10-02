@@ -173,7 +173,7 @@
     <string name="market_mcp_apikey_label">API Key (optional, sent as Bearer)</string>
     <string name="market_mcp_add_connect">Add &amp; connect</string>
 
-    <!-- ═══ Dialogs · Edit MCP（已安装管理 · 配置编辑）═══ -->
+    <!-- ═══ Dialogs · Edit MCP (installed management · config editing) ═══ -->
     <string name="market_mcp_edit_title">Edit tool source</string>
     <string name="market_mcp_edit_name_locked">Name is fixed after creation (delete &amp; re-add to rename)</string>
     <string name="market_mcp_edit_save">Save &amp; reconnect</string>
@@ -357,4 +357,39 @@
     <string name="market_skill_cat_safety">Safety</string>
     <string name="market_skill_cat_digital">Digital</string>
     <string name="market_skill_cat_coding">Coding</string>
+    <!-- ═══ Hub ecosystem: official skill / MCP hub repositories ═══ -->
+    <string name="market_skill_source_hub">Official Hub</string>
+    <string name="market_hub_header">Official Skill Hub — curated skills, install on demand</string>
+    <string name="market_hub_loading">Loading official hub…</string>
+    <string name="market_hub_empty">No skills in the hub for this tier yet</string>
+    <string name="market_hub_mcp_header">Official MCP Hub — install · configure · start</string>
+    <string name="market_hub_mcp_loading">Loading MCP hub…</string>
+    <string name="market_hub_mcp_not_running">Installed · not running</string>
+    <string name="market_hub_mcp_requires_rootfs">Runs in the PRoot Ubuntu sandbox — install Ubuntu from the Terminal page first if not yet installed</string>
+    <string name="market_mcp_configured_header">Workspace servers · configure / start (%1$d)</string>
+    <string name="market_mcp_config">Configure</string>
+    <string name="market_mcp_start">Start</string>
+    <string name="market_mcp_stop">Stop</string>
+    <string name="market_status_running">Running</string>
+    <string name="market_mcp_config_title">Configure %1$s</string>
+    <string name="market_mcp_scope_label">Workspace scope</string>
+    <string name="market_scope_agent">Agent</string>
+    <string name="market_scope_coding">Coding</string>
+    <string name="market_scope_all">Both</string>
+    <string name="market_mcp_enable_label">Enabled</string>
+    <string name="market_mcp_enable_hint">Auto-connects every app launch when enabled</string>
+    <string name="market_mcp_github_account">GitHub account (required by github tools)</string>
+    <string name="market_mcp_github_connect">Connect token</string>
+    <string name="market_mcp_builtin_desc_github">GitHub REST via MCP: get_me, list_repositories, get_file_contents, create_or_update_file, create_issue, list_issues, search_code — connect a Personal Access Token to use them.</string>
+    <string name="market_mcp_builtin_desc_search">Web search &amp; fetch (web_search / web_fetch / search_hint) over the shared HTTP stack.</string>
+    <string name="market_mcp_builtin_desc_fs">Standard MCP file interface scoped to the active coding workspace (list / read / write / info).</string>
+    <string name="market_mcp_builtin_desc_memory">Knowledge-graph memory (entities / relations / observations), persisted and shared with chat auto-memory.</string>
+    <string name="market_mcp_builtin_desc_thinking">Sequential thinking chains (server-sequential-thinking semantics) for stepwise reasoning.</string>
+    <string name="market_mcp_builtin_desc_default">Built-in in-process MCP server.</string>
+    <string name="market_mcpso_header">mcp.so community directory — 15,000+ servers</string>
+    <string name="market_mcpso_loading">Loading mcp.so directory…</string>
+    <string name="market_mcpso_load_more">Load more</string>
+    <string name="market_mcpso_loading_more">Loading more…</string>
+    <string name="market_mcpso_fetching_config">Fetching install config from mcp.so…</string>
+    <string name="market_action_done">Done</string>
 </resources>

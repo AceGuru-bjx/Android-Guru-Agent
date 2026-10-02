@@ -78,19 +78,26 @@ object SkillModule {
     private fun releaseBundledSkills(context: Context, registry: SkillRegistry) {
         bundledReleaseScope.launch {
             runCatching {
-                val manifestJsons = context.assets.list("skills")
+                val assetNames = context.assets.list("skills")
                     ?.filter { it.endsWith(".json") }
                     ?.sorted()
                     .orEmpty()
-                    .map { name ->
-                        context.assets.open("skills/$name").use { stream ->
-                            stream.readBytes().toString(Charsets.UTF_8)
-                        }
+                val manifestJsons = assetNames.map { name ->
+                    context.assets.open("skills/$name").use { stream ->
+                        stream.readBytes().toString(Charsets.UTF_8)
                     }
+                }
+                // Hub 生态迁移：assets 白名单（<id>.json → id）反查清理「曾经内置、
+                // 现已迁往官方仓库」的旧条目（详见 SkillRegistry.pruneStaleBundled）。
+                // 与 installBundled 操作不相交的 id 集合（离场者不在 assets、幸存者
+                // 不在清理集），先后顺序无耦合；先清后装，清理计数不被升级覆盖。
+                val bundledIds = assetNames.map { it.removeSuffix(".json") }.toSet()
+                val pruned = registry.pruneStaleBundled(bundledIds)
                 val added = registry.installBundled(manifestJsons).getOrDefault(0)
                 AppLogger.instance.info(
                     LogCategory.PLUGIN, "SkillModule",
-                    "内置技能释放完成：assets 共 ${manifestJsons.size} 个，本次新增 $added 个"
+                    "内置技能释放完成：assets 共 ${manifestJsons.size} 个，本次新增 $added 个" +
+                        (if (pruned > 0) "，内置瘦身清理 $pruned 个（已迁官方仓库）" else "")
                 )
             }.onFailure {
                 AppLogger.instance.warn(

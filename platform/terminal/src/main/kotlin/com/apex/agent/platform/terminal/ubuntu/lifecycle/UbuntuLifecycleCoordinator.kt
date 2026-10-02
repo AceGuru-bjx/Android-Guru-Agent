@@ -547,18 +547,25 @@ class UbuntuLifecycleCoordinator(
      * 输入是底层事实（rootfs 存在性 / ProvisioningState / BootstrapState），
      * 输出编排视图。RECOVERING 是过程态（仅 setPhase 与 refreshState 之间存在），
      * refreshState 一律派生事实终态 —— warmUp/repair 结束后不残留 RECOVERING。
+     *
+     * ★ 降级 READY 稳定化：rootfs 在 + bootstrap FAILED + 之前是（降级）READY →
+     * 保持 READY（bootstrapNote 保留）。旧规则把这种状态派生成 ROOTFS_READY ——
+     * runEnsureSteps 刚把环境判为「降级可用」，任何一次 refreshState（warmUp/
+     * repair 后必调）就翻回「待引导」：同一事实在 UI 上两种说法来回跳，且
+     * bootstrapNote 仅在 READY 时保留（refreshState）→ 降级原因直接丢失。
      */
     internal fun derivePhase(
         hasRootfs: Boolean,
         rootfsStateName: String?,
         bootstrapStateName: String?,
-        @Suppress("UNUSED_PARAMETER") previous: Phase
+        previous: Phase
     ): Phase = when {
         !hasRootfs -> Phase.NOT_INSTALLED
         rootfsStateName in INSTALL_IN_PROGRESS_STATES -> Phase.INSTALLING
         bootstrapStateName == "READY" -> Phase.READY
         bootstrapStateName in BOOTSTRAP_IN_PROGRESS_STATES -> Phase.BOOTSTRAPPING
         bootstrapStateName == "FAILED" && previous == Phase.FAILED -> Phase.FAILED
+        bootstrapStateName == "FAILED" && previous == Phase.READY -> Phase.READY
         else -> Phase.ROOTFS_READY // rootfs 在，bootstrap NOT_STARTED/FAILED/中断
     }
 

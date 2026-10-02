@@ -3,6 +3,8 @@ package com.apex.agent.attachment
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.core.logging.LogCategory
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,7 +82,9 @@ class PredictiveAttachmentPreprocessor @Inject constructor(
                     preprocessedCache.remove(uri)
                 }
                 if (expired.isNotEmpty()) {
-                    android.util.Log.d(TAG, "Cleaned ${expired.size} expired preprocessed attachments")
+                    // 原实现用 android.util.Log.d：minify 未启用，release 也会打逆 logcat，
+                    // 且绕过「INFO+ 才落盘」的日志体积纪律 → 改走 AppLogger.debug
+                    AppLogger.instance.debug(LogCategory.ATTACHMENT, TAG, "Cleaned ${expired.size} expired preprocessed attachments")
                 }
             }
         }
@@ -147,7 +151,7 @@ class PredictiveAttachmentPreprocessor @Inject constructor(
 
                 progressFlow.value = 1.0f
             } catch (e: Exception) {
-                android.util.Log.w(TAG, "Preprocess failed for $uri: ${e.message}")
+                AppLogger.instance.warn(LogCategory.ATTACHMENT, TAG, "Preprocess failed for $uri: ${e.message}")
                 progressFlow.value = -1f
                 runCatching { targetFile.delete() }
                 // 失败/取消的条目不留在缓存里占位（按引用移除，不误伤后继重新登记的

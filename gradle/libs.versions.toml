@@ -9,6 +9,8 @@ hilt-nav-compose = "1.2.0"
 coroutines = "1.9.0"
 serialization = "1.7.3"
 okhttp = "4.12.0"
+# XZ for Java —— 增量更新的 VCDIFF LZMA 二级压缩解码（纯 Java，无传递依赖，公有领域）
+xz = "1.9"
 shizuku = "13.1.5"
 core-ktx = "1.15.0"
 navigation = "2.8.5"
@@ -66,6 +68,9 @@ serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serializ
 
 # Network
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+
+# Delta update —— VCDIFF 补丁的 LZMA(.xz) 二级压缩段解码
+xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 
 # Shizuku
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }

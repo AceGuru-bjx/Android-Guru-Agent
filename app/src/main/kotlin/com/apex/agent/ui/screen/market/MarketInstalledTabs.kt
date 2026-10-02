@@ -273,6 +273,8 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
     var pendingDelete by remember { mutableStateOf<MarketMcpRow?>(null) }
     // 编辑器：VM 持有编辑快照（跨刷新存活，避免列表刷新把填一半的表单冲掉）
     val editingConfig by viewModel.editingMcp.collectAsStateWithLifecycle()
+    // BUILTIN 配置对话框（作用域/启停/连接/GitHub 账号）
+    var builtinConfigFor by remember { mutableStateOf<MarketMcpRow?>(null) }
 
     if (state.mcps.isEmpty()) {
         MarketEmptyState(
@@ -335,9 +337,18 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
                             Text(stringResource(R.string.market_mcp_timeline))
                         }
                     }
-                    // 配置编辑：改 URL / 命令 / 参数 / 环境变量 / 沙箱开关。
-                    // BUILTIN 是进程内预置（无用户可配字段），不提供编辑。
-                    if (!server.builtin) {
+                    // 配置编辑：改 URL / 命令 / 参数 / 环境变量 / 沙箱开关；
+                    // BUILTIN 是进程内预置 —— 也有配置入口（作用域/启停/连接/
+                    // GitHub 账号，见 BuiltinMcpConfigDialog），补齐「所有 MCP
+                    // 都有配置按钮」的产品要求。
+                    if (server.builtin) {
+                        TextButton(
+                            enabled = state.mcpConnecting != server.name,
+                            onClick = { builtinConfigFor = server }
+                        ) {
+                            Text(stringResource(R.string.market_mcp_config))
+                        }
+                    } else {
                         TextButton(
                             enabled = state.mcpConnecting != server.name,
                             onClick = { viewModel.openMcpEditor(server.name) }
@@ -355,9 +366,9 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
                     ) {
                         Text(
                             when {
-                                server.connected -> stringResource(R.string.market_action_disconnect)
+                                server.connected -> stringResource(R.string.market_mcp_stop)
                                 state.mcpConnecting == server.name -> stringResource(R.string.market_connecting)
-                                else -> stringResource(R.string.market_action_connect)
+                                else -> stringResource(R.string.market_mcp_start)
                             }
                         )
                     }
@@ -406,6 +417,15 @@ internal fun InstalledMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
             onDismiss = { viewModel.closeMcpEditor() },
             // #206 实时预检（编辑模式自动豁免自身名的重名误报）。
             validate = viewModel::validateMcpConfig
+        )
+    }
+
+    // ═══ BUILTIN 配置对话框（作用域/启停/连接/GitHub 账号）═══
+    builtinConfigFor?.let { server ->
+        BuiltinMcpConfigDialog(
+            server = server,
+            viewModel = viewModel,
+            onDismiss = { builtinConfigFor = null }
         )
     }
 }

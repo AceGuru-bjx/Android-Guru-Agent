@@ -21,12 +21,22 @@ import kotlin.math.abs
  *  - **run 折叠 + 缓存**：行 → `CellRun` 列表按（快照 id + 行号）缓存 —— 滚动
  *    重绘零折叠成本；快照换代才整表失效；
  *  - **列对齐校正**（Termux 关键技巧）：每 run 实测 `measureText` vs
- *    `colSpan × cellWidth`，偏差超 1% → `textScaleX` 缩放绘制 —— bold 假粗体/
- *    CJK 回退字体的 advance 漂移被强制锁列，绝不允许「光标越走越歪」；
+ *    `colSpan × cellWidth`，偏差超 1% → `textScaleX` 缩放绘制；**超界钳制**
+ *    （T90：旧版越界静默回退 1f → run 无限溢出、列越走越歪；现钳到
+ *    [SCALE_X_MIN]/[SCALE_X_MAX] 边界，最坏 2.2×/0.5× 有界）；
+ *  - **fake bold / skewX italic**（T90，Termux 同款）：run 级粗/斜**不再切换
+ *    typeface 变体**（变体 advance 漂移是「粗体被压扁」的根源 —— 探测用 NORMAL
+ *    度量、绘制却用 BOLD 字形），改用 `setFakeBoldText` + `setTextSkewX` ——
+ *    度量与绘制同源，**字号任何 style 下逐像素稳定**；
+ *  - **wide advance 探测**（T90）：cell 宽 = max(窄字符 advance, CJK advance/2)
+ *    —— CJK/全角字形永不被压扁（scaleX ≥ 1），各设备列宽一致；
+ *  - **网格居中**（T90）：floor 余量分摊两侧（grid.originX/Y），文本不再贴左
+ *    沿、滚动条不再压右列；
  *  - **基线一次性居中**：ascent/descent 中点对齐行高中点（`onFontChanged` 算好），
  *    滚动时行与行之间无基线抖动；
- *  - 光标按 DECSCUSR 画 BLOCK/UNDERLINE/BAR，闪烁相位由 View 传入（只画
- *    `cursorVisible && focused`—— 失焦/选择时常亮淡显，不空转 Choreographer）。
+ *  - 光标按 DECSCUSR 画 BLOCK/UNDERLINE/BAR（UNDERLINE 1 cell 宽 —— T90 修复
+ *    旧版 2 cell 溢出），闪烁相位由 View 传入（只画 `cursorVisible && focused`
+ *    —— 失焦/选择时常亮淡显，不空转 Choreographer）。
  *
  * 本类**无状态语义**（可被多个 View 实例复用）；字体度量随 settings 重探测。
  */
@@ -47,7 +57,6 @@ class TerminalCanvasRenderer {
     }
     private val scrollbarTrackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val scrollbarThumbPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val indicatorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fadePaint = Paint()
     private val placeholderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
@@ -55,14 +64,12 @@ class TerminalCanvasRenderer {
     }
 
     // ─── 字体度量（onFontChanged 重探测）───
-    private var boldTypeface: Typeface = Typeface.DEFAULT_BOLD
-    private var italicTypeface: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.ITALIC)
-    private var boldItalicTypeface: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD_ITALIC)
+    private var normalTypeface: Typeface = Typeface.MONOSPACE
     private var fontAscent = 0f
     private var fontDescent = 0f
     private var baselineOffsetInRow = 0f
 
-    /** 单字符 advance（px，View 在 onSizeChanged/字号变化后读取）。 */
+    /** 单字符 advance（px，View 在 onSizeChanged/字号变化后读取；已含 wide 探测下限）。 */
     var charAdvancePx: Float = 8f
         private set
 
@@ -77,6 +84,15 @@ class TerminalCanvasRenderer {
     /**
      * 字体/字号变化（settings 换新、字号捏合步进后调用）。
      *
+     * T90 双探测：
+     *  - 窄字符：64 × '0' 均值（单字符舍入误差 ≤0.5px 摊薄）；
+     *  - 宽字符：CJK 探测串取均值 ÷ 2（VT 列语义每个 CJK 占 2 列）；
+     *  - cell 宽取两者 max —— CJK 字形永不压扁（run 级 scaleX ≥ 1），
+     *    窄字符列宽同步抬升保证 ASCII/CJK 混排列恒对齐。
+     *
+     * 度量只从**单一 typeface**（settings.typefaceStyle 派生）探测：run 级
+     * bold/italic 用 fake bold/skewX（不改 metrics）→ 探测即绘制真值。
+     *
      * @return 重探测后的单字符 advance（View 用它算网格）
      */
     fun onFontChanged(settings: TerminalViewSettings, density: Float): Float {
@@ -85,18 +101,18 @@ class TerminalCanvasRenderer {
         placeholderPaint.textSize = 13f * density
         val style = settings.typefaceStyle
         val base = Typeface.MONOSPACE
-        textPaint.typeface = when (style) {
-            TerminalViewSettings.TYPEFACE_BOLD -> Typeface.create(base, Typeface.BOLD)
-            TerminalViewSettings.TYPEFACE_ITALIC -> Typeface.create(base, Typeface.ITALIC)
-            TerminalViewSettings.TYPEFACE_BOLD_ITALIC -> Typeface.create(base, Typeface.BOLD_ITALIC)
-            else -> Typeface.create(base, Typeface.NORMAL)
-        }
-        boldTypeface = Typeface.create(base, Typeface.BOLD)
-        italicTypeface = Typeface.create(base, Typeface.ITALIC)
-        boldItalicTypeface = Typeface.create(base, Typeface.BOLD_ITALIC)
-        // advance 探测：64 个 '0' 取均值（单字符舍入误差 ≤0.5px 摊薄）
+        normalTypeface = Typeface.create(base, style)
+        textPaint.typeface = normalTypeface
+        // fake 状态复位（run 绘制前重设，防上次残留进入探测）
+        textPaint.isFakeBoldText = false
+        textPaint.textSkewX = 0f
+        // 窄字符探测
         val probe = PROBE_CHARS
-        charAdvancePx = (textPaint.measureText(probe) / probe.length).coerceAtLeast(1f)
+        val narrowAdvance = textPaint.measureText(probe) / probe.length
+        // 宽字符探测（走真实 fallback 字体路径 —— 与绘制时同一 paint 状态）
+        val wideProbe = WIDE_PROBE_CHARS
+        val wideAdvance = textPaint.measureText(wideProbe) / wideProbe.length
+        charAdvancePx = maxOf(narrowAdvance, wideAdvance / 2f).coerceAtLeast(1f)
         // 基线居中：ascent/descent 中点对齐行高中点
         val fm = textPaint.fontMetrics
         fontAscent = fm.ascent
@@ -167,21 +183,23 @@ class TerminalCanvasRenderer {
         val firstVis = range.first
         val cellH = grid.cellHeightPx
         val rowIdBase = frame.rowIdBase
+        val originX = grid.originX
+        val originY = grid.originY
         textPaint.textSize = frame.settings.fontSizeSp * frame.density
         var cursorDrawn = false
 
         for (row in range) {
             val cells = frame.rows.getOrNull(row) ?: continue
-            val rowTop = (row - firstVis) * cellH
+            val rowTop = originY + (row - firstVis) * cellH
             val runs = runsFor(row, cells, frame)
             val rowBottom = rowTop + cellH
             val rowId = rowIdBase + row
 
-            // 1) 行内非默认底色 run（背景 pass —— 先底后字）
+            // 1) 行内非默认底色 run（背景 pass —— 先底后字；originX 居中偏移）
             for (run in runs) {
                 if (run.bgArgb != 0 && run.bgArgb != palette.background && run.colSpan > 0) {
                     bgPaint.color = run.bgArgb
-                    val x = run.colStart * grid.cellWidthPx
+                    val x = originX + run.colStart * grid.cellWidthPx
                     canvas.drawRect(x, rowTop, x + run.colSpan * grid.cellWidthPx, rowBottom, bgPaint)
                 }
             }
@@ -189,7 +207,7 @@ class TerminalCanvasRenderer {
             // 2) 选区高亮（在文本之下 —— 文字保持原色，与旧渲染器视觉一致）
             drawSelectionForRow(canvas, frame, row, rowId, cells, rowTop, rowBottom)
 
-            // 3) 文本（列对齐校正 + 逐 run drawText）
+            // 3) 文本（fake bold/skew + 列对齐校正 + 逐 run drawText）
             drawRowText(canvas, frame, runs, rowTop, cellH)
 
             // 4) 下划线/删除线/链接装饰
@@ -201,12 +219,9 @@ class TerminalCanvasRenderer {
             }
         }
 
-        // 6) 滚动条 / 边缘渐隐 / 新输出指示器
+        // 6) 滚动条 / 边缘渐隐（纯视口层 —— 不受 origin 影响）
         drawScrollbar(canvas, frame)
         drawFadeEdges(canvas, frame)
-        if (frame.settings.showNewOutputIndicator && !frame.scroll.isAtBottom) {
-            drawNewOutputIndicator(canvas, frame)
-        }
     }
 
     // ─── 行折叠与缓存 ───
@@ -252,26 +267,29 @@ class TerminalCanvasRenderer {
         cellHeight: Float
     ) {
         val cw = frame.grid.cellWidthPx
+        val ox = frame.grid.originX
         val baseline = baselineForRow(rowTop, cellHeight)
         for (run in runs) {
             if (run.text.isEmpty() || run.colSpan <= 0) continue
-            // 属性派生（typeface/删除线）
+            // 属性派生（fake bold/skewX —— 度量与绘制同源，T90）
             val bold = run.flags and RenderCell.FLAG_BOLD != 0
             val italic = run.flags and RenderCell.FLAG_ITALIC != 0
-            textPaint.typeface = when {
-                bold && italic -> boldItalicTypeface
-                bold -> boldTypeface
-                italic -> italicTypeface
-                else -> Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-            }
+            textPaint.typeface = normalTypeface
+            textPaint.isFakeBoldText = bold
+            textPaint.textSkewX = if (italic) ITALIC_SKEW else 0f
             textPaint.color = if (run.fgArgb != 0) run.fgArgb else frame.palette.foreground
-            // 列对齐校正（Termux 技巧 —— 见类 KDoc）：实测宽度 ≠ 期望列宽 → textScaleX
+            // 列对齐校正（Termux 技巧 —— 见类 KDoc）：实测宽度 ≠ 期望列宽 →
+            // textScaleX 缩放；**超界钳制**（不回退 1f —— 旧行为 run 无限溢出）。
             val expected = run.colSpan * cw
             val measured = textPaint.measureText(run.text)
             val scaleX = if (measured > 0.5f) expected / measured else 1f
-            textPaint.textScaleX = if (scaleX.isFinite() && scaleX in 0.5f..2.2f) scaleX else 1f
-            canvas.drawText(run.text, run.colStart * cw, baseline, textPaint)
+            textPaint.textScaleX =
+                if (scaleX.isFinite()) scaleX.coerceIn(SCALE_X_MIN, SCALE_X_MAX) else 1f
+            canvas.drawText(run.text, ox + run.colStart * cw, baseline, textPaint)
         }
+        // paint 状态复位（探测/下一帧不携带残留）
+        textPaint.isFakeBoldText = false
+        textPaint.textSkewX = 0f
         textPaint.textScaleX = 1f
     }
 
@@ -288,12 +306,13 @@ class TerminalCanvasRenderer {
         val strokeW = (frame.density * 1.2f).coerceAtLeast(1.5f)
         val underlineY = rowBottom - (rowBottom - rowTop) * 0.12f
         val strikeY = rowTop + (rowBottom - rowTop) * 0.5f
+        val ox = frame.grid.originX
         for (run in runs) {
             val underline = run.flags and RenderCell.FLAG_UNDERLINE != 0
             val strike = run.flags and RenderCell.FLAG_STRIKE != 0
             val linkUnderline = run.link != 0 && frame.settings.drawLinkUnderline
             if (!underline && !strike && !linkUnderline) continue
-            val x0 = run.colStart * cellWidthPx
+            val x0 = ox + run.colStart * cellWidthPx
             val x1 = x0 + run.colSpan * cellWidthPx
             decorationPaint.strokeWidth = strokeW
             if (underline) {
@@ -356,7 +375,8 @@ class TerminalCanvasRenderer {
      *
      * 可见性：`cursorVisible && !选区激活`；失焦时**常亮淡化**（0.5 alpha ——
      * 提示光标位置但不闪烁：未聚焦时 View 会停掉 Choreographer，blinkOn 不再
-     * 翻转，这里不能依赖它）。 */
+     * 翻转，这里不能依赖它）。UNDERLINE 宽 1 cell（T90：旧版 2 cell 溢出
+     * 到右侧邻列）。 */
     private fun drawCursor(
         canvas: Canvas,
         frame: RenderFrame,
@@ -387,7 +407,7 @@ class TerminalCanvasRenderer {
             }
             com.apex.agent.terminalemulator.CursorStyle.UNDERLINE -> {
                 val h = (frame.density * 3f).coerceAtLeast(2f)
-                canvas.drawRect(x, rowBottom - h, x + cellWidthPx * 2, rowBottom, cursorPaint)
+                canvas.drawRect(x, rowBottom - h, x + cellWidthPx, rowBottom, cursorPaint)
             }
             else -> { // BAR（默认）
                 val w = (frame.density * 2f).coerceAtLeast(1.5f)
@@ -399,19 +419,21 @@ class TerminalCanvasRenderer {
         return true
     }
 
-    // ─── 滚动条 / 渐隐 / 指示器 ───
+    // ─── 滚动条 / 渐隐 ───
 
     private fun drawScrollbar(canvas: Canvas, frame: RenderFrame) {
         val grid = frame.grid
         val geo = grid.scrollbarGeometry(frame.rows.size, frame.scroll.firstVisibleRow) ?: return
         val (thumbTop, thumbH, trackH) = geo
         val w = if (frame.settings.scrollbarWidthPx > 0) frame.settings.scrollbarWidthPx.toFloat()
-        else frame.density * 3f
+        else frame.density * 2f
         val x = frame.viewWidthPx - w
+        // T90：减淡（轨道 0.08 / 滑块 0.30）+ 2dp 细 —— 网格居中后右侧余量天然
+        // 分离文字与滚动条，仅滚动时可见可辨即可，不再压右列字
         scrollbarTrackPaint.color = frame.settings.scrollbarTrackColor
-            ?: defaultScrollbar(frame.palette, alphaF = 0.18f)
+            ?: defaultScrollbar(frame.palette, alphaF = 0.08f)
         scrollbarThumbPaint.color = frame.settings.scrollbarThumbColor
-            ?: defaultScrollbar(frame.palette, alphaF = 0.55f)
+            ?: defaultScrollbar(frame.palette, alphaF = 0.30f)
         canvas.drawRect(x, 0f, x + w, trackH, scrollbarTrackPaint)
         val radius = w / 2f
         canvas.drawRoundRect(RectF(x, thumbTop, x + w, thumbTop + thumbH), radius, radius, scrollbarThumbPaint)
@@ -461,35 +483,6 @@ class TerminalCanvasRenderer {
         }
     }
 
-    /** 非贴底时的「新输出」指示（下中部的 ↓ 药丸 —— 与宿主 onTerminalScrollChanged
-     *  affordance 互补；宿主可 settings.showNewOutputIndicator=false 关闭）。 */
-    private fun drawNewOutputIndicator(canvas: Canvas, frame: RenderFrame) {
-        val d = frame.density
-        val w = 44f * d
-        val h = 26f * d
-        val cx = frame.viewWidthPx / 2f
-        val bottom = frame.viewHeightPx - 10f * d
-        val rect = RectF(cx - w / 2f, bottom - h, cx + w / 2f, bottom)
-        indicatorPaint.color = TerminalPalette.blend(frame.palette.background, frame.palette.cursor, 0.35f)
-        indicatorPaint.alpha = 230
-        canvas.drawRoundRect(rect, h / 2f, h / 2f, indicatorPaint)
-        // ↓ 箭头
-        indicatorPaint.color = frame.palette.cursor
-        indicatorPaint.style = Paint.Style.STROKE
-        indicatorPaint.strokeWidth = 2.5f * d
-        indicatorPaint.strokeCap = Paint.Cap.ROUND
-        val path = Path()
-        val midY = rect.centerY()
-        path.moveTo(cx, midY - 6f * d)
-        path.lineTo(cx, midY + 6f * d)
-        path.moveTo(cx - 4.5f * d, midY + 2.5f * d)
-        path.lineTo(cx, midY + 7.5f * d)
-        path.lineTo(cx + 4.5f * d, midY + 2.5f * d)
-        canvas.drawPath(path, indicatorPaint)
-        indicatorPaint.style = Paint.Style.FILL
-        indicatorPaint.alpha = 255
-    }
-
     /** 空快照占位（「终端未启动」—— 宿主也可自行盖层；这里给最小视觉）。 */
     private fun drawPlaceholder(canvas: Canvas, frame: RenderFrame) {
         bgPaint.color = frame.palette.background
@@ -498,6 +491,17 @@ class TerminalCanvasRenderer {
 
     private companion object {
         const val PROBE_CHARS = "0000000000000000000000000000000000000000000000000000000000000000"
+
+        /** CJK 宽字符探测串（各字形族代表性字符 —— 走与绘制一致的 fallback 路径）。 */
+        const val WIDE_PROBE_CHARS = "中文日本語한글"
+
+        /** textScaleX 钳制边界（Termux 量级；超出时钳到边界而非放弃对齐）。 */
+        const val SCALE_X_MIN = 0.5f
+        const val SCALE_X_MAX = 2.2f
+
+        /** fake italic 倾斜量（Termux 同款 -0.35）。 */
+        const val ITALIC_SKEW = -0.35f
+
         const val RUN_CACHE_MAX_ROWS = 2048
     }
 }

@@ -361,7 +361,9 @@ private fun TaskStatusIcon(status: TaskStatus) {
             Icons.Default.HourglassTop to Color(0xFFE0A63C)
         TaskStatus.CANCELLED, TaskStatus.PENDING -> Icons.Default.HourglassTop to Color(0xFF8A93A3)
     }
-    Icon(icon, contentDescription = status.name, Modifier.size(18.dp), tint = tint)
+    // v1.4.4 UX 审查：TalkBack 旧实现直读枚举名（"WAITING_USER"），改用同文件已有的
+    // 本地化 statusLabel()，与旁侧文字徽标朗读一致。
+    Icon(icon, contentDescription = statusLabel(status), Modifier.size(18.dp), tint = tint)
 }
 
 /** i18n：状态徽标文案（@Composable，经 stringResource 按当前语言取词）。 */

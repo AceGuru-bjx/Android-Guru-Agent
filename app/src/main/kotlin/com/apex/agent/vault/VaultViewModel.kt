@@ -3,6 +3,7 @@ package com.apex.agent.vault
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,7 +51,7 @@ class VaultViewModel @Inject constructor(
                 if (conflict) { _event.value = VaultEvent.LABEL_EXISTS; return }
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val entry = if (editingId != null) {
                 val existing = repository.get(editingId)
                 if (existing == null) {
@@ -80,7 +81,9 @@ class VaultViewModel @Inject constructor(
 
     /** 删除条目（UI 已二次确认后调用）。 */
     fun deleteEntry(id: String) {
-        viewModelScope.launch {
+        // repository 内部经 EncryptedSharedPreferences commit() 同步落盘，
+        // 必须离开主线程，否则 StrictMode disk violation / 主线程卡顿（UX 审查批次）
+        viewModelScope.launch(Dispatchers.IO) {
             val deleted = repository.delete(id)
             _event.value = if (deleted) VaultEvent.DELETED else VaultEvent.ERROR
         }

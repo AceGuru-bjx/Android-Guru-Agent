@@ -47,6 +47,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
 import com.apex.agent.core.tools.mcp.McpServerCatalog
 import com.apex.agent.core.tools.marketplace.ClawHubSource
@@ -115,11 +116,14 @@ internal fun BrowseSkillsTab(state: MarketUiState, viewModel: MarketViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // ── 仓库源切换：本地技能 ⇄ ClawHub 技能仓库 ──
+        // ── 仓库源切换：本地技能 ⇄ 官方仓库 ⇄ ClawHub 技能仓库 ──
         SkillSourceChips(state, viewModel)
 
         if (state.skillSource == SkillRepoSource.CLAWHUB) {
             ClawHubSection(state, viewModel)
+        } else if (state.skillSource == SkillRepoSource.HUB) {
+            // 官方技能仓库（apex-skill-hub）：内置瘦身后迁出的技能目录，一键直装
+            HubSkillSection(state, viewModel)
         } else {
             Row(
                 modifier = Modifier
@@ -673,6 +677,17 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
         uri?.let { viewModel.importMcpConfigFromFile(it) }
     }
 
+    // 官方 MCP 仓库（apex-mcp-hub）：目录 + 当前分级过滤
+    val hubState by viewModel.hub.uiState.collectAsStateWithLifecycle()
+    val tierScope = state.tier.name.lowercase()
+    val hubMcps = hubState.mcps.filter { it.visibleToScope(tierScope) }
+
+    LaunchedEffect(Unit) { viewModel.hub.loadMcpServers() }
+
+    // mcp.so 社区目录（首屏自动加载；分页「加载更多」）
+    val mcpSoState by viewModel.mcpSo.uiState.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { viewModel.mcpSo.loadFirst() }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -680,6 +695,125 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
     ) {
         item {
             MarketHeader(stringResource(R.string.market_mcp_header))
+        }
+        // ═══ 官方 MCP 仓库（安装 → 配置 → 启动的市场闭环）═══
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MarketSectionTitle(stringResource(R.string.market_hub_mcp_header))
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { viewModel.hub.loadMcpServers(force = true) },
+                    enabled = !hubState.mcpsLoading
+                ) {
+                    Text(
+                        if (hubState.mcpsLoading) stringResource(R.string.market_loading)
+                        else stringResource(R.string.market_action_refresh),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+        hubState.mcpsError?.let { error ->
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(R.string.market_load_failed_with_reason, error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    TextButton(
+                        onClick = { viewModel.hub.loadMcpServers(force = true) },
+                        enabled = !hubState.mcpsLoading
+                    ) { Text(stringResource(R.string.market_action_retry)) }
+                }
+            }
+        }
+        if (hubState.mcpsLoading && hubMcps.isEmpty()) {
+            item { MarketHint(stringResource(R.string.market_hub_mcp_loading)) }
+        }
+        items(hubMcps, key = { "hub-" + it.name }) { entry ->
+            HubMcpCatalogCard(entry, state, hubState, viewModel)
+        }
+        // ═══ mcp.so 社区目录（安装 → 配置 → 启动同一闭环，社区长尾源）═══
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MarketSectionTitle(stringResource(R.string.market_mcpso_header))
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { viewModel.mcpSo.loadFirst(force = true) },
+                    enabled = !mcpSoState.loading
+                ) {
+                    Text(
+                        if (mcpSoState.loading) stringResource(R.string.market_loading)
+                        else stringResource(R.string.market_action_refresh),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+        mcpSoState.error?.let { error ->
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(R.string.market_load_failed_with_reason, error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    TextButton(
+                        onClick = { viewModel.mcpSo.loadFirst(force = true) },
+                        enabled = !mcpSoState.loading
+                    ) { Text(stringResource(R.string.market_action_retry)) }
+                }
+            }
+        }
+        if (mcpSoState.loading && mcpSoState.servers.isEmpty()) {
+            item { MarketHint(stringResource(R.string.market_mcpso_loading)) }
+        }
+        items(mcpSoState.servers, key = { it.key }) { entry ->
+            McpSoCard(
+                entry = entry,
+                installed = state.mcps.any { it.name == entry.name },
+                installing = mcpSoState.installingSlug == entry.slug,
+                installBusy = mcpSoState.installingSlug != null,
+                onInstall = { viewModel.mcpSo.installServer(entry) }
+            )
+        }
+        item {
+            McpSoLoadMoreRow(
+                loadingMore = mcpSoState.loadingMore,
+                hasMore = mcpSoState.hasMore,
+                enabled = mcpSoState.servers.isNotEmpty(),
+                onLoadMore = { viewModel.mcpSo.loadMore() }
+            )
+        }
+        // ═══ 当前工位已配置服务器（配置 / 启动 / 停止 —— 市场内完成）═══
+        if (state.mcps.isNotEmpty()) {
+            item {
+                MarketSectionTitle(
+                    stringResource(R.string.market_mcp_configured_header, state.mcps.size)
+                )
+            }
+            items(state.mcps, key = { "cfg-" + it.name }) { server ->
+                ConfiguredMcpCard(server, state, viewModel)
+            }
         }
         // #173 逆向 MCP Host：手机作为 MCP Server（外部 AI 接入）——与下方
         //「添加工具源」卡片方向互补（接出 ↔ 接入），同页认知聚合。
@@ -789,283 +923,6 @@ internal fun BrowseMcpTab(state: MarketUiState, viewModel: MarketViewModel) {
     }
 }
 
-/**
- * #205 精选目录头部卡片：标题 + 条数 + 分类 chips（横向滚动）。
- *
- * 条目本身由调用方 LazyColumn 的 items 逐条渲染（懒加载友好）。
- * #206：条数显示**过滤后**的可见数（旧实现显示总数，分级/分类过滤后误导）；
- * chips 按目录声明的 [McpServerCatalog.CATEGORY_ORDER] 排序。
- */
-@Composable
-private fun McpCatalogHeader(state: MarketUiState, viewModel: MarketViewModel) {
-    androidx.compose.material3.Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = stringResource(R.string.market_mcp_catalog_header),
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    // #206 修复：可见数（分级 + 分类过滤后），不是资产总数。
-                    text = stringResource(
-                        R.string.market_mcp_catalog_count,
-                        viewModel.visibleCatalog(state).size
-                    ),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Text(
-                text = stringResource(R.string.market_mcp_catalog_desc),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-            ) {
-                FilterChip(
-                    selected = state.mcpCatalogCategory == null,
-                    onClick = { viewModel.selectCatalogCategory(null) },
-                    label = { Text(stringResource(R.string.market_mcp_catalog_cat_all)) }
-                )
-                // 只显示当前分级下有条目的分类（避免死 chip），按目录声明的
-                // 分类顺序渲染（旧实现按文件名字母序）。
-                val tier = state.tier.name.lowercase()
-                state.mcpCatalog
-                    .filter { it.visibleToTier(tier) }
-                    .groupBy { it.category }
-                    .toSortedMap(compareBy { McpServerCatalog.CATEGORY_ORDER.indexOf(it) })
-                    .forEach { (category, _) ->
-                        FilterChip(
-                            selected = state.mcpCatalogCategory == category,
-                            onClick = { viewModel.selectCatalogCategory(category) },
-                            label = { Text(catalogCategoryLabel(category)) }
-                        )
-                    }
-            }
-        }
-    }
-}
-
-/** 当前 UI 语言是否中文（条目双语简介的取词依据）。 */
-@Composable
-private fun isZhLanguage(): Boolean =
-    androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "zh"
-
-/** 目录分类 → 本地化标签。 */
-@Composable
-private fun catalogCategoryLabel(category: String): String {
-    val res = when (category) {
-        "official" -> R.string.market_mcp_catalog_cat_official
-        "web-search" -> R.string.market_mcp_catalog_cat_search
-        "browser" -> R.string.market_mcp_catalog_cat_browser
-        "database" -> R.string.market_mcp_catalog_cat_database
-        "git" -> R.string.market_mcp_catalog_cat_git
-        "cloud" -> R.string.market_mcp_catalog_cat_cloud
-        "observability" -> R.string.market_mcp_catalog_cat_observability
-        "docs" -> R.string.market_mcp_catalog_cat_docs
-        "productivity" -> R.string.market_mcp_catalog_cat_productivity
-        "desktop" -> R.string.market_mcp_catalog_cat_desktop
-        "finance" -> R.string.market_mcp_catalog_cat_finance
-        "design" -> R.string.market_mcp_catalog_cat_design
-        "communication" -> R.string.market_mcp_catalog_cat_communication
-        "location" -> R.string.market_mcp_catalog_cat_location
-        "data" -> R.string.market_mcp_catalog_cat_data
-        "remote" -> R.string.market_mcp_catalog_cat_remote
-        else -> return category
-    }
-    return stringResource(res)
-}
-
-/**
- * #205 目录条目卡片：名称 + 风险/运行时/传输徽标 + 双语简介 + 安装按钮。
- */
-@Composable
-private fun McpCatalogEntryCard(
-    entry: McpServerCatalog.McpCatalogEntry,
-    installed: Boolean,
-    onInstall: () -> Unit
-) {
-    val zh = isZhLanguage()
-    androidx.compose.material3.Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = entry.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                // 风险徽标（high 红 / medium 橙 / low 绿）
-                val (riskLabel, riskColor) = when (entry.risk) {
-                    "high" -> R.string.market_mcp_catalog_risk_high to MaterialTheme.colorScheme.error
-                    "medium" -> R.string.market_mcp_catalog_risk_medium to MaterialTheme.colorScheme.tertiary
-                    else -> R.string.market_mcp_catalog_risk_low to MaterialTheme.colorScheme.primary
-                }
-                Text(
-                    text = stringResource(riskLabel),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = riskColor,
-                    modifier = Modifier.padding(horizontal = 6.dp)
-                )
-                if (installed) {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = stringResource(R.string.market_mcp_catalog_installed),
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-            Text(
-                text = entry.descriptionFor(zh),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp)
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(top = 6.dp)
-            ) {
-                Text(
-                    text = listOfNotNull(
-                        entry.transport.name,
-                        entry.runtime,
-                        if (entry.envSchema.any { it.required })
-                            stringResource(R.string.market_mcp_catalog_needs_key) else null
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = onInstall, enabled = !installed) {
-                    Text(
-                        if (installed) stringResource(R.string.market_mcp_catalog_installed)
-                        else stringResource(R.string.market_mcp_catalog_install)
-                    )
-                }
-            }
-            entry.notes?.let { notes ->
-                Text(
-                    text = notes,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-}
-
-/**
- * #205 目录安装的环境变量引导表单：逐个渲染 envSchema（必填* + 描述），
- * 高风险条目加警示行。确认时校验必填项，缺的键逐个点名。
- */
-@Composable
-private fun McpCatalogEnvDialog(
-    entry: McpServerCatalog.McpCatalogEntry,
-    onDismiss: () -> Unit,
-    onInstall: (Map<String, String>) -> Unit
-) {
-    var values by remember(entry.id) { mutableStateOf(mapOf<String, String>()) }
-    var missingKeys by remember(entry.id) { mutableStateOf<List<String>>(emptyList()) }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                stringResource(R.string.market_mcp_catalog_env_title, entry.name),
-                style = MaterialTheme.typography.titleMedium
-            )
-        },
-        text = {
-            Column {
-                Text(
-                    text = entry.descriptionFor(isZhLanguage()),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (entry.risk == "high") {
-                    Text(
-                        text = stringResource(R.string.market_mcp_catalog_env_high_risk),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-                if (missingKeys.isNotEmpty()) {
-                    Text(
-                        text = stringResource(R.string.market_mcp_catalog_missing_env, missingKeys.joinToString("、")),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.size(8.dp))
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 320.dp)
-                ) {
-                    items(entry.envSchema.size) { index ->
-                        val envVar = entry.envSchema[index]
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            OutlinedTextField(
-                                value = values[envVar.key].orEmpty(),
-                                onValueChange = { values = values + (envVar.key to it) },
-                                isError = envVar.required && missingKeys.contains(envVar.key),
-                                label = {
-                                    Text(
-                                        if (envVar.required) "${envVar.key} *"
-                                        else envVar.key
-                                    )
-                                },
-                                supportingText = {
-                                    if (envVar.description.isNotBlank()) {
-                                        Text(envVar.description, style = MaterialTheme.typography.labelSmall)
-                                    }
-                                },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val missing = entry.requiredEnv()
-                        .filter { values[it.key].isNullOrBlank() }
-                        .map { it.key }
-                    if (missing.isEmpty()) {
-                        onInstall(values.filterValues { it.isNotBlank() })
-                    } else {
-                        // 必填缺失：弹窗内联点名（不关弹窗、保留已填内容）。
-                        missingKeys = missing
-                    }
-                }
-            ) {
-                Text(stringResource(R.string.market_mcp_catalog_install))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.market_action_cancel))
-            }
-        }
-    )
-}
 
 // ═══ 市场 · 连接器 ═══
 

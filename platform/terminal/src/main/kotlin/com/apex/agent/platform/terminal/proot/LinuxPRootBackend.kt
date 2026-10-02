@@ -101,9 +101,11 @@ class LinuxPRootBackend(
         val binaryPath = binaryProvider.locate().getOrElse { e ->
             return Result.failure(e)
         }
-        binaryProvider.verify(binaryPath).getOrElse { e ->
+        // T91（D5）：verify 结果不再只作门禁 —— 能力集（双探针实测）参与 argv
+        // 决策（目标 proot 不认的选项自动省略，根除版本静默差异）。
+        val verifiedInfo = binaryProvider.verify(binaryPath).getOrElse { e ->
             return Result.failure(e)
-        } // verify 仅为校验门禁（存在性/ABI/可执行），结果信息在 availability() 中上报
+        }
 
         // 2. rootfs
         val rootfs: RootfsDescriptor = rootfsProvider.current()
@@ -151,9 +153,13 @@ class LinuxPRootBackend(
             killOnExit = true
         )
 
-        // 6. argv（PRootCommandBuilder：request.binds + workspace bind）
+        // 6. argv（PRootCommandBuilder：request.binds + workspace bind；T91（D5）：
+        //    按双探针实测能力集自适应 —— 捆绑 Termux 5.1.107 发 --kill-on-exit/--，
+        //    上游 5.1.0 两者皆省，Debian 5.4 只发 --kill-on-exit）
         val workspaceHostDir = AbsolutePath(workspaceDir.absolutePath)
-        val command = commandBuilder.build(launch, binaryPath, rootfsPath, workspaceHostDir)
+        val command = commandBuilder.build(
+            launch, binaryPath, rootfsPath, workspaceHostDir, capabilities = verifiedInfo.capabilities
+        )
         val argv = listOf(command.executable.value) + command.arguments
 
         // 7. host env（G4：guest 变量绝不在其中）

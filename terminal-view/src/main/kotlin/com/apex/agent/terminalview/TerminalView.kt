@@ -42,7 +42,9 @@ import kotlin.math.abs
  *  - 长按：起选 → 拖选扩选 → 抬手弹上下文菜单（复制/粘贴/全选）；
  *  - 滚动：单指位移 → 行滚动；甩动 → OverScroller 惯性（`verticalScrollBounce`
  *    开时边界有回弹衰减）；键入自动跳底（Termux `scrollForNewInput`）；
- *  - 捏合：字号 ±（1.25/0.8 阈值防抖）；
+ *  - 捏合：字号 ±（1.25/0.8 阈值防抖）—— **T91 起默认关闭**
+ *    （[TerminalViewSettings.pinchZoomEnabled]=false；捏合事件在 View 层被短路，
+ *    字号调节走宿主设置页 Slider）；
  *  - 双指快击：鼠标模式右键；
  *  - 硬件键：Ctrl+字母 → 控制字节；Alt+键 → ESC 前缀；方向/F 键 → TerminalKey。
  *
@@ -259,14 +261,28 @@ class TerminalView @JvmOverloads constructor(
         invalidate()
     }
 
-    /** 聚焦并拉起输入法（进入终端即敲 —— 部分设备 requestFocus 不弹 IME 的补招）。 */
+    /** 聚焦并拉起输入法（进入终端即敲 —— 部分设备 requestFocus 不弹 IME 的补招）。
+     *
+     * ★ 修复（键盘拉不起来）：旧实现用 SHOW_IMPLICIT —— 该标志语义是
+     * 「隐式请求」（窗口焦点变化等被动场景），部分 ROM/输入法（尤其中文 IME）
+     * 会直接忽略。改用 flags=0（显式用户请求），绝大多数 IME 都必须响应；
+     * 首次失败后再用 SHOW_FORCED 兜一次（极端 ROM）。
+     */
     fun requestFocusAndShowKeyboard() {
         runCatching { requestFocus() }
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        if (imm == null) return
         runCatching {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            val shown = imm.showSoftInput(this, 0)
+            if (!shown) imm.showSoftInput(this, InputMethodManager.SHOW_FORCED)
         }
     }
+
+    /** ★ 修复（点按不弹键盘）：系统把「可编辑文本视图」识别为 tap-to-type 的
+     * 通道就是 onCheckIsTextEditor —— 不覆写时点击 View 不会自动聚焦拉 IME
+     *（旧实现全靠 handleTap 显式调 requestFocusAndShowKeyboard，链路一旦
+     * 被 peek/scroll 手势拦截就断）。覆写后 tap-to-type 是系统级保障。 */
+    override fun onCheckIsTextEditor(): Boolean = true
 
     /** 隐藏输入法（Back 键被 onKeyPreIme 拦截时用）。 */
     fun hideKeyboard() {
@@ -489,6 +505,16 @@ class TerminalView @JvmOverloads constructor(
         super.onWindowFocusChanged(hasWindowFocus)
         scheduleBlinkIfNeeded()
         client?.onTerminalFocus(hasWindowFocus)
+        // ★ T89 输入修复：窗口焦点恢复且本 View 持焦点时重拉 IME（Activity
+        // 切回/弹层关闭后输入法被系统收走的经典场景；IME 仅在窗口有焦点时
+        // 响应 show 请求）。仅在 IME 之前处于激活态时恢复 —— 不抢用户主动
+        // 收起的键盘。
+        if (hasWindowFocus && isFocused) {
+            runCatching {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                if (imm?.isAcceptingText == true) imm.showSoftInput(this, 0)
+            }
+        }
         invalidate()
     }
 
@@ -499,6 +525,13 @@ class TerminalView @JvmOverloads constructor(
         lastTouchX = event.x
         lastTouchY = event.y
         val sample = toSample(event) ?: return super.onTouchEvent(event)
+        // T90：捏合累子手势结束复位 —— 旧行为残留 1.05..1.24 的累积量带到下一次
+        // 小捏合，凭空触发 ±1sp 步进（「缩放一坨」的直接根源之一）。任何手势
+        // 结束/降指（UP/CANCEL/POINTER_UP）都视为捏合会话终结。
+        when (event.actionMasked) {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP ->
+                pinchScaleAccum = 1f
+        }
         val decisions = gestureModel.feed(sample)
         for (d in decisions) handleGesture(d)
         scheduleGestureTimers()
@@ -573,7 +606,9 @@ class TerminalView @JvmOverloads constructor(
             is TerminalGestureModel.GestureEvent.Fling ->
                 startScrollAnimation(event.velocityYPx)
             is TerminalGestureModel.GestureEvent.Pinch ->
-                handlePinch(event.scale)
+                // T91（D1）：设置未显式开启时在 View 层短路 —— 捏合手势完全沉寂
+                //（不进累子、不驱动 resizeTerminal），避免任何残留路径驱动字号。
+                if (settings.pinchZoomEnabled) handlePinch(event.scale)
             is TerminalGestureModel.GestureEvent.TapSecondFinger ->
                 handleSecondFingerTap(event.x, event.y)
         }
@@ -681,6 +716,17 @@ class TerminalView @JvmOverloads constructor(
         client?.onTerminalFontSizeChanged(next)
         invalidate()
     }
+
+    /** 当前网格尺寸（rows×cols；未真实布局时 null —— 宿主据此避免把 2×4 的
+     * 占位网格误报给 PTY）。会话切换重握手用（T90：后台创建的会话从未收到
+     * resize，一直以 24×80 悬空 → 80 列行在窄屏右裁 + 短网格浮在长视口里）。 */
+    fun currentGridSize(): TerminalGridSize? {
+        if (width <= 0 || height <= 0 || !isLaidOut) return null
+        return TerminalGridSize(grid.viewRows, grid.viewCols)
+    }
+
+    /** 网格尺寸快照（[currentGridSize] 返回值）。 */
+    data class TerminalGridSize(val rows: Int, val cols: Int)
 
     private fun handleSecondFingerTap(x: Float, y: Float) {
         val snap = snapshot ?: return
@@ -1023,14 +1069,8 @@ class TerminalView @JvmOverloads constructor(
         return TerminalInputConnection(this)
     }
 
-    /** IME 提交文本（`commitText` 路径）。 */
-    fun handleImeText(text: String) {
-        if (text.isEmpty()) return
-        client?.onTerminalWrite(text.replace('\n', '\r'))
-        onUserTypedSomething()
-    }
-
-    /** IME 组合文本直通（Termux 语义 —— 见 TerminalInputConnection KDoc）。 */
+    /** IME 组合/提交文本（TerminalInputConnection 差分桥的落点；\n 已在桥侧
+     *  归一为 \r —— 此处原样直通 RAW 写入）。 */
     fun handleImeCompose(text: String) {
         if (text.isEmpty()) return
         client?.onTerminalWrite(text)

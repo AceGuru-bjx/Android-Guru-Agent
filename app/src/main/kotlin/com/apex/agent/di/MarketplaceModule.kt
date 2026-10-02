@@ -2,6 +2,8 @@ package com.apex.agent.di
 
 import android.content.Context
 import com.apex.agent.core.tools.marketplace.ClawHubSource
+import com.apex.agent.core.tools.marketplace.HubSource
+import com.apex.agent.core.tools.marketplace.McpSoSource
 import com.apex.agent.core.tools.marketplace.ModelScopeSource
 import com.apex.agent.github.GithubTokenManager
 import dagger.Module
@@ -37,5 +39,29 @@ object MarketplaceModule {
     @Singleton
     fun provideClawHubSource(httpClient: OkHttpClient): ClawHubSource {
         return ClawHubSource(httpClient)
+    }
+
+    /**
+     * 官方 Hub 仓库源（apex-skill-hub + apex-mcp-hub 双目录）：
+     * - 技能：62 个生活/通用技能（APK 内置瘦身后迁出），市场「官方仓库」直装；
+     * - MCP：沙箱/远端服务器目录，市场「官方 MCP 仓库」安装 → 配置 → 启动。
+     * raw.githubusercontent.com 只读，无需认证。
+     */
+    @Provides
+    @Singleton
+    fun provideHubSource(httpClient: OkHttpClient): HubSource {
+        return HubSource(httpClient)
+    }
+
+    /**
+     * mcp.so 社区目录源（1.5 万+ MCP 服务器的聚合长尾目录）：
+     * 市场 MCP 页签的社区源 —— 目录浏览（分页）+ 详情页 mcpServers
+     * 配置一键安装（STDIO 自动路由 PRoot 沙箱）。HTML 路由公开只读，
+     * 无需认证；任何失败折叠为 Result.failure（错误契约同 Hub 源）。
+     */
+    @Provides
+    @Singleton
+    fun provideMcpSoSource(httpClient: OkHttpClient): McpSoSource {
+        return McpSoSource(httpClient)
     }
 }

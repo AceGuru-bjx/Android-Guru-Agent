@@ -52,20 +52,31 @@ data class TerminalViewSettings(
     val scrollbarTrackColor: Int? = null,
     /** 滚动条滑块色（null = 自动按明暗推导）。 */
     val scrollbarThumbColor: Int? = null,
-    /** 滚动条宽度（px；View 按密度 ×3 推导默认）。 */
+    /** 滚动条宽度（px；View 按密度 ×2 推导默认 —— T90 细化）。 */
     val scrollbarWidthPx: Int = -1,
     /** 上/下边缘渐隐高度（px；<0 = View 推导，0 = 关闭）。 */
     val fadeEdgePx: Int = -1,
-    /** 非贴底时绘制「新输出」指示箭头。 */
-    val showNewOutputIndicator: Boolean = true,
+    /** 【废弃 T90】画布内「新输出」箭头曾与宿主 JumpToLatestPill 双层叠遮输出，
+     * 绘制已移除；字段保留仅兼容宿主拷贝语义（默认 false）。 */
+    val showNewOutputIndicator: Boolean = false,
 
     // ─── 手势 / 鼠标 ───
     /** 滚动越界回弹（OverScroller 弹性效果）。 */
     val verticalScrollBounce: Boolean = true,
     /** 触摸滚动是否经过鼠标编码透传（mouseMode 开时单指拖动也报 MOTION；Termux off）。 */
     val mousePassthrough: Boolean = false,
-    /** 双指捏合调字号开关。 */
-    val pinchZoomEnabled: Boolean = true,
+    /**
+     * 双指捏合调字号开关 —— **T91（D1）默认关闭**。
+     *
+     * 关闭理由（用户反馈「缩放一坨」的定性收敛）：
+     *  - 捏合与双指拖动/鼠标模式的手势上下文天然冲突，T90 修的
+     *    pinchScaleAccum 残积只是症状层；默认关闭后该路径成为死代码，
+     *    稳定性上限拉满；
+     *  - 字号调节已有更受控的入口 —— 宿主设置页 Slider
+     *    （TerminalSettingsSheet → ViewModel.setFontSize，8..24sp 链路）；
+     *  - 宿主如确要恢复捏合，构造 settings 时显式 `copy(pinchZoomEnabled = true)`。
+     */
+    val pinchZoomEnabled: Boolean = false,
     /** 双击选词开关（关闭后双击=单击语义）。 */
     val doubleTapSelectsWord: Boolean = true,
 
