@@ -75,6 +75,28 @@ sealed interface SlashCommand {
     }
 
     /**
+     * `/logic:<mode>` — Coding 屏思考逻辑切换（v1.5 双引擎）。
+     *
+     * 与其他四类命令的本质差异：**本地路由，不生成 agentPrompt**——
+     * 切换是 ViewModel 层状态操作（持久化 + 双引擎门面路由），不是
+     * 提交给 LLM 的任务。因此 Coding 屏在通用路由**之前**截获执行；
+     * Agent 屏无双引擎，走通用路由后只展示引导性系统消息（不执行、
+     * 不转发原文给引擎，防止 `/logic:foo` 被当作自由文本误执行）。
+     *
+     * id 解析交给 [com.apex.agent.core.code.standard.StandardLogicMode.fromName]
+     * （容错别名：standard/std → 标准；deep_dive/deep/apex → 深潜；
+     * 未知 id → 引导消息由 VM 层发出）。
+     */
+    data class Logic(
+        override val id: String,
+        override val args: Map<String, String> = emptyMap(),
+        override val userExtra: String = ""
+    ) : SlashCommand {
+        override val type: String = TYPE
+        companion object { const val TYPE = "logic" }
+    }
+
+    /**
      * Fallback for anything that starts with `/` but does not match the
      * `/<knownType>:<id>` shape. The raw input is preserved verbatim so the
      * agent can still see exactly what the user typed.
@@ -91,7 +113,7 @@ sealed interface SlashCommand {
     companion object {
         /** All supported command type prefixes, in slash-menu order. */
         val SUPPORTED_TYPES: List<String> = listOf(
-            Skill.TYPE, Mcp.TYPE, Connector.TYPE, Plugin.TYPE
+            Skill.TYPE, Mcp.TYPE, Connector.TYPE, Plugin.TYPE, Logic.TYPE
         )
 
         /**
@@ -146,6 +168,7 @@ object SlashCommandParser {
             SlashCommand.Mcp.TYPE       -> SlashCommand.Mcp(id, kvArgs, userExtra)
             SlashCommand.Connector.TYPE -> SlashCommand.Connector(id, kvArgs, userExtra)
             SlashCommand.Plugin.TYPE    -> SlashCommand.Plugin(id, kvArgs, userExtra)
+            SlashCommand.Logic.TYPE     -> SlashCommand.Logic(id, kvArgs, userExtra)
             else                        -> SlashCommand.Unknown(raw)
         }
     }

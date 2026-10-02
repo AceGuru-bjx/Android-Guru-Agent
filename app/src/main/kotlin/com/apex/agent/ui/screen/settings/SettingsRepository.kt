@@ -446,6 +446,13 @@ data class AgentSettings(
      */
     val forceDeepThinking: Boolean = false,
     /**
+     * v1.5 Coding 屏思考逻辑（双引擎路由）："" / "deep_dive" = 深潜
+     * （自研七档思考，v1.2 既有行为）；"standard" = 标准（业界标准 Agent
+     * 任务循环：画像/权限门/子代理/压缩）。Coding 屏右上角选择器写入，
+     * CodeViewModel init 恢复（DualLogicCodeEngine.switchLogic 运行时路由）。
+     */
+    val codeThinkingLogic: String = "",
+    /**
      * v1.2 Coding 模式思考档位（持久化，与聊天页 thinkingLevelOverride 互不
      * 干扰——两模式各自记忆）："" = 未设置（回退 STANDARD）；"auto" = AUTO
      * 自适应；其余 = ThinkingLevel 枚举名小写

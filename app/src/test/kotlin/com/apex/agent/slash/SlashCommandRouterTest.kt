@@ -17,6 +17,9 @@ import org.junit.Test
  *   disconnected context it short-circuits to `requestGithubConnect = true`
  *   and an empty agent prompt.
  * - Unknown commands forward the raw text verbatim.
+ * - `/logic:<mode>`（v1.5 双思考逻辑）是本地路由命令：只产引导性系统消息
+ *   且 agentPrompt 恒为空（Coding 屏在路由前截获执行；Agent 屏走到此处
+ *   只展示引导不进引擎）。
  */
 class SlashCommandRouterTest {
 
@@ -185,6 +188,49 @@ class SlashCommandRouterTest {
         assertEquals("", route.agentPrompt)
         assertTrue(route.systemMessage.contains("postgres"))
         assertTrue(route.systemMessage.contains("市场"))
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // /logic — v1.5 本地路由命令（双思考逻辑切换）
+    // ═══════════════════════════════════════════════════════════
+
+    @Test
+    fun `Logic route produces guidance message and never an agent prompt`() {
+        // Coding 屏在路由前截获执行；到达路由层的只有 Agent 屏——必须
+        // 空转（不生成 agentPrompt），防止命令原文被当自由文本误执行。
+        val cmd = SlashCommand.Logic(id = "standard")
+        val route = SlashCommandRouter.route(cmd)
+
+        assertEquals("", route.agentPrompt)
+        assertFalse(route.requestGithubConnect)
+        assertTrue(route.systemMessage.contains("Coding"))
+        // 引导消息必须给出可用的命令形态，用户照抄即可走通。
+        assertTrue(route.systemMessage.contains("/logic:standard"))
+        assertTrue(route.systemMessage.contains("/logic:deep_dive"))
+    }
+
+    @Test
+    fun `Logic route ignores unknown mode id at routing layer`() {
+        // 未知 id（/logic:foo）在路由层同样空转——id 合法性校验属于
+        // Coding 屏 VM 的截获逻辑（fromName → null → 引导消息），路由层
+        // 不重复判定，保持单一职责。
+        val cmd = SlashCommand.Logic(id = "foo")
+        val route = SlashCommandRouter.route(cmd)
+
+        assertEquals("", route.agentPrompt)
+        assertTrue(route.systemMessage.isNotEmpty())
+    }
+
+    @Test
+    fun `Logic route carries no source metadata for pipeline badges`() {
+        // routeKind/sourceName 是流水线横幅与来源徽章的数据源；本地路由
+        // 命令不产生工具调用，不应携带这些元数据。
+        val cmd = SlashCommand.Logic(id = "deep_dive")
+        val route = SlashCommandRouter.route(cmd)
+
+        assertEquals(null, route.routeKind)
+        assertEquals(null, route.sourceName)
+        assertEquals(null, route.skillName)
     }
 
     // ═══════════════════════════════════════════════════════════
