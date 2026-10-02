@@ -1,0 +1,78 @@
+name: Guard Rails
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 轻量守护栏：快（每个 job <30s，无编译）、窄（只查各自领域）、可解释
+# （失败输出可执行的修复指引）。与 ci.yml（编译）/ quality-gate.yml（结构
+# 门禁）互补，覆盖四类历史踩过坑的维度：
+#   • i18n String Mirror   —— values/values-zh 键集 1:1 + 占位符一致
+#     （#291 手工验 528 键的教训：漏键只能等用户切语言才炸）
+#   • Market Catalog        —— assets/mcp_catalog 契约校验（运行时
+#     validateEntries 九条规则前移到 CI，坏目录到不了 APK）
+#   • Secrets Scan          —— GitHub/AWS/Google/Slack/OpenAI/私钥指纹
+#     （公开仓库凭证裸奔是 P0 事故）
+#   • Commit Convention     —— `类型(范围): 摘要 —— 关键词` 纪律
+#     （AGENTS.md 要求；类型前缀强制，关键词尾段建议）
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, 'feat/**', 'refactor/**', 'fix/**']
+  pull_request:
+    branches: [main, 'feat/**']
+
+concurrency:
+  group: guard-rails-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  i18n-mirror:
+    name: i18n String Mirror (values vs values-zh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: String mirror check (key parity + placeholder parity)
+        run: python3 scripts/check_string_mirror.py
+
+  catalog-integrity:
+    name: Market Catalog Integrity (mcp_catalog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: mcp_catalog contract check (schema / enum / global id uniqueness)
+        run: python3 scripts/check_mcp_catalog.py
+
+  secrets-scan:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git ls-files 需完整索引
+      - name: Credential fingerprint scan (GitHub/AWS/Google/Slack/OpenAI/keys)
+        run: python3 scripts/check_secrets.py
+
+  commit-convention:
+    name: Commit Message Convention
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # PR 事件 checkout 真实 head（非 merge ref）—— base..head 恰为 PR 提交
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Commit message convention check (type(scope): subject —— keywords)
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          BASE="${PR_BASE:-$PUSH_BEFORE}"
+          if [ -z "$BASE" ]; then BASE=$(git rev-parse HEAD~1); fi
+          echo "range: ${BASE}..$(git rev-parse HEAD)"
+          python3 scripts/check_commit_messages.py "$BASE" HEAD
