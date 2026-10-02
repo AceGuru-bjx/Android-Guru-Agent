@@ -37,6 +37,10 @@ sealed class GestureAction {
     data class DirectionalScroll(val direction: String, val durationMs: Int = 300) : GestureAction()
     data class Back(val x: Int = 0, val y: Int = 0) : GestureAction()
     data class Home(val x: Int = 0, val y: Int = 0) : GestureAction()
+    /** #240：展开通知栏（a11y GLOBAL_ACTION_NOTIFICATIONS / root cmd statusbar）。 */
+    data object OpenNotifications : GestureAction()
+    /** #240：收起通知栏（a11y BACK 收合 / root cmd statusbar collapse）。 */
+    data object CloseNotifications : GestureAction()
 }
 
 /**
@@ -198,6 +202,65 @@ class UiSwipeTool(
 }
 
 /**
+ * 通知栏工具（Issue #240 的 LLM 面）—— `UiAction.OpenNotifications` 的
+ * root 误映射（`input keyevent 26` = 电源键熄屏）已在 DefaultPrivilegeManager
+ * 修正为 `cmd statusbar expand-notifications`，但该动作此前**没有任何
+ * LLM 工具会构造**——修正后仍是死代码。本工具补齐入口：open/close 语义，
+ * a11y 就绪走 GLOBAL_ACTION（无障碍通道从未受 #240 影响），否则 shell
+ * `cmd statusbar`（API 24+，root/sh 权限取决于 shellExecutor 通道）。
+ */
+class UiNotificationsTool(
+    private val shellExecutor: suspend (String) -> String,
+    private val uiProvider: UiInteractionProvider? = null
+) : AgentTool {
+
+    override val id = "ui_notifications"
+    override val name = "Open/Close Notification Shade"
+    override val description = """
+        Expand or collapse the notification shade (system notification panel).
+        Use "open" to pull down the shade and read/interact with notifications,
+        "close" to dismiss it back up.
+
+        Examples:
+        - {} - open the notification shade (default)
+        - {"action": "close"} - collapse the shade
+    """.trimIndent()
+
+    override val parametersSchema = """
+        {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["open", "close"], "description": "open = expand shade (default), close = collapse shade"}
+            },
+            "required": []
+        }
+    """.trimIndent()
+
+    override suspend fun execute(arguments: String): String {
+        val json = Json.parseToJsonElement(arguments).jsonObject
+        val action = json["action"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: "open"
+        if (action != "open" && action != "close") {
+            return "Error: 'action' must be \"open\" or \"close\" (got: $action)"
+        }
+
+        // a11y 语义通道优先（GLOBAL_ACTION_NOTIFICATIONS / BACK 收合）
+        if (uiProvider?.isAvailable == true) {
+            val gesture = if (action == "open") GestureAction.OpenNotifications else GestureAction.CloseNotifications
+            return uiProvider.performGesture(gesture)
+        }
+
+        // shell 回退：cmd statusbar（API 24+）—— 绝不用 keyevent 26（电源键，
+        // #240 的原始事故：要求开通知栏结果熄了屏）。
+        val command = if (action == "open") {
+            "cmd statusbar expand-notifications"
+        } else {
+            "cmd statusbar collapse"
+        }
+        return shellExecutor(command)
+    }
+}
+
+/**
  * UI树读取工具 —— 优先使用 AccessibilityService 结构化树，回退到 uiautomator XML。
  */
 class UiDumpTool(
@@ -270,14 +333,29 @@ class UiDumpTool(
 /**
  * 截图工具
  *
- * @param fallbackScreenshot 可选降级通道：shell `screencap` 失败时的高权限截图
- * （如无障碍 API 30 通道）。签约：入参为保存路径，返回成功消息（非 null）或
- * null（失败）；由宿主注入，缺省保持纯 shell 行为。
+ * Issue #239：新增 [privilegedScreenshot] 通道 —— app 层接线
+ * `PrivilegeManager.takeScreenshot()`（无障碍 API 30+ → root screencap+base64
+ * 回退链）。旧行为恒走 `shellExecutor`（PrivilegeDetector：root > 裸 sh）——
+ * 设备开了无障碍但无 root 时，screencap 在普通应用沙箱里必然 EACCES，
+ * 「开启无障碍 = 截图永远失败」。新顺序：特权链（a11y → root）成功直接落盘；
+ * 失败仍回退 shell（模拟器/调试构建的非特权 screencap 依旧可用），两段
+ * 失败并列上报（可诊断，不互相遮蔽）。
  */
 class ScreenshotTool(
     private val shellExecutor: suspend (String) -> String,
-    private val fallbackScreenshot: (suspend (savePath: String) -> String?)? = null
+    /** #239：特权截图供给；null = 无特权通道（纯 shell 旧行为）。 */
+    private val privilegedScreenshot: (suspend () -> PrivilegedScreenshot)? = null
 ) : AgentTool {
+
+    /**
+     * Issue #239：特权截图通道结果（core 层中立形状 —— app 层从
+     * platform.privilege.ScreenshotResult 适配；模块方向不允许直接依赖）。
+     */
+    data class PrivilegedScreenshot(
+        /** PNG 字节（成功）；null = 失败（见 [error]）。 */
+        val pngBytes: ByteArray?,
+        val error: String?
+    )
 
     override val id = "screenshot"
     override val name = "Take Screenshot"
@@ -304,15 +382,33 @@ class ScreenshotTool(
         val json = Json.parseToJsonElement(arguments).jsonObject
         val path = json["path"]?.jsonPrimitive?.content ?: "/sdcard/Pictures/apex_screen.png"
 
+        // #239：特权链优先 —— a11y（Android 11+）→ root screencap。
+        val privileged = privilegedScreenshot?.invoke()
+        if (privileged?.pngBytes != null) {
+            return try {
+                val out = java.io.File(path)
+                out.parentFile?.mkdirs()
+                out.writeBytes(privileged.pngBytes)
+                "OK: Screenshot saved to $path"
+            } catch (e: Exception) {
+                "Error: screenshot captured but failed to write $path: ${e.message ?: e::class.simpleName}"
+            }
+        }
+
+        // 特权链不可用/失败 → shell 兜底（保留旧行为：模拟器/调试设备上
+        // 非特权 screencap 仍可用；特权链失败时其错误一并上报，可诊断）。
         // Shell-escape the screenshot path — unescaped `;` / `$(...)` / `'` in the path
         // would inject into `screencap -p $path`.
         val result = shellExecutor("screencap -p ${ShellQuote.shellQuote(path)}")
-        if (result.contains("Error") && !result.contains("written")) {
-            // shell screencap 失败（无 root/Shizuku 时 /sdcard 受限）→ 注入的
-            // 高权限通道（如无障碍截图 + 落盘）兜底；未注入或也失败 → 原错误上抛。
-            val fallback = fallbackScreenshot?.invoke(path)
-            if (fallback != null) return fallback
-            return "Error: $result"
+        val shellOk = !(result.contains("Error") && !result.contains("written"))
+        return if (shellOk) {
+            "OK: Screenshot saved to $path"
+        } else if (privileged != null) {
+            // 两段失败并列：特权链根因 + shell 兜底输出（截断防爆屏）。
+            "Error: screenshot failed. Privileged channel (accessibility/root): " +
+                "${privileged.error ?: "unavailable"}. Shell fallback: ${result.take(200)}"
+        } else {
+            "Error: $result"
         }
         return "OK: Screenshot saved to $path"
     }

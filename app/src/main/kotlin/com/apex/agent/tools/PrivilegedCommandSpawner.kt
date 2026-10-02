@@ -1,5 +1,7 @@
 package com.apex.agent.tools
 
+import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.platform.privilege.PrivilegeDetector
 import com.apex.agent.platform.privilege.shizuku.ShizukuCommandExecutor
 import com.apex.agent.platform.privilege.shizuku.ShizukuProcessChannel
@@ -29,6 +31,25 @@ import java.util.concurrent.TimeUnit
 class PrivilegedCommandSpawner : CommandSpawner {
 
     private val localSh = ProcessBuilderSpawner(channel = "local-sh", shell = "/system/bin/sh")
+
+    /** T92（#255）审计日志：terminal.exec 宿主通道选择 —— 一眼可查「这条命令走了 root-su / shizuku / local-sh」。 */
+    private fun auditChannel(channel: String, command: String) {
+        runCatching {
+            AppLogger.instance.info(
+                LogCategory.TOOL,
+                AUDIT_SOURCE,
+                "privilege-chain channel=$channel cmd=${command.logForm()}",
+                "privilege-chain", channel
+            )
+        }
+    }
+
+    /** 命令的日志形态：折叠空白 + 截断（与 PrivilegeDetector 同一纪律）。 */
+    private fun String.logForm(): String {
+        val collapsed = trim().replace(whitespaceRun, " ")
+        return if (collapsed.length <= MAX_LOG_CMD_LEN) collapsed
+        else collapsed.take(MAX_LOG_CMD_LEN) + "..."
+    }
 
     /**
      * 最近一次 [spawn] 实际选中的通道。
@@ -60,6 +81,7 @@ class PrivilegedCommandSpawner : CommandSpawner {
     override fun spawn(request: SpawnRequest): SpawnedCommand {
         val target = resolve()
         active = target
+        auditChannel(target.channel, request.command)
         return target.spawn(request)
     }
 
@@ -116,4 +138,11 @@ class PrivilegedCommandSpawner : CommandSpawner {
 
     private fun shellQuote(path: String): String =
         "'" + path.replace("'", "'\\''") + "'"
+
+    private companion object {
+        /** 审计日志来源标识与命令截断上限（与 PrivilegeDetector 保持一致）。 */
+        internal const val AUDIT_SOURCE = "PrivilegedCommandSpawner"
+        internal const val MAX_LOG_CMD_LEN = 120
+        private val whitespaceRun = Regex("\\s+")
+    }
 }

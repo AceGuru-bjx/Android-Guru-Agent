@@ -202,12 +202,13 @@ class RiskAwareToolGate(
         const val ASK_TIMEOUT_MS = 5 * 60 * 1000L
 
         /** #230：MEDIUM 级也需要确认的**文件改写类**工具 id 集合。
-         * （delete_file 已是 HIGH —— inferRisk 黑名单；此处只补写/编两类。）
-         * 第二轮修正：删掉全仓不存在的幽灵 id（file_write / file_edit），
-         * 补齐 Coding 模式的 code_write / code_edit（否则 Coding 会话的写
-         * 工具游离在确认链之外）。 */
+         * （delete_file 已是 HIGH —— inferRisk 黑名单；此处覆盖写/编两类。）
+         * Issue #230 收尾：补 coding 模式等价面（code_write/code_edit ——
+         * StandardToolSurface 把 write_file/edit_file 映射过去，同一底层行为
+         * 必须同一确认语义；file_write/file_edit 是历史别名防漏。） */
         val FILE_MUTATING_TOOLS = setOf(
-            "write_file", "edit_file", "code_write", "code_edit"
+            "write_file", "edit_file", "file_write", "file_edit",
+            "code_write", "code_edit"
         )
     }
 }

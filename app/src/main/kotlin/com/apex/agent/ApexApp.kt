@@ -26,6 +26,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.drop
 import rikka.shizuku.Shizuku
 import javax.inject.Inject
 
@@ -91,6 +93,10 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
     @Inject
     lateinit var privilegeManager: PrivilegeManager
 
+    /** #236 收尾：设置仓库（agentSettings 流驱动 Keep Alive 服务同步）。 */
+    @Inject
+    lateinit var settingsRepository: com.apex.agent.ui.screen.settings.SettingsRepository
+
     /** 后台启动任务专用 scope（SupervisorJob：单任务失败不殊及兄弟任务）。 */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -137,6 +143,35 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
         // DI 注册）。guest 侧 rootfs 安装后即可 `apexctl <action>` 调用 Android 能力。
         runCatching { guestBridgeService.start() }
             .onFailure { Log.w("ApexAgent", "guest bridge start failed: ${it.message}") }
+
+        // #236 收尾：Keep Alive 服务同步升级为**流驱动** —— 旧接线只有设置页
+        // SwitchRow 一处一次性 apply（备份恢复/导入/其他任何写入路径翻转
+        // keepAlive 时前台服务照跑）。agentSettings 流的 keepAlive 变化统一
+        // 落 CoreServiceGate（toggle 直连 apply 保留 —— 双发幂等：
+        // onStartCommand 为幂等重申；stopService 停态 no-op）。
+        initKeepAliveServiceSync()
+    }
+
+    /**
+     * #236：agentSettings.keepAlive 变化 → CoreServiceGate（start/stopService）。
+     *
+     * drop(1)（初值即当前服务态 —— 启动时不额外拉起，启动权属 MainActivity/
+     * BootReceiver）+ distinctUntilChangedBy keepAlive（仅翻转才接线）。
+     * 订阅失败不阻断 App（runCatching 兜底 + 日志）。
+     */
+    private fun initKeepAliveServiceSync() {
+        appScope.launch {
+            runCatching {
+                settingsRepository.agentSettings
+                    .drop(1)
+                    .distinctUntilChangedBy { it.keepAlive }
+                    .collect { agent ->
+                        com.apex.agent.service.CoreServiceGate.apply(this@ApexApp, agent.keepAlive)
+                    }
+            }.onFailure {
+                Log.w("ApexAgent", "keepAlive service sync failed: ${it.message}")
+            }
+        }
     }
 
     /**
@@ -336,8 +371,9 @@ class ApexApp : Application(), Configuration.Provider, ImageLoaderFactory {
 
     /**
      * #212：Shizuku binder 生命周期 / 授权结果变化时的统一反应。
-     * 1. PrivilegeDetector 的 30s 级别缓存立即失效 —— 终端 ShellStreamSource、
-     *    persistence、shell_execute 工具的通道选择不再按旧状态跑满 TTL；
+     * 1. PrivilegeDetector 的 30s 级别缓存立即失效 —— 终端宿主通道 spawner
+     *    （PrivilegedCommandSpawner）、persistence、shell_execute 工具的
+     *    通道选择不再按旧状态跑满 TTL；
      * 2. DefaultPrivilegeManager.refreshStatus() 全量重探并回灌 StateFlow ——
      *    executeShell / executeUiAction / 权限页 / 环境遥测即时感知。
      *    DefaultPrivilegeManager 自身也注册了 binder 监听（同步直写流），

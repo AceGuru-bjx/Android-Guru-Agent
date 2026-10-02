@@ -51,6 +51,8 @@ sealed interface UiAction {
     data object Home : UiAction
     data object Recents : UiAction
     data object OpenNotifications : UiAction
+    /** #240 收尾：收起通知栏（a11y BACK 收合 / root `cmd statusbar collapse`）。 */
+    data object CloseNotifications : UiAction
 }
 
 data class UiResult(val success: Boolean, val message: String = "")

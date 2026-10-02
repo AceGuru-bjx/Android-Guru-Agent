@@ -166,6 +166,16 @@ class DefaultPrivilegeManager @Inject constructor(
             }
         }
 
+    /**
+     * Shizuku 通道执行（T92 / #255 审计收敛）。
+     *
+     * 旧实现是 "Shizuku execution not yet implemented" 占位 stub —— 而真实
+     * 的 Shizuku 执行能力早已在 [ShizukuCommandExecutor]（IShizukuService
+     * .newProcess AIDL，uid=2000）落地，主链路（PrivilegeDetector /
+     * PrivilegedCommandSpawner）用的也是它。任何误入本方法的调用者都会拿到
+     * 假失败，与「权限链真实可用」的审计结论矛盾 —— 现改为直接委托同一
+     * 真实执行器，行为与主链路完全一致（超时强杀、诚实报错、绝不降级伪装）。
+     */
     private suspend fun executeViaShizuku(command: String, timeoutMs: Long): ShellResult {
         // 委托 ShizukuCommandExecutor（IShizukuService.newProcess AIDL，uid=2000
         // 真实 ADB 级执行）。失败语义与之对齐：诚实报错，不回退本地 app-shell
@@ -220,6 +230,13 @@ class DefaultPrivilegeManager @Inject constructor(
             }
             is UiAction.OpenNotifications -> {
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
+                UiResult(true)
+            }
+            // #240 收尾：收起通知栏 —— 无障碍无专用 GLOBAL_ACTION，BACK 的
+            // 系统语义就是收合 shade（状态栏展开时 BACK = collapse）。手势派发
+            // 在已展开时是同一效果；未展开时 BACK 退一层（与用户手动按返回一致）。
+            is UiAction.CloseNotifications -> {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                 UiResult(true)
             }
             is UiAction.Click -> {
@@ -286,6 +303,9 @@ class DefaultPrivilegeManager @Inject constructor(
         // 正解（API 24+，等价 service call statusbar 1；无障碍通道走
         // GLOBAL_ACTION_NOTIFICATIONS 不受影响）。
         is UiAction.OpenNotifications -> "cmd statusbar expand-notifications"
+        // #240 收尾：收合通知栏（与 expand 对称；`input keyevent 4`（BACK）
+        // 也可达但语义间接 —— statusbar 直控不受当前焦点影响）。
+        is UiAction.CloseNotifications -> "cmd statusbar collapse"
         is UiAction.ClickNode -> null
     }
 
