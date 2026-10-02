@@ -388,29 +388,29 @@ private fun BackdropZone(state: HazeState, mode: GlassLabMode) {
                 .align(Alignment.TopEnd)
                 .padding(12.dp),
             state = state,
-            accent = if (Build.VERSION.SDK_INT >= 32) {
+            accent = if (Build.VERSION.SDK_INT >= 31) {
                 MaterialTheme.colorScheme.primary
             } else {
                 MaterialTheme.colorScheme.tertiary
             }
         ) {
             Icon(
-                imageVector = if (Build.VERSION.SDK_INT >= 32) {
+                imageVector = if (Build.VERSION.SDK_INT >= 31) {
                     Icons.Default.BlurOn
                 } else {
                     Icons.Default.Warning
                 },
                 contentDescription = null,
                 modifier = Modifier.size(12.dp),
-                tint = if (Build.VERSION.SDK_INT >= 32) {
+                tint = if (Build.VERSION.SDK_INT >= 31) {
                     MaterialTheme.colorScheme.primary
                 } else {
                     MaterialTheme.colorScheme.tertiary
                 }
             )
             Text(
-                text = if (Build.VERSION.SDK_INT >= 32) {
-                    "RenderEffect GPU 模糊"
+                text = if (Build.VERSION.SDK_INT >= 31) {
+                    "RenderEffect GPU 模糊（API 31+）"
                 } else {
                     "API ${Build.VERSION.SDK_INT} · scrim 兜底"
                 },
