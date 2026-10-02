@@ -268,7 +268,11 @@ interface TerminalRuntime {
     )
 
     // ───────── push-based observation Flows (Spec §41 — event-driven, NOT polling) ─────────
-    /** Push-based screen state for a session. Emits on every VT update. Null if session not found. */
+    /**
+     * Push-based screen state for a session — computed only while collected and
+     * throttled to ~1 frame (33ms); each new subscription first receives a fresh
+     * snapshot. Null if session not found.
+     */
     fun screenStateFlow(sessionId: Long): Flow<com.apex.agent.platform.terminal.screen.TerminalScreenState>?
 
     /** Push-based semantic state for a session. Emits on every state change. Null if session not found. */
@@ -290,6 +294,21 @@ interface TerminalRuntime {
      * 非轮询。additive（PR #60 冻结规则：只加不改）。
      */
     fun terminalEventFlow(sessionId: Long, afterCursor: Long = 0L): Flow<TerminalEvent>?
+
+    /**
+     * OSC 52 剪贴板写入请求流（vim/tmux 远程复制 → 宿主剪贴板）。引擎侧已把
+     * base64 解码为 UTF-8 文本；pump 每次 VT feed 后 drain 上抛。null =
+     * 会话不存在或实现不支持（消费方自行降级即可）。
+     */
+    fun clipboardRequestsFlow(sessionId: Long): Flow<String>? = null
+
+    /**
+     * 全局会话生命周期事件流（SessionCreated / SessionClosed / StateChanged(SESSION)）——
+     * 会话列表（UI tab）事件驱动刷新的数据源，替代固定间隔轮询。消费方收到事件后
+     * 全量拉 snapshot(SESSIONS) 对齐（事件只做触发器，不携带完整列表）。null =
+     * 实现不支持（消费方退回轮询兜底）。
+     */
+    fun sessionLifecycleEvents(): Flow<TerminalEvent>? = null
 
     // ───────── recover ─────────
     // Spec §39 — crash recovery. Call once on startup. Returns recovered session ids.

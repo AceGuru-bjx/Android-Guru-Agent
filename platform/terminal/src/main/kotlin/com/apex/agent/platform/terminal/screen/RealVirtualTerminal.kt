@@ -4,6 +4,7 @@ import com.apex.agent.terminalemulator.ScreenMutation
 import com.apex.agent.terminalemulator.TerminalEngine
 import com.apex.agent.terminalemulator.TerminalRenderSnapshot
 import com.apex.agent.vtnative.VtEngineFactory
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * RealVirtualTerminal — backed by a [TerminalEngine] (Spec PR #53).
@@ -30,6 +31,23 @@ import com.apex.agent.vtnative.VtEngineFactory
  *    FULL/RESIZE mutations degrade to null (= full-screen, the old semantics).
  *  - **styledSnapshot** — full-fidelity render state for the UI grid renderer.
  *
+ * Thread safety（VT 线程模型收敛）:
+ *  [core] 被三类线程并发直达：pump 线程（feed + styledSnapshot，每 8KB chunk）、
+ *  Agent 工具线程（observe(SCREEN) → snapshot/scrollbackText）、Main/IO 线程
+ *  （resize）。两个引擎实现都不自卫（TerminalCore 纯可变状态零锁；
+ *  NativeVtCore 的 JNI 面无内部锁 —— vendored C++ 不可改），此前无任何串行化层
+ *  —— native 侧数据竞争 = 未定义行为（#F-⑰ VtFeedTrail 黑匣子记录的真实崩溃
+ *  归因面）。收敛点：[VtEngineFactory.create] 的唯一生产调用方就是本类，故在
+ *  这里用一把 per-instance [ReentrantLock] 串行化**全部**引擎访问，两个引擎
+ *  实现一并受保护。选型依据：
+ *   - ReentrantLock 而非 kotlinx Mutex：本类入口大多在非 suspend 上下文被调
+ *     （pump 循环体 / observe 直通 / resize），Mutex 无法覆盖；
+ *   - 可重入性是防御位：feed → respond() → responseSink → nativeWrite 当前
+ *     不回跳 VT，但若未来应答回写链路回跳到本类方法（如读模式），可重入锁不会
+ *     自锁死；
+ *   - 锁序：engineLock 为叶子锁 —— 持锁期间不再获取其它锁（responseSink 回写
+ *     只做 PTY write），与 SessionManager 的 mutex/transitionLocks 无环。
+ *
  * Spec ref: ATR 2.1 PR #53 — VT/ANSI/Unicode/Screen Core 2.0 / P83 Terminal Finalization.
  */
 class RealVirtualTerminal(
@@ -39,6 +57,18 @@ class RealVirtualTerminal(
 
     private val core: TerminalEngine = VtEngineFactory.create(initialRows, initialCols)
 
+    /** 串行化全部 [core] 访问（见类 KDoc「Thread safety」）。 */
+    private val engineLock = ReentrantLock()
+
+    private inline fun <T> withEngine(block: () -> T): T {
+        engineLock.lock()
+        try {
+            return block()
+        } finally {
+            engineLock.unlock()
+        }
+    }
+
     /** Cached plain-text snapshot — invalidated by feed/resize/reset. */
     @Volatile
     private var cachedScreen: TerminalScreenState? = null
@@ -47,26 +77,26 @@ class RealVirtualTerminal(
     private var pendingChangedRows: Set<Int>? = null
     private var pendingIsFull = false
 
-    override fun feed(bytes: ByteArray) {
+    override fun feed(bytes: ByteArray) = withEngine {
         core.feed(bytes)
         cachedScreen = null
         collectMutations()
     }
 
-    fun flush() {
+    fun flush() = withEngine {
         core.flush()
         cachedScreen = null
         collectMutations()
     }
 
-    override fun resize(rows: Int, cols: Int) {
+    override fun resize(rows: Int, cols: Int) = withEngine {
         core.resize(rows, cols)
         cachedScreen = null
         pendingIsFull = true
         pendingChangedRows = null
     }
 
-    override fun reset() {
+    override fun reset() = withEngine {
         core.reset()
         cachedScreen = null
         pendingIsFull = true
@@ -99,7 +129,7 @@ class RealVirtualTerminal(
         }
     }
 
-    override fun snapshot(): TerminalScreenState {
+    override fun snapshot(): TerminalScreenState = withEngine {
         cachedScreen?.let { return it }
         val s = core.snapshot()
         val changed = if (pendingIsFull) null else pendingChangedRows
@@ -115,14 +145,14 @@ class RealVirtualTerminal(
         pendingChangedRows = null
         pendingIsFull = false
         cachedScreen = state
-        return state
+        state
     }
 
     override fun styledSnapshot(maxScrollbackLines: Int): TerminalRenderSnapshot =
-        core.renderSnapshot(maxScrollbackLines)
+        withEngine { core.renderSnapshot(maxScrollbackLines) }
 
     /** Drain pending screen mutations (for event-driven UI / observation delta). */
-    fun drainMutations(): List<ScreenMutation> = core.drainMutations()
+    fun drainMutations(): List<ScreenMutation> = withEngine { core.drainMutations() }
 
     // Property getters reuse the cached snapshot — each used to trigger a full
     // O(rows×cols) core.snapshot() render (5 renders per chained observation).
@@ -135,38 +165,42 @@ class RealVirtualTerminal(
     // ─── T82: input-translation + scrollback/clipboard capability exposure ───
 
     /** DECCKM: when true the input layer must send SS3 (ESC O x) arrows/home/end. */
-    fun applicationCursorKeys(): Boolean = core.applicationCursorKeys()
+    fun applicationCursorKeys(): Boolean = withEngine { core.applicationCursorKeys() }
 
     /** Bracketed paste mode 2004: paste writes must wrap ESC[200~ … ESC[201~. */
-    fun bracketedPasteMode(): Boolean = core.bracketedPasteMode()
+    fun bracketedPasteMode(): Boolean = withEngine { core.bracketedPasteMode() }
 
     /** Last [maxLines] scrollback rows, oldest first (main screen only). */
-    fun scrollbackLines(maxLines: Int): List<String> = core.scrollbackText(maxLines)
+    fun scrollbackLines(maxLines: Int): List<String> =
+        withEngine { core.scrollbackText(maxLines) }
 
     /** Scrollback depth (main screen only). */
-    fun scrollbackLineCount(): Int = core.scrollbackLineCount()
+    fun scrollbackLineCount(): Int = withEngine { core.scrollbackLineCount() }
 
     /** Drain OSC 52 clipboard-write requests emitted by guest programs (vim/tmux). */
-    fun drainClipboardRequests(): List<String> = core.drainClipboardRequests()
+    fun drainClipboardRequests(): List<String> =
+        withEngine { core.drainClipboardRequests() }
 
     /**
-     * T85：宿主应答回写通道（DA1/DA2/DSR-CPR）—— 透传给 TerminalCore
-     *（可见性由 core.responseSink 的 @Volatile 保证；本属性无 backing field，
-     * 不重复标注）。
+     * T85：宿主应答回写通道（DA1/DA2/DSR-CPR）—— 透传给 TerminalCore。
+     * 写入经 [engineLock] 串行化（NativeVtCore 的 responseSink 字段非 volatile，
+     * 装配线程写 / pump 线程读的可见性由此保证）。
      * SessionManagerImpl 装配时接线为 nativeWrite；应答为终端自生字节，
      * 非用户/Agent 输入，不过策略门禁。
      */
     var responseSink: ((ByteArray) -> Unit)?
-        get() = core.responseSink
-        set(value) { core.responseSink = value }
+        get() = withEngine { core.responseSink }
+        set(value) {
+            withEngine { core.responseSink = value }
+        }
 
     /**
      * Last visible (cursor) line as plain text — for InputWaiting heuristic (Spec §29).
      * The cursor row of the rendered screen, trimmed.
      */
-    fun lastVisibleLine(): String {
+    fun lastVisibleLine(): String = withEngine {
         val s = core.snapshot()
         val lines = s.renderedText.split('\n')
-        return lines.getOrElse(s.cursorRow) { "" }.trimEnd()
+        lines.getOrElse(s.cursorRow) { "" }.trimEnd()
     }
 }

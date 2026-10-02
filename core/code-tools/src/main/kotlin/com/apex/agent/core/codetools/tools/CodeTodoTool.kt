@@ -66,7 +66,9 @@ class CodeTodoTool : BaseTool(
         risk(com.apex.agent.core.tools.ToolRisk.LOW)
         tag("code")
         tag("todo")
-        annotations(com.apex.agent.core.tools.ToolAnnotations.readOnly())
+        // 注解修正：code_todo 维护会话态（整体覆盖清单），不是只读 ——
+        // readOnly 谎报会让重试/批放行策略按"无副作用"处理。
+        annotations(com.apex.agent.core.tools.ToolAnnotations.mutating())
     }
 
     override suspend fun executeStructured(arguments: String): ToolResult {

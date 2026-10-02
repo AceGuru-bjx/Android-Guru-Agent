@@ -18,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -29,6 +28,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /*
  * BrowserChrome —— 浮窗展开态的完整浏览器外观（root composable）。
@@ -62,7 +62,7 @@ fun BrowserChrome(
     onChromeHeightChanged: ((Int) -> Unit)? = null,
     pageSlot: @Composable () -> Unit,
 ) {
-    val ui by controller.ui.collectAsState()
+    val ui by controller.ui.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
 

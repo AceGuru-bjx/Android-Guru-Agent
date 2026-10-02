@@ -13,9 +13,9 @@ import com.apex.agent.notify.ForegroundTracker
 import com.apex.agent.platform.EnvironmentStateUpdater
 import com.apex.agent.platform.csmem.actor.MemoryWriterActor
 import com.apex.agent.platform.csmem.dream.DreamRenderer
-import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
 import com.apex.agent.platform.privilege.PrivilegeDetector
 import com.apex.agent.platform.privilege.PrivilegeManager
+import com.apex.agent.platform.terminal.ubuntu.lifecycle.UbuntuLifecycleCoordinator
 import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.core.logging.LogLevel
 import coil.ImageLoader

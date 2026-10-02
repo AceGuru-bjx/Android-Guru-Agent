@@ -30,7 +30,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +37,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /*
  * ChromeOverflowMenu —— 顶栏「更多」菜单 + 用户脚本面板。
@@ -114,7 +114,7 @@ internal fun UserscriptsSheet(
 ) {
     if (!visible || registry == null) return
     val p = chromePalette()
-    val scripts by registry.scripts.collectAsState()
+    val scripts by registry.scripts.collectAsStateWithLifecycle()
 
     ChromeBottomSheet(visible = true, onDismiss = onDismiss) {
         Text(

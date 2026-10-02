@@ -47,10 +47,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
@@ -105,10 +105,12 @@ fun CodeScreen(
     viewModel: CodeViewModel,
     slashMenuProvider: SlashMenuProvider = rememberSlashMenuProvider()
 ) {
-    val state by viewModel.uiState.collectAsState()
-    val pendingAgentQuestion by viewModel.pendingAgentQuestion.collectAsState()
-    val pendingCommand by viewModel.pendingCommand.collectAsState()
-    val llmConfigured by viewModel.llmConfigured.collectAsState()
+    // E4（#2-c P1-6）：主状态流对齐全仓 117 处先例换 lifecycle 版 —— 后台/不可见
+    // 期间停收集（StateFlow 无参重载语义与 collectAsState 一致，初始值取 value）。
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val pendingAgentQuestion by viewModel.pendingAgentQuestion.collectAsStateWithLifecycle()
+    val pendingCommand by viewModel.pendingCommand.collectAsStateWithLifecycle()
+    val llmConfigured by viewModel.llmConfigured.collectAsStateWithLifecycle()
 
     // ═══ #197 「小圆环」工具菜单状态（Coding 工位独占）═══
     val toolkit = viewModel.toolkitStore
@@ -121,22 +123,23 @@ fun CodeScreen(
     val availableTools = remember { viewModel.availableTools() }
 
     // ═══ #197 /mcp:github 未连接信号（斜杠引导连接闭环）═══
-    var showGithubConnectDialog by remember { mutableStateOf(false) }
+    var showGithubConnectDialog by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         viewModel.requestGithubConnect.collect { showGithubConnectDialog = true }
     }
 
     // ═══ #197 模型 API 未配置浮窗（发送拦截）═══
-    var showApiMissingNotice by remember { mutableStateOf(false) }
+    var showApiMissingNotice by rememberSaveable { mutableStateOf(false) }
 
-    var showNewWorkspace by remember { mutableStateOf(false) }
-    var showThinkingGuide by remember { mutableStateOf(false) }
+    var showNewWorkspace by rememberSaveable { mutableStateOf(false) }
+    var showThinkingGuide by rememberSaveable { mutableStateOf(false) }
     // 胶囊详情弹层选中项（存 id 不存对象：StreamToolCall 是不可变快照，
     // 每 25ms 批次按 index 替换新实例——存对象会冻结在点击瞬间，
-    // 状态/耗时/Diff 永不更新；存 id 每次重组从活快照重查）
-    var selectedToolCallId by remember { mutableStateOf<String?>(null) }
+    // 状态/耗时/Diff 永不更新；存 id 每次重组从活快照重查）。
+    // rememberSaveable：旋转/重建后详情弹层不丢（String? 可入 Bundle）。
+    var selectedToolCallId by rememberSaveable { mutableStateOf<String?>(null) }
     // 终端面板折叠态（默认展开——BASH 是 Coding 工作流主舞台）
-    var terminalCollapsed by remember { mutableStateOf(false) }
+    var terminalCollapsed by rememberSaveable { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
     Column(
@@ -873,7 +876,8 @@ private fun PendingQuestionDialog(
     question: String,
     onSubmit: (String) -> Unit
 ) {
-    var answer by remember { mutableStateOf("") }
+    // rememberSaveable：旋转/重建后已输入的回答不丢（String 可入 Bundle）。
+    var answer by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = { },
         title = { Text(stringResource(R.string.code_question_title)) },
@@ -903,7 +907,8 @@ private fun NewWorkspaceDialog(
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
+    // rememberSaveable：旋转/重建后已输入的工作区名不丢（String 可入 Bundle）。
+    var name by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.code_new_workspace_title)) },

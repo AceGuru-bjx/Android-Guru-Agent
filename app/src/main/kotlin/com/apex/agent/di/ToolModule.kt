@@ -778,7 +778,16 @@ object ToolModule {
 
         // ═══ 7. UI 操作 (5, 优先 AccessibilityService 语义交互) ═══
         registry.register(SafeAgentTool(UiTapTool(shellExec, privilegeUiProvider)))
-        registry.register(SafeAgentTool(UiSwipeTool(shellExec, privilegeUiProvider)))
+        // 3-A 协调项：shell 回落分支的 swipe 方向坐标注入真实分辨率
+        //（与 PrivilegeUiProvider.getScreenMetrics 同源 —— ApplicationContext
+        // displayMetrics；未注入时工具内部保持 1080x2400 假设）。
+        registry.register(SafeAgentTool(UiSwipeTool(
+            shellExec, privilegeUiProvider,
+            screenMetrics = {
+                val dm = context.resources.displayMetrics
+                dm.widthPixels to dm.heightPixels
+            }
+        )))
         registry.register(SafeAgentTool(UiDumpTool(shellExec, privilegeUiProvider)))
         // #240 收尾：通知栏 open/close 的 LLM 面（a11y GLOBAL_ACTION / cmd statusbar）
         registry.register(SafeAgentTool(UiNotificationsTool(shellExec, privilegeUiProvider)))
@@ -807,7 +816,8 @@ object ToolModule {
         registerUtilityTools(registry, workspaceDir)
 
         // ═══ 10. Terminal PTY 前排 9+1 工具 —— 注册体拆至 ToolModuleRegistrySections.kt（SRP 预算）═══
-        registerTerminalPtyTools(registry, terminalRuntime)
+        // T-audit（#289）：signal/run/close 等七通道审计经 [auditedTerminalTool] 注入（见拆分文件）
+        registerTerminalPtyTools(registry, terminalRuntime, toolAuditLogger)
 
         // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
         // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
@@ -1149,3 +1159,13 @@ object ToolModule {
         redactor = secretRedactor
     )
 }
+
+/**
+ * 会话级 terminal 工具审计装饰器（D5）。
+ *
+ * shell_execute / terminal.exec 有完整 ToolAuditLogger 链，但 terminal.create /
+ * run / write / signal / resize / snapshot / close 此前直接注册零审计 ——
+ * Agent 对会话的全部破坏性操作不可举证。装饰 [TerminalTool]：invoke 首尾插桩
+ * 记 tool / command（参数截断）/ decision / durationMs / success，与
+ * shell_execute 的 executed/failed 词汇表对齐。审计异常静默（绝不阻断工具本身）。
+ */

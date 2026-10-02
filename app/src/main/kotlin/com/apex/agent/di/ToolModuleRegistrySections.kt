@@ -7,6 +7,7 @@ import com.apex.agent.github.tools.*
 import com.apex.agent.platform.terminal.runtime.TerminalRuntime
 import com.apex.agent.platform.terminal.tools.*
 import com.apex.agent.platform.terminal.tools.v2.*
+import com.apex.agent.tools.ToolAuditLogger
 
 /**
  * §10 前排 PTY 工具 + §11 GitHub 工具的注册体 —— 自 ToolModule.kt 二次
@@ -14,22 +15,26 @@ import com.apex.agent.platform.terminal.tools.v2.*
  * 两族各只依赖单一执行器参数，边界天然清晰，注册内容逐字节原样迁移）。
  */
 
-/** §10 前排：9 个 Agent-Native PTY 工具 + T73 后端发现（全部纯 [terminalRuntime] 依赖）。 */
+/** §10 前排：9 个 Agent-Native PTY 工具 + T73 后端发现（纯 [terminalRuntime] 依赖）。
+ * T-audit（#289）：signal/run/close/create/write/resize/snapshot 七个通道包
+ * [auditedTerminalTool] 审计（与 shell_execute 同一 #F-⑯ 标准，审计逻辑随拆分迁入）；
+ * observe/wait 纯只读探针不记（审计噪声换取可举证性已足）。 */
 internal fun registerTerminalPtyTools(
     registry: DefaultToolRegistry,
-    terminalRuntime: TerminalRuntime
+    terminalRuntime: TerminalRuntime,
+    toolAuditLogger: ToolAuditLogger
 ) {
     // ═══ 10. Terminal PTY — ATR 2.0 (9 new Agent-Native + 4 legacy compat + T73 ×2) ═══
     // 9 new Agent-Native tools (Spec §34) — non-blocking, incremental, event-driven.
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCreateTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalRunTool(terminalRuntime))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCreateTool(terminalRuntime)))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalRunTool(terminalRuntime)))))
     registry.register(SafeAgentTool(TerminalToolAdapter(TerminalObserveTool(terminalRuntime))))
     registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWaitTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWriteTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSignalTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalResizeTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSnapshotTool(terminalRuntime))))
-    registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalWriteTool(terminalRuntime)))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSignalTool(terminalRuntime)))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalResizeTool(terminalRuntime)))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSnapshotTool(terminalRuntime)))))
+    registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCloseTool(terminalRuntime)))))
     // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
     registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
 }
@@ -56,3 +61,26 @@ internal fun registerGithubTools(
     registry.register(SafeAgentTool(GithubListBranchesTool(githubApiService)))
     registry.register(SafeAgentTool(GithubSearchReposTool(githubApiService)))
 }
+
+private fun auditedTerminalTool(
+    audit: ToolAuditLogger,
+    tool: com.apex.agent.platform.terminal.tools.TerminalTool
+): com.apex.agent.platform.terminal.tools.TerminalTool =
+    object : com.apex.agent.platform.terminal.tools.TerminalTool by tool {
+        override suspend fun invoke(arguments: String): String {
+            val startedAt = System.currentTimeMillis()
+            val result = runCatching { tool.invoke(arguments) }
+            runCatching {
+                audit.log(
+                    ToolAuditLogger.Event(
+                        tool = tool.id,
+                        decision = if (result.isSuccess) "executed" else "failed",
+                        command = arguments.take(512),
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        success = result.isSuccess
+                    )
+                )
+            }
+            return result.getOrThrow()
+        }
+    }

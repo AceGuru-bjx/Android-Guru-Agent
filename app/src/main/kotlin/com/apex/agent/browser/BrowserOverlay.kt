@@ -29,13 +29,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.apex.agent.browser.chrome.BrowserChrome
@@ -278,7 +278,7 @@ class BrowserOverlay @Inject constructor(
 
     @Composable
     private fun HandoffBanner() {
-        val session by chromeWiring.engineSessionState.collectAsState()
+        val session by chromeWiring.engineSessionState.collectAsStateWithLifecycle()
         if (session != BrowserEngine.BrowserSessionState.WAITING_HUMAN) return
         val p = chromePalette()
         Row(

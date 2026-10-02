@@ -1,5 +1,6 @@
 package com.apex.agent.core.tools.mcp
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -260,6 +261,11 @@ class McpClient(
             )
 
             Result.success(serverCapabilities!!)
+        } catch (e: CancellationException) {
+            // 全仓纪律（SafeAgentTool 同款）：协程取消必须继续抛出，
+            // 不得折叠成 Result.failure —— 否则用户 abort 时取消传播被截断。
+            // 注意：CE 分支不得进入下方 FAILED 启动事件上报（取消不是服务器故障）。
+            throw e
         } catch (e: Exception) {
             // #197 真实事件：失败详情（异常信息原样上报，不做美化）。
             startupListener?.onStartupEvent(
@@ -301,6 +307,9 @@ class McpClient(
             }
 
             Result.success(toolList)
+        } catch (e: CancellationException) {
+            // 全仓纪律：协程取消必须继续抛出（不得折叠成 Result.failure）。
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -345,6 +354,9 @@ class McpClient(
                 content = content,
                 isError = isError
             ))
+        } catch (e: CancellationException) {
+            // 全仓纪律：协程取消必须继续抛出（不得折叠成 Result.failure）。
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -377,6 +389,9 @@ class McpClient(
             }
 
             Result.success(resourceList)
+        } catch (e: CancellationException) {
+            // 全仓纪律：协程取消必须继续抛出（不得折叠成 Result.failure）。
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -402,6 +417,9 @@ class McpClient(
                 ?.get("text")?.jsonPrimitive?.content ?: ""
 
             Result.success(text)
+        } catch (e: CancellationException) {
+            // 全仓纪律：协程取消必须继续抛出（不得折叠成 Result.failure）。
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

@@ -463,7 +463,9 @@ internal fun AgentBubble(
 @Composable
 internal fun StreamingResponseBubble(
     text: String,
-    // 多模态输出：流式期间生成的图片点击 → Lightbox（与完成态行为一致）。
+    // 多模态输出：保留给调用方（AgentChatScreen 的 Lightbox 接线）——流式期间
+    // 已改纯 Text 渲染（见下方性能注释），媒体仅在完成态经 AgentMessageBubble
+    // 的 MarkdownText 渲染并接 Lightbox；此参数当前不被本气泡消费。
     onImageClick: (String) -> Unit = {}
 ) {
     val pulse by rememberInfiniteTransition(label = "stream-cursor").animateFloat(
@@ -527,8 +529,22 @@ internal fun StreamingResponseBubble(
                     )
                 }
 
+                // 性能（#2-c P1-1）：流式期间用纯 Text 渲染增量文本 ——
+                // MarkdownText 的 remember(markdown){parseMarkdown} 会让每 33ms
+                // 节流 flush 都触发全量重解析+重排版，回复越长单次成本线性涨
+                //（整流 O(n²)）。完成/出错/中止时 VM 先 flush 落完整消息再清
+                // currentResponse（AgentChatEventApplier.kt ResponseComplete），
+                // 完成态由 AgentMessageBubble 的 MarkdownText 接管最终渲染 ——
+                // 本气泡只在流式期间存在，无需自带完成分支。
+                // 样式对齐 MarkdownText 段落排版（bodyMedium + onSurface），
+                // 完成瞬间气泡替换不产生字号/行高跳变。媒体语法（![]()/!<video>）
+                // 流式期间以原始文本展示，完成态恢复为图片/视频卡。
                 SelectionContainer {
-                    MarkdownText(markdown = text, onImageClick = onImageClick)
+                    Text(
+                        text = text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
                 Text(
                     text = "▍",

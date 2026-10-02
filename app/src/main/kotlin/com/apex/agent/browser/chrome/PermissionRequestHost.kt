@@ -18,7 +18,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,6 +25,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /*
  * PermissionRequestHost —— 网页权限请求（相机/麦克风/定位/通知…）。
@@ -46,7 +46,7 @@ private fun resourceMeta(res: WebPermissionResource): Triple<ImageVector, String
 
 @Composable
 fun PermissionRequestHost(gateway: BrowserEngineGateway) {
-    val requests by gateway.permissionRequests.collectAsState()
+    val requests by gateway.permissionRequests.collectAsStateWithLifecycle()
     val request = requests.firstOrNull() ?: return
     val p = chromePalette()
 

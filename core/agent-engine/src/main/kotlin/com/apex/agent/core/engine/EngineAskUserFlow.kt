@@ -42,7 +42,12 @@ internal suspend fun ApexAgentEngine.handleAskUserToolCall(
         else -> InputType.TEXT
     }
     emit(AgentEvent.UserInputRequired(question, eventType))
+    // 等待时长回填（旧实现硬编码 0）：用户等 5 分钟与 1 秒在统计上无差别。
+    // core 纯 JVM —— 用 System.nanoTime 差值（不受墙钟回拨影响）。
+    val waitStartNs = System.nanoTime()
+    // #214：onExpired 回调发射 UserInputExpired（超时未决显式事件）。
     val answer = awaitUserInput { emit(AgentEvent.UserInputExpired) }
+    val waitedMs = (System.nanoTime() - waitStartNs) / 1_000_000L
     if (answer == null) {
         // #214 超时未决：显式失败收场（UserInputExpired 已由 onExpired 发射）。
         val timeoutNote = "User input timed out after ${PLAN_CONFIRMATION_TIMEOUT_MS / 1000}s; " +
@@ -56,7 +61,8 @@ internal suspend fun ApexAgentEngine.handleAskUserToolCall(
                 arguments = toolCall.arguments,
                 output = timeoutNote,
                 success = false,
-                durationMs = 0
+                // 超时等待同样是用户可感知的等待时长，与正常回答同口径计时。
+                durationMs = waitedMs
             )
         )
         return true
@@ -69,7 +75,7 @@ internal suspend fun ApexAgentEngine.handleAskUserToolCall(
             arguments = toolCall.arguments,
             output = "User answered: $answer",
             success = true,
-            durationMs = 0
+            durationMs = waitedMs
         )
     )
     return true

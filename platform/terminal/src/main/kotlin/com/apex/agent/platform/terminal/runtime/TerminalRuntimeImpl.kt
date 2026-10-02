@@ -116,7 +116,8 @@ class TerminalRuntimeImpl(
     private var shutdownResult: Result<TerminalRuntime.ShutdownResult>? = null
 
     private val eventLog: TerminalEventLog = TerminalEventLogImpl()
-    private val eventBus: TerminalEventBus = TerminalEventBusImpl(eventLog, scope)
+    private val eventBusImpl: TerminalEventBusImpl = TerminalEventBusImpl(eventLog, scope)
+    private val eventBus: TerminalEventBus = eventBusImpl
     // P1/P2 fix（审计 P1-3/P2-5）：注入 eventLog 作为订阅锚点来源 ——
     // WaitEngine 的 await/awaitIdle 只匹配「调用时刻之后」的新事件（原 afterCursor=0
     // 全量重放历史：IdleFor 永不满足+忙转；wait() 被陈旧事件假阳性命中）。
@@ -635,6 +636,16 @@ class TerminalRuntimeImpl(
         sessionManager.assembly(sessionId) ?: return null
         return eventBus.subscribe(sessionId, afterCursor)
     }
+
+    /** OSC 52 剪贴板请求（ObservationEngine 的 feed 钩子驱动 —— 详见其 KDoc）。 */
+    override fun clipboardRequestsFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<String>? {
+        val a = sessionManager.assembly(sessionId) ?: return null
+        return a.observationEngine.clipboardRequests
+    }
+
+    /** 会话生命周期事件（bus 的全局镜像 —— UI 会话列表事件驱动）。 */
+    override fun sessionLifecycleEvents(): kotlinx.coroutines.flow.Flow<TerminalEvent> =
+        eventBusImpl.lifecycleEvents
 
     /**
      * Recover persisted sessions on startup (Spec §39).

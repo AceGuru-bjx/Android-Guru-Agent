@@ -25,7 +25,14 @@ interface NodeDao {
     @Query("SELECT * FROM nodes WHERE role = :role ORDER BY last_seen_at DESC LIMIT :limit")
     suspend fun getByRole(role: String, limit: Int = 50): List<NodeEntity>
 
-    @Query("SELECT * FROM nodes WHERE text_hint LIKE '%' || :query || '%' ORDER BY last_seen_at DESC LIMIT :limit")
+    /**
+     * 文本检索（相关性优先）：occurrence_count 高频节点优先，同频取最近可见。
+     *
+     * LIKE 通配符转义由 MemoryGraphStoreImpl.searchNodesByText 负责（% _ \
+     * 前加 \ 变字面匹配），与本处 ESCAPE '\' 子句配对——否则用户查询
+     * "100%" / "a_b" 会被 SQLite 解释成模式而非字面文本。
+     */
+    @Query("SELECT * FROM nodes WHERE text_hint LIKE '%' || :query || '%' ESCAPE '\\' ORDER BY occurrence_count DESC, last_seen_at DESC LIMIT :limit")
     suspend fun searchByText(query: String, limit: Int = 20): List<NodeEntity>
 
     @Query("SELECT * FROM nodes WHERE app_package = :packageName ORDER BY last_seen_at DESC")

@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.os.Build
 import android.util.Base64
+import android.view.accessibility.AccessibilityNodeInfo
 import com.apex.agent.platform.privilege.accessibility.ApexAccessibilityService
 import com.apex.agent.platform.privilege.shizuku.ShizukuCommandExecutor
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -176,13 +177,20 @@ class DefaultPrivilegeManager @Inject constructor(
      * 真实执行器，行为与主链路完全一致（超时强杀、诚实报错、绝不降级伪装）。
      */
     private suspend fun executeViaShizuku(command: String, timeoutMs: Long): ShellResult {
-        val result = ShizukuCommandExecutor.execute(command, timeoutMs)
-        return ShellResult(
-            success = result.success,
-            output = result.output,
-            exitCode = result.exitCode,
-            executedVia = ExecutionVia.SHIZUKU
-        )
+        // 委托 ShizukuCommandExecutor（IShizukuService.newProcess AIDL，uid=2000
+        // 真实 ADB 级执行）。失败语义与之对齐：诚实报错，不回退本地 app-shell
+        // 冒充 Shizuku——降级决策由调用方基于真实错误做。
+        return try {
+            val result = ShizukuCommandExecutor.execute(command, timeoutMs)
+            ShellResult(
+                success = result.success,
+                output = result.output,
+                exitCode = result.exitCode,
+                executedVia = ExecutionVia.SHIZUKU
+            )
+        } catch (e: Exception) {
+            ShellResult(false, "Shizuku exec failed: ${e.message}", -1, ExecutionVia.SHIZUKU)
+        }
     }
 
     override suspend fun executeUiAction(action: UiAction): UiResult {
@@ -204,7 +212,7 @@ class DefaultPrivilegeManager @Inject constructor(
     }
 
     private suspend fun executeViaAccessibility(
-        service: AccessibilityService,
+        service: ApexAccessibilityService,
         action: UiAction
     ): UiResult {
         return when (action) {
@@ -245,39 +253,77 @@ class DefaultPrivilegeManager @Inject constructor(
                 UiResult(true)
             }
             is UiAction.InputText -> {
-                // 需要找到当前焦点节点
-                UiResult(false, "InputText via A11y requires focused node")
+                // 双通道输入：rootInActiveWindow.findFocus(FOCUS_INPUT) 定位
+                // 当前输入焦点节点，ACTION_SET_TEXT 整段替换（复用
+                // ApexAccessibilityService.inputTextToNode 的 Bundle 协议）；
+                // 无焦点节点/动作被拒 → 落回 Root 档 `input text` 命令回放。
+                val root = service.rootInActiveWindow
+                if (root != null) {
+                    try {
+                        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        if (focused != null) {
+                            try {
+                                if (service.inputTextToNode(focused, action.text)) {
+                                    return UiResult(true)
+                                }
+                            } finally {
+                                focused.recycle()
+                            }
+                        }
+                    } finally {
+                        root.recycle()
+                    }
+                }
+                // a11y 通道失败 → 按 executeUiAction 的标准优先级落回
+                // Root / Shizuku 的 `input text` 命令回放。
+                if (_rootAvailable.value) {
+                    executeViaRootInput(action)
+                } else {
+                    executeViaShizukuInput(action)
+                }
             }
             else -> UiResult(false, "Unsupported action")
         }
     }
 
+    /**
+     * UiAction → `input` 命令映射（Root / Shizuku 档共用）。
+     * ClickNode 需要节点级语义，仅无障碍通道可执行（返回 null）。
+     */
+    private fun inputCommandFor(action: UiAction): String? = when (action) {
+        is UiAction.Click -> "input tap ${action.x} ${action.y}"
+        is UiAction.Swipe -> "input swipe ${action.x1} ${action.y1} ${action.x2} ${action.y2} ${action.durationMs}"
+        is UiAction.InputText -> "input text '${action.text.replace("'", "'\\''")}'"
+        is UiAction.PressKey -> "input keyevent ${action.keyCode}"
+        is UiAction.Back -> "input keyevent 4"
+        is UiAction.Home -> "input keyevent 3"
+        is UiAction.Recents -> "input keyevent 187"
+        // #240：旧映射 input keyevent 26 是电源键（熄屏/唤醒）—— 用户要求
+        // 「打开通知栏」却把屏幕关了。cmd statusbar expand-notifications 才是
+        // 正解（API 24+，等价 service call statusbar 1；无障碍通道走
+        // GLOBAL_ACTION_NOTIFICATIONS 不受影响）。
+        is UiAction.OpenNotifications -> "cmd statusbar expand-notifications"
+        // #240 收尾：收合通知栏（与 expand 对称；`input keyevent 4`（BACK）
+        // 也可达但语义间接 —— statusbar 直控不受当前焦点影响）。
+        is UiAction.CloseNotifications -> "cmd statusbar collapse"
+        is UiAction.ClickNode -> null
+    }
+
     private suspend fun executeViaRootInput(action: UiAction): UiResult {
-        val command = when (action) {
-            is UiAction.Click -> "input tap ${action.x} ${action.y}"
-            is UiAction.Swipe -> "input swipe ${action.x1} ${action.y1} ${action.x2} ${action.y2} ${action.durationMs}"
-            is UiAction.InputText -> "input text '${action.text.replace("'", "'\\''")}'"
-            is UiAction.PressKey -> "input keyevent ${action.keyCode}"
-            is UiAction.Back -> "input keyevent 4"
-            is UiAction.Home -> "input keyevent 3"
-            is UiAction.Recents -> "input keyevent 187"
-            // #240：旧映射 input keyevent 26 是电源键（熄屏/唤醒）—— 用户要求
-            // 「打开通知栏」却把屏幕关了。cmd statusbar expand-notifications 才是
-            // 正解（API 24+，等价 service call statusbar 1；无障碍通道走
-            // GLOBAL_ACTION_NOTIFICATIONS 不受影响）。
-            is UiAction.OpenNotifications -> "cmd statusbar expand-notifications"
-            // #240 收尾：收合通知栏（与 expand 对称；`input keyevent 4`（BACK）
-            // 也可达但语义间接 —— statusbar 直控不受当前焦点影响）。
-            is UiAction.CloseNotifications -> "cmd statusbar collapse"
-            is UiAction.ClickNode -> return UiResult(false, "ClickNode requires accessibility")
-        }
+        val command = inputCommandFor(action)
+            ?: return UiResult(false, "ClickNode requires accessibility")
         val result = executeViaRoot(command, 5000)
         return UiResult(result.success, result.output)
     }
 
     private suspend fun executeViaShizukuInput(action: UiAction): UiResult {
-        // 类似Root但通过Shizuku
-        return UiResult(false, "Not implemented")
+        // ShizukuCommandExecutor 无原生 UI 注入 API，但 uid=2000 的 shell
+        // 可执行 `input tap/swipe/text`（等价 adb shell input）——与 Root 档
+        // 共用命令映射，经 [executeViaShizuku] 的 AIDL 通道下发。
+        val command = inputCommandFor(action)
+            ?: return UiResult(false, "ClickNode requires accessibility")
+        val result = executeViaShizuku(command, 5000)
+        return UiResult(result.success, result.output)
     }
 
     override suspend fun getUiTree(): UiTreeResult {
@@ -291,48 +337,80 @@ class DefaultPrivilegeManager @Inject constructor(
 
         // rootInActiveWindow 拿到的 ref 必须由本方法 recycle，否则每次 getUiTree 泄漏一个 AccessibilityNodeInfo。
         try {
-            val nodes = mutableListOf<UiNode>()
-            traverseNode(rootNode, nodes)
-            return UiTreeResult(success = true, nodes = nodes)
+            val rootUiNode = buildUiNodeTree(rootNode, depth = 0)
+            return UiTreeResult(
+                success = true,
+                // nodes：DFS 先序扁平视图（旧消费方逐节点遍历的兼容契约），
+                // 剥离 children 引用避免把嵌套结构当扁平结构二次递归。
+                nodes = flattenDetached(rootUiNode),
+                // roots：真实嵌套树（父节点 children 已填充）——cs-mem
+                // 修剪/空间拓扑边/指纹父上下文的输入契约。
+                roots = listOf(rootUiNode)
+            )
         } finally {
             rootNode.recycle()
         }
     }
 
     /**
-     * 递归展平节点为 UiNode 列表。
+     * 递归构建真实嵌套的 UiNode 树（父节点 children 填充子节点）。
+     *
+     * 嵌套树是 cs-mem 边子系统的前提：UiTreePruner.generateSpatialEdges 按
+     * children 生成父子边/兄弟邻接边——旧实现把节点展平进列表、children 恒空，
+     * 边生成零产出，MemoryGraphStore.ingestEdges 永远收不到边。
      *
      * 所有权约定：node 自身由 caller 负责 recycle（这里是 [getUiTree] 在 finally 中 recycle rootNode）；
      * 本方法在递归时获取的每个 child 在用完后立即 recycle，避免 AccessibilityNodeInfo 泄漏。
      */
-    private fun traverseNode(
-        node: android.view.accessibility.AccessibilityNodeInfo,
-        result: MutableList<UiNode>,
-        depth: Int = 0
-    ) {
-        if (depth > 20) return  // 防止无限递归
-
+    private fun buildUiNodeTree(
+        node: AccessibilityNodeInfo,
+        depth: Int
+    ): UiNode {
         val boundsRect = android.graphics.Rect()
         node.getBoundsInScreen(boundsRect)
 
-        result.add(UiNode(
+        val children = mutableListOf<UiNode>()
+        // 防止无限递归：深度上限 20（子节点深度 = depth + 1 ≤ 20 才展开）。
+        if (depth < MAX_UI_TREE_DEPTH) {
+            for (i in 0 until node.childCount) {
+                // child 必须在本循环内 recycle，否则递归遍历会累积泄漏所有中间节点。
+                val child = node.getChild(i) ?: continue
+                try {
+                    children.add(buildUiNodeTree(child, depth + 1))
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+
+        return UiNode(
             className = node.className?.toString() ?: "",
             text = node.text?.toString() ?: "",
             contentDescription = node.contentDescription?.toString() ?: "",
             resourceId = node.viewIdResourceName ?: "",
             bounds = boundsRect.toString(),
             clickable = node.isClickable,
-            scrollable = node.isScrollable
-        ))
+            scrollable = node.isScrollable,
+            children = children
+        )
+    }
 
-        for (i in 0 until node.childCount) {
-            // child 必须在本循环内 recycle，否则递归遍历会累积泄漏所有中间节点。
-            val child = node.getChild(i) ?: continue
-            try {
-                traverseNode(child, result, depth + 1)
-            } finally {
-                child.recycle()
-            }
+    /**
+     * 嵌套树 → 扁平 DFS 先序列表（兼容旧「扁平列表」消费方）。
+     * 叶子节点直接复用实例；容器节点 copy 出 children=空的版本——旧消费方
+     * 把列表元素当独立根逐个处理，保留 children 引用会对同一子树重复递归
+     * （指纹重复、遍历放大）。
+     */
+    private fun flattenDetached(root: UiNode): List<UiNode> {
+        val out = ArrayList<UiNode>(32)
+        collectDetached(root, out)
+        return out
+    }
+
+    private fun collectDetached(node: UiNode, out: MutableList<UiNode>) {
+        out.add(if (node.children.isEmpty()) node else node.copy(children = emptyList()))
+        for (child in node.children) {
+            collectDetached(child, out)
         }
     }
 
@@ -405,5 +483,10 @@ class DefaultPrivilegeManager @Inject constructor(
         } catch (e: Exception) {
             false
         }
+    }
+
+    private companion object {
+        /** UI 树遍历深度上限（与旧 traverseNode 的 depth > 20 截断语义一致）。 */
+        private const val MAX_UI_TREE_DEPTH = 20
     }
 }
