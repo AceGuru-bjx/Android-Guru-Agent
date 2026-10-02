@@ -18,6 +18,7 @@ import com.apex.agent.github.tools.*
 import com.apex.agent.platform.PrivilegeUiProvider
 import com.apex.agent.platform.privilege.PrivilegeDetector
 import com.apex.agent.platform.privilege.PrivilegeManager
+import com.apex.agent.platform.privilege.ShellExecResult
 import com.apex.agent.platform.csmem.tools.MemoryRecentEpisodesTool
 import com.apex.agent.platform.csmem.tools.MemorySearchNodesTool
 import com.apex.agent.platform.csmem.tools.MemoryRecallMacroTool
@@ -226,6 +227,11 @@ val TERMINAL_TOOL_RUN_POLICIES: Map<String, ToolRunPolicy> = mapOf(
 @Module
 @InstallIn(SingletonComponent::class)
 object ToolModule {
+
+    // T92（#255 权限链审计）：shellExecResult 的两个非执行器 via 语义标记 ——
+    // 前置门禁拒绝 / 执行器抛异常。formatShellResult 对它们直接透传既有文案。
+    private const val VIA_GATE_DENIED = "gate-denied"
+    private const val VIA_EXCEPTION = "exception"
 
     @Provides
     @Singleton
@@ -549,36 +555,70 @@ object ToolModule {
         // 命令以纯 cd <dir> 结尾且执行成功 → 记录新目录，后续命令以它为起始目录。
         val shellWorkDir = com.apex.agent.tools.ShellWorkDirTracker()
 
-        val shellExec: suspend (String) -> String = { cmd ->
+        // 门禁 + 执行的统一出口（T92 / #255 权限链审计）：返回带 via 通道真相的
+        // ShellExecResult。via 为 VIA_GATE_DENIED / VIA_EXCEPTION 时 output 已是
+        // 面向模型的最终错误文案（与旧版逐字节一致）。
+        val shellExecResult: suspend (String) -> ShellExecResult = { cmd ->
             if (!commandPermissionGate.ensureAllowed(cmd)) {
-                "Error: 用户拒绝执行命令。请不要重试相同命令，改用更安全或更低风险的方案，并告知用户原因。"
+                ShellExecResult(
+                    success = false,
+                    output = "Error: 用户拒绝执行命令。请不要重试相同命令，改用更安全或更低风险的方案，并告知用户原因。",
+                    exitCode = -1,
+                    via = VIA_GATE_DENIED
+                )
             } else {
                 try {
-                    val result = PrivilegeDetector.executeShell(cmd, workDir = shellWorkDir.currentDir())
-                    if (result.success) {
-                        shellWorkDir.updateAfterSuccess(cmd)
-                        result.output.ifBlank { "(completed)" }
-                    } else {
-                        val lower = result.output.lowercase()
-                        if (lower.contains("permission denied") ||
-                            lower.contains("operation not permitted") ||
-                            lower.contains("access denied")
-                        ) {
-                            "Error: 权限不足，无法执行。当前权限通道：${result.via}。建议用户授予 Root 或 Shizuku，或改用应用沙箱内工具。"
-                        } else {
-                            "Error: 命令执行失败（exit=${result.exitCode}, via=${result.via}）：${result.output}"
-                        }
-                    }
+                    PrivilegeDetector.executeShell(cmd, workDir = shellWorkDir.currentDir())
                 } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    "Error: 命令执行异常：${e.message}"
+                    ShellExecResult(
+                        success = false,
+                        output = "Error: 命令执行异常：${e.message}",
+                        exitCode = -1,
+                        via = VIA_EXCEPTION
+                    )
                 }
             }
         }
 
+        // 面向模型的输出格式化（单源，两个消费方共用）：
+        // 设备工具通道保持与旧版逐字节一致；shell_execute 专属通道在成功输出
+        // 尾部附 [executed via: x]（T92 / #255 —— terminal.exec 恒有 channel
+        // 字段，shell_execute 此前仅失败时才带 via，成功时通道对模型不可见）。
+        fun formatShellResult(result: ShellExecResult, cmd: String, withVia: Boolean): String {
+            if (result.via == VIA_GATE_DENIED || result.via == VIA_EXCEPTION) {
+                return result.output
+            }
+            if (result.success) {
+                shellWorkDir.updateAfterSuccess(cmd)
+                val base = result.output.ifBlank { "(completed)" }
+                return if (withVia) "$base\n[executed via: ${result.via}]" else base
+            }
+            val lower = result.output.lowercase()
+            return if (lower.contains("permission denied") ||
+                lower.contains("operation not permitted") ||
+                lower.contains("access denied")
+            ) {
+                "Error: 权限不足，无法执行。当前权限通道：${result.via}。建议用户授予 Root 或 Shizuku，或改用应用沙箱内工具。"
+            } else {
+                "Error: 命令执行失败（exit=${result.exitCode}, via=${result.via}）：${result.output}"
+            }
+        }
+
+        // 设备类工具通道（AppList/DeviceInfo 等对输出做行级过滤/计数/拼接，
+        // 输出与旧版完全一致 —— 不受 via 标记污染）。
+        val shellExec: suspend (String) -> String = { cmd ->
+            formatShellResult(shellExecResult(cmd), cmd, withVia = false)
+        }
+
+        // shell_execute 专属通道：成功输出尾部附通道标记。
+        val shellExecAudited: suspend (String) -> String = { cmd ->
+            formatShellResult(shellExecResult(cmd), cmd, withVia = true)
+        }
+
         // ═══ 1. Shell (1) ═══
-        registry.register(SafeAgentTool(ShellExecuteTool(shellExec)))
+        registry.register(SafeAgentTool(ShellExecuteTool(shellExecAudited)))
 
         // ═══ 1b. terminal.exec —— 一次性结构化命令执行（stdout/stderr/exit_code/duration_ms/truncated）═══
         // 与 shell_execute 共享同一门禁（commandPermissionGate）与同一 cd 工作目录记忆

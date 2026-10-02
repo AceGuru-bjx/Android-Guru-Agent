@@ -32,6 +32,13 @@ import javax.inject.Singleton
  *   内置 Ubuntu 环境解包/引导到 READY（含离线降级）即置 true，模型在
  *   每轮环境摘要中看到 `ubuntu=on`，据此选择 linux-ubuntu 会话而非
  *   本地 Android shell。此前该旗标仅有定义无生产接线（死遥测）。
+ * - **root_available / shizuku_available**（T92，#255 权限链审计）：收集
+ *   [PrivilegeManager.rootAvailable] / [PrivilegeManager.shizukuAvailable]
+ *   StateFlow —— 权限链真值进入 Live Environment 摘要，模型每轮看到
+ *   `root=on/off shizuku=on/off`，不再需要试探性执行命令来探权限。
+ *   这两个旗标同样在此前仅有定义无生产接线（死遥测）。注意：当前无任何
+ *   工具把它们声明为 requiredEnv（工具都自带降级链），因此接线后仅提升
+ *   prompt 可见性，不产生门控拒绝 —— 与 fail-open 哲学一致。
  *
  * 未知态语义见 [ToolEnvironmentState]：门控对未知放行 —— 桥没跑起来
  * （老进程升级、服务未启用）时工具行为与 v1 完全一致，零回归。
@@ -103,6 +110,22 @@ class EnvironmentStateUpdater @Inject constructor(
         scope.launch {
             ubuntuLifecycle.stateFlow.collect { state ->
                 environmentState.set(ToolEnvironmentState.Flags.UBUNTU_READY, state.phase == UbuntuLifecycleCoordinator.Phase.READY)
+            }
+        }
+
+        // T92（#255 权限链审计）：权限链真值旗标 —— root / shizuku StateFlow →
+        // ToolEnvironmentState。事件源是 DefaultPrivilegeManager 的 binder 生命周期
+        // 回灌（#212）：Shizuku 起停/授权变化即时反映；root 在构造时探测一次、
+        // refreshStatus 时刷新。Live Environment 摘要（模型每轮可见）从
+        // 「root/shizuku 永远 unknown」变为实时真值。
+        scope.launch {
+            privilegeManager.rootAvailable.collect { available ->
+                environmentState.set(ToolEnvironmentState.Flags.ROOT_AVAILABLE, available)
+            }
+        }
+        scope.launch {
+            privilegeManager.shizukuAvailable.collect { available ->
+                environmentState.set(ToolEnvironmentState.Flags.SHIZUKU_AVAILABLE, available)
             }
         }
 

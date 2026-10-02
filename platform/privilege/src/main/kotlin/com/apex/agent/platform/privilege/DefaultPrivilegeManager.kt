@@ -165,13 +165,22 @@ class DefaultPrivilegeManager @Inject constructor(
             }
         }
 
+    /**
+     * Shizuku 通道执行（T92 / #255 审计收敛）。
+     *
+     * 旧实现是 "Shizuku execution not yet implemented" 占位 stub —— 而真实
+     * 的 Shizuku 执行能力早已在 [ShizukuCommandExecutor]（IShizukuService
+     * .newProcess AIDL，uid=2000）落地，主链路（PrivilegeDetector /
+     * PrivilegedCommandSpawner）用的也是它。任何误入本方法的调用者都会拿到
+     * 假失败，与「权限链真实可用」的审计结论矛盾 —— 现改为直接委托同一
+     * 真实执行器，行为与主链路完全一致（超时强杀、诚实报错、绝不降级伪装）。
+     */
     private suspend fun executeViaShizuku(command: String, timeoutMs: Long): ShellResult {
-        // Shizuku执行逻辑
-        // 实际实现需要Shizuku UserService
+        val result = ShizukuCommandExecutor.execute(command, timeoutMs)
         return ShellResult(
-            success = false,
-            output = "Shizuku execution not yet implemented",
-            exitCode = -1,
+            success = result.success,
+            output = result.output,
+            exitCode = result.exitCode,
             executedVia = ExecutionVia.SHIZUKU
         )
     }

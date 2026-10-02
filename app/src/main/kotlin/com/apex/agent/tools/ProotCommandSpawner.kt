@@ -113,25 +113,56 @@ class ProotCommandSpawner(
     override fun spawn(request: SpawnRequest): SpawnedCommand {
         val ubuntu = resolveUbuntuRoute(request)
         val target: CommandSpawner = if (ubuntu != null) {
+            auditRoute(UBUSU_CHANNEL_ID, request.command, null)
             ubuntuSpawner(ubuntu)
         } else {
+            // 路由层只断言「降级到宿主链 + 原因」；宿主链具体选了 root-su /
+            // shizuku / local-sh 由 PrivilegedCommandSpawner 的下一条审计日志
+            // 给出（此刻读 fallback.channel 是 resolve 前的旧值，不诚实）。
+            auditRoute(HOST_FALLBACK_ROUTE, request.command, routeFallbackReason(request))
             fallback
         }
         active = target
         return target.spawn(request)
     }
 
+    /** T92（#255）审计日志：terminal.exec 路由决策（Ubuntu 沙箱 vs 宿主降级 + 原因）。 */
+    private fun auditRoute(channel: String, command: String, reason: String?) {
+        runCatching {
+            val why = reason?.let { " reason=$it" } ?: ""
+            AppLogger.instance.info(
+                LogCategory.TOOL,
+                AUDIT_SOURCE,
+                "privilege-chain route=$channel$why cmd=${command.logForm()}",
+                "privilege-chain", channel
+            )
+        }
+    }
+
+    /** 回落宿主通道的原因（与 resolveUbuntuRoute 的三个否决条件一一对应）。 */
+    private fun routeFallbackReason(request: SpawnRequest): String = when {
+        !isRootfsReady() -> "rootfs-not-ready"
+        isAndroidOnlyCommand(request.command) -> "android-only-command"
+        else -> "rootfs-unresolved"
+    }
+
+    private fun String.logForm(): String {
+        val collapsed = trim().replace(whitespaceRun, " ")
+        return if (collapsed.length <= MAX_LOG_CMD_LEN) collapsed
+        else collapsed.take(MAX_LOG_CMD_LEN) + "..."
+    }
+
     // ══════════════════════════════════════════════════════════════════
     //  路由决策
     // ══════════════════════════════════════════════════════════════════
 
-    /** Ubuntu 路由计划（null = 本次 spawn 回落 Android 通道）。 */
+    /** Ubuntu 路由计划（null = 本次 spawn 回落 Android 通道）。internal 供路由单测（T92/#255）。 */
     internal class UbuntuRoute(
         /** 真实 rootfs 根目录（versions/ 子目录解析结果）。 */
         val rootfs: File
     )
 
-    private fun resolveUbuntuRoute(request: SpawnRequest): UbuntuRoute? {
+    internal fun resolveUbuntuRoute(request: SpawnRequest): UbuntuRoute? {
         if (!isRootfsReady()) return null
         if (isAndroidOnlyCommand(request.command)) return null
         // cwd 不存在 = 与 ProcessBuilder.directory 语义一致地失败 —— 但那属于
@@ -375,6 +406,14 @@ class ProotCommandSpawner(
     companion object {
         /** Ubuntu 通道标识（terminal.exec 结果的 channel 字段）。 */
         const val UBUSU_CHANNEL_ID = "proot-ubuntu"
+
+        /** T92（#255）审计日志来源与命令截断上限（与 PrivilegeDetector 同一纪律）。 */
+        internal const val AUDIT_SOURCE = "ProotCommandSpawner"
+        internal const val MAX_LOG_CMD_LEN = 120
+
+        /** 宿主降级路由标记（真实宿主通道由 PrivilegedCommandSpawner 审计补充）。 */
+        internal const val HOST_FALLBACK_ROUTE = "host-fallback"
+        private val whitespaceRun = Regex("\\s+")
 
         /** guest 工作区挂载点（与 PTY 会话 / git runner 恒定一致）。 */
         internal const val GUEST_WORKSPACE = "/workspace"
