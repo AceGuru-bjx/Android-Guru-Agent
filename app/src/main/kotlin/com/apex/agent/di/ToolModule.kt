@@ -802,46 +802,13 @@ object ToolModule {
         registry.register(SafeAgentTool(GetLocationTool(shellExec)))
         registry.register(SafeAgentTool(NotificationReadTool(shellExec)))
 
-        // ═══ 9. 实用工具 (2 v1 + 15 v2) ═══
-        registry.register(SafeAgentTool(CalculateTool()))
-        registry.register(SafeAgentTool(TextTransformTool()))
-        // ── Tool System v2：结构化数据/文本/时间工具（纯 JVM、离线、确定性）──
-        // json_path（JSONPath 查询）、regex_extract / regex_replace（正则抽取/替换）、
-        // text_diff（Myers diff）、datetime（6 操作）、uuid_generate（v4/v7）、
-        // file_hash（流式 md5/sha1/sha256/sha512 + 沙箱）
-        registry.register(SafeAgentTool(JsonPathTool()))
-        registry.register(SafeAgentTool(RegexExtractTool()))
-        registry.register(SafeAgentTool(RegexReplaceTool()))
-        registry.register(SafeAgentTool(TextDiffTool()))
-        registry.register(SafeAgentTool(DateTimeTool()))
-        registry.register(SafeAgentTool(UuidGenerateTool()))
-        registry.register(SafeAgentTool(FileHashTool(workspaceDir)))
-        // csv_query（RFC4180 查询/过滤/排序）、base_convert（2-36 任意进制 + 前缀探测）、
-        // string_distance（levenshtein/damerau/jaro-winkler）、random_generate（SecureRandom）
-        registry.register(SafeAgentTool(CsvQueryTool()))
-        registry.register(SafeAgentTool(BaseConvertTool()))
-        registry.register(SafeAgentTool(StringDistanceTool()))
-        registry.register(SafeAgentTool(RandomGenerateTool()))
-        // cron_next（Vixie cron 解析/下 N 次/人话解释）、duration_convert（人类时长↔秒）、
-        // unit_convert（长度/质量/数据/温度/速度）、xml_extract（XML 路径抽取 + XXE 防护）
-        registry.register(SafeAgentTool(CronTool()))
-        registry.register(SafeAgentTool(DurationConvertTool()))
-        registry.register(SafeAgentTool(UnitConvertTool()))
-        registry.register(SafeAgentTool(XmlExtractTool()))
+        // ═══ 9. 实用工具 (2 v1 + 15 v2) —— 注册体拆至 ToolModuleJvmToolsRegistration.kt
+        //    （SRP 预算：#290 合并后本文件 1221 行超 1200，纯 JVM 工具族边界天然清晰）═══
+        registerUtilityTools(registry, workspaceDir)
 
-        // ═══ 10. Terminal PTY — ATR 2.0 (9 new Agent-Native + 4 legacy compat + T73 ×2) ═══
-        // 9 new Agent-Native tools (Spec §34) — non-blocking, incremental, event-driven.
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCreateTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalRunTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalObserveTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWaitTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWriteTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSignalTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalResizeTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSnapshotTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
-        // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
+        // ═══ 10. Terminal PTY 前排 9+1 工具 —— 注册体拆至 ToolModuleRegistrySections.kt（SRP 预算）═══
+        registerTerminalPtyTools(registry, terminalRuntime)
+
         // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
         // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
         //（rootfs 就绪 → Ubuntu；否则回退 su>Shizuku>local-sh）—— 探到的就是
@@ -923,22 +890,8 @@ object ToolModule {
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyReadTool(terminalRuntime))))
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyListTool(terminalRuntime))))
 
-        // ═══ 11. GitHub (7，无条件注册) ═══
-        // P2-11（6-c）：原以 githubTokenManager.isConnected() 条件注册——Token 是
-        // 运行时状态而注册表是启动期快照，先连 Token 也需重启 App 才生效（死开关）。
-        // 无条件注册；未连接时 GithubApiService.authHeader() 抛
-        // "未连接 GitHub，请先配置 Token"，SafeAgentTool 兜底转错误串，Agent 可感知并引导用户连接。
-        registry.register(SafeAgentTool(GithubGetUserTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListReposTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubReadFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubWriteFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubCreateIssueTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListIssuesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchCodeTool(githubApiService)))
-        // 分支列表（写入非默认分支前探查）与仓库搜索（按关键词找仓库）。
-        // 根因修复补齐：searchCode 只能搜代码，找仓库需 /search/repositories。
-        registry.register(SafeAgentTool(GithubListBranchesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchReposTool(githubApiService)))
+        // ═══ 11. GitHub (9，无条件注册) —— 注册体拆至 ToolModuleRegistrySections.kt（同上 SRP 预算）═══
+        registerGithubTools(registry, githubApiService)
 
         // ═══ 11b. 消息连接器（微信/飞书/Telegram，2 个工具）═══
         // connector_list：列出启用的连接器与凭据状态；connector_send_message：
@@ -1004,37 +957,8 @@ object ToolModule {
         // 装载（工具结果即时返回全文 + 写入激活集持续注入后续轮次）。
         registry.register(SafeAgentTool(SkillActivateTool(skillRegistry, skillActivation)))
 
-        // ═══ 14. Tool System v3 新工具（纯 JVM，零新依赖）═══
-        // wait：Anthropic computer-use 语义的有界可取消等待（UI 稳定窗口）；
-        // json_transform：jq 风格七操作数据变换（工具间数据形状对齐）；
-        // version_compare：SemVer 排序（1.10.0 > 1.9.0，预发布阶梯）。
-        registry.register(SafeAgentTool(WaitTool()))
-        registry.register(SafeAgentTool(JsonTransformTool()))
-        registry.register(SafeAgentTool(VersionCompareTool()))
-
-        // ═══ 14b. Tool System v5 —— #171 四族合并（merged 包，旧工具上方保留）═══
-        // time（now/format/parse/add/diff/convert_tz/duration/cron_next，合并
-        // get_time+datetime+cron_next+duration_convert）、random（uuid_v4/v7+
-        // int/float/string/pick，合并 uuid_generate+random_generate）、
-        // regex（test/extract/replace/match_all/split，合并 regex_extract+
-        // regex_replace）、json（query/transform/validate/format，合并
-        // json_path+json_transform）。旧 id 已进 LEGACY_ALIAS_IDS，不再随请求
-        // 下发；此处注册的是新会话模型看到的唯一入口。
-        registry.register(SafeAgentTool(TimeTool()))
-        registry.register(SafeAgentTool(RandomTool()))
-        registry.register(SafeAgentTool(RegexTool()))
-        registry.register(SafeAgentTool(JsonTool()))
-
-        // ═══ 14c. Tool System v5 —— #172 上下文回顾三件套（context 包）═══
-        // 会话内自救：context_recap（结构化全景，CORE）/ context_search
-        // （子串定位）/ session_stats（画像）。数据源接线到 SharedPrefs
-        // ConversationMemory 单例（LlmMessage→ContextRecord，System 保留、
-        // content 截断 2000、assistant 工具调用补 [tool_call] 标记行）。
-        val sessionContext: SessionContextProvider =
-            ConversationMemoryContextProvider { conversationMemory.load() }
-        registry.register(SafeAgentTool(ContextRecapTool(sessionContext)))
-        registry.register(SafeAgentTool(ContextSearchTool(sessionContext)))
-        registry.register(SafeAgentTool(SessionStatsTool(sessionContext)))
+        // ═══ 14. Tool System v3/v5 新工具（纯 JVM）—— 注册体拆至同文件（同上 SRP 预算）═══
+        registerToolSystemV3V5Tools(registry, conversationMemory)
 
         // ═══ 14d. Tool System v5 —— #172 高级设备工具包（lambda 注入）═══
         // torch/vibrate/battery_status/network_info/tts_speak（SYSTEM）+
