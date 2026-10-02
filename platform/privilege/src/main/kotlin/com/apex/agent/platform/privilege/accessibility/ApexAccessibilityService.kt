@@ -3,12 +3,12 @@ package com.apex.agent.platform.privilege.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
-import android.graphics.HardwareBuffer
 import android.graphics.Path
 import android.graphics.Rect
 import android.content.Context
 import android.os.Build
 import android.os.Bundle
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.*
@@ -197,6 +197,8 @@ class ApexAccessibilityService : AccessibilityService() {
         return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
             runCatching {
                 takeScreenshot(
+                    // 主屏（displayId 是首个参数 —— API 30 套件签名三参）。
+                    Display.DEFAULT_DISPLAY,
                     // 直通 executor：回调在 binder 线程上执行（仅做位图拷贝 +
                     // resume，无阻塞操作）—— 不为每次截图新建线程（线程泄漏）。
                     java.util.concurrent.Executor { it.run() },
@@ -204,7 +206,8 @@ class ApexAccessibilityService : AccessibilityService() {
                         override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
                             val bmp = screenshot.hardwareBuffer?.let { hb ->
                                 try {
-                                    Bitmap.wrapHardwareBuffer(hb, HardwareBuffer.RGBA_8888)
+                                    // colorSpace 传 null = 默认 sRGB 语义。
+                                    Bitmap.wrapHardwareBuffer(hb, null)
                                         ?.copy(Bitmap.Config.ARGB_8888, false)
                                 } finally {
                                     hb.close()
