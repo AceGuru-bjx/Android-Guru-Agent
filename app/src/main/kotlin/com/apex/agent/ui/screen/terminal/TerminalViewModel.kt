@@ -1126,8 +1126,9 @@ class TerminalViewModel @Inject constructor(
      * 最长 2s 内误判存活 → 写死 PTY 假超时）。
      */
     private suspend fun ensureDepInstallSession(): Long? {
-        if (depSessionId != null && isSessionAliveRealtime(depSessionId)) return depSessionId
-        if (depSessionId != null) depSessionId = null  // 死亡 → 清缓存重建
+        val cached = depSessionId
+        if (cached != null && isSessionAliveRealtime(cached)) return cached
+        if (cached != null) depSessionId = null  // 死亡 → 清缓存重建
         provisioner.ensureUbuntuSession()?.let {
             depSessionId = it
             return it
