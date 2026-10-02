@@ -802,19 +802,9 @@ object ToolModule {
         //    （SRP 预算：#290 合并后本文件 1221 行超 1200，纯 JVM 工具族边界天然清晰）═══
         registerUtilityTools(registry, workspaceDir)
 
-        // ═══ 10. Terminal PTY — ATR 2.0 (9 new Agent-Native + 4 legacy compat + T73 ×2) ═══
-        // 9 new Agent-Native tools (Spec §34) — non-blocking, incremental, event-driven.
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCreateTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalRunTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalObserveTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWaitTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWriteTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSignalTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalResizeTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSnapshotTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
-        // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
+        // ═══ 10. Terminal PTY 前排 9+1 工具 —— 注册体拆至 ToolModuleRegistrySections.kt（SRP 预算）═══
+        registerTerminalPtyTools(registry, terminalRuntime)
+
         // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
         // 探针与 terminal.exec 共用同一 ExecEngine/ProotCommandSpawner 构造参数
         //（rootfs 就绪 → Ubuntu；否则回退 su>Shizuku>local-sh）—— 探到的就是
@@ -894,22 +884,8 @@ object ToolModule {
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyReadTool(terminalRuntime))))
         registry.register(SafeAgentTool(TerminalToolAdapter(LegacyListTool(terminalRuntime))))
 
-        // ═══ 11. GitHub (7，无条件注册) ═══
-        // P2-11（6-c）：原以 githubTokenManager.isConnected() 条件注册——Token 是
-        // 运行时状态而注册表是启动期快照，先连 Token 也需重启 App 才生效（死开关）。
-        // 无条件注册；未连接时 GithubApiService.authHeader() 抛
-        // "未连接 GitHub，请先配置 Token"，SafeAgentTool 兜底转错误串，Agent 可感知并引导用户连接。
-        registry.register(SafeAgentTool(GithubGetUserTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListReposTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubReadFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubWriteFileTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubCreateIssueTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubListIssuesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchCodeTool(githubApiService)))
-        // 分支列表（写入非默认分支前探查）与仓库搜索（按关键词找仓库）。
-        // 根因修复补齐：searchCode 只能搜代码，找仓库需 /search/repositories。
-        registry.register(SafeAgentTool(GithubListBranchesTool(githubApiService)))
-        registry.register(SafeAgentTool(GithubSearchReposTool(githubApiService)))
+        // ═══ 11. GitHub (9，无条件注册) —— 注册体拆至 ToolModuleRegistrySections.kt（同上 SRP 预算）═══
+        registerGithubTools(registry, githubApiService)
 
         // ═══ 11b. 消息连接器（微信/飞书/Telegram，2 个工具）═══
         // connector_list：列出启用的连接器与凭据状态；connector_send_message：
