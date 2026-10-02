@@ -192,6 +192,10 @@ data class MarketUiState(
     val clawHubQueryLoading: Boolean = false,
     /** 正在安装的技能 slug（行级 busy；null = 空闲，非 null 时禁用其它安装按钮防并发）。 */
     val clawHubInstallingSlug: String? = null,
+    /** P1（市场审计）：待确认安装的干运行预览 —— 非空时 MarketScreen 弹
+     * ManifestDryRunDialog（manifest 摘要/依赖/权限/promptInjection 警示），
+     * 用户确认后才真正落盘。此前三件套预览组件全为死码，所有源一点即装。 */
+    val installPreview: com.apex.agent.marketplace.MarketInstallManager.ManifestPreview? = null,
     /** 是否还有下一页（「加载更多」按钮可见性）。 */
     val clawHubHasMore: Boolean = false,
     /** 当前列表是否为搜索结果（控制「返回热门」提示）。 */
@@ -302,13 +306,50 @@ class MarketViewModel @Inject constructor(
      */
     internal val startupTracker = McpStartupTracker()
 
+    /** 安装确认的挂起等待桥（awaitInstallConfirmation ↔ confirm/dismiss）。 */
+    private var pendingInstallDecision: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
     init {
         refresh()
         loadMcpCatalog()
-        // Hub 安装完成 → 刷新市场快照（已装徽标 / MCP 列表联动）
+        // Hub / mcp.so 安装完成 → 刷新市场快照（已装徽标 / MCP 列表联动）。
+        // P1 修复：mcpSo.refreshMarket 此前三处 tryEmit 全仓零收集者 —— mcp.so
+        // 源安装后徽标/已配置列表不刷新，与 Hub 源行为不对称。
         hub.refreshMarket
             .onEach { refresh() }
             .launchIn(viewModelScope)
+        mcpSo.refreshMarket
+            .onEach { refresh() }
+            .launchIn(viewModelScope)
+        // P1 修复：接入安装确认门禁（市场内容不可信 → 干运行预览 → 用户目检
+        // → 才落盘+激活）。唤醒已建成但零接线的 ManifestDryRunDialog 三件套。
+        installManager.installConfirmGate = { preview ->
+            withContext(Dispatchers.Main) { awaitInstallConfirmation(preview) }
+        }
+    }
+
+    /** 挂起等待用户对安装预览的确认（主线程弹窗， CompletableDeferred 桥接）。 */
+    private suspend fun awaitInstallConfirmation(
+        preview: com.apex.agent.marketplace.MarketInstallManager.ManifestPreview
+    ): Boolean {
+        val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        pendingInstallDecision = deferred
+        _uiState.update { it.copy(installPreview = preview) }
+        return deferred.await()
+    }
+
+    /** 用户在安装预览对话框点「确认安装」。 */
+    fun confirmPendingInstall() {
+        pendingInstallDecision?.complete(true)
+        pendingInstallDecision = null
+        _uiState.update { it.copy(installPreview = null) }
+    }
+
+    /** 用户在安装预览对话框点「取消」（或点外部关闭）。 */
+    fun dismissPendingInstall() {
+        pendingInstallDecision?.complete(false)
+        pendingInstallDecision = null
+        _uiState.update { it.copy(installPreview = null) }
     }
 
     /** 全量刷新（IO 线程）：技能/MCP/连接器/插件快照 + cs-mem 健康数据。保留集成源列表避免安装后列表闪失。 */

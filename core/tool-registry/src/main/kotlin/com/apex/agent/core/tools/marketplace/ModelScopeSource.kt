@@ -33,7 +33,9 @@ import java.io.IOException
  */
 class ModelScopeSource(
     private val httpClient: OkHttpClient,
-    private val gitHubToken: String? = null
+    // P2（市场审计）：token 改为每次请求时取 —— 旧构造快照在 @Singleton 生命周期
+    // 内固化首帧值，用户登录/更换 GitHub token 后源永不感知（匿名配额继续降级）。
+    private val gitHubTokenProvider: () -> String? = { null }
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val baseUrl = "https://api.github.com/repos/modelscope/modelscope-skills"
@@ -107,12 +109,16 @@ class ModelScopeSource(
             .url("$baseUrl/git/trees/main?recursive=1")
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "ApexAgent/1.0")
-            .apply { gitHubToken?.let { header("Authorization", "Bearer $it") } }
+            .apply { gitHubTokenProvider()?.let { header("Authorization", "Bearer $it") } }
             .build()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return null
-            val body = response.body?.string() ?: return null
-            if (body.length > MAX_BODY_BYTES) return null
+            // P2（市场审计）：改流式限读 —— 旧 `body.string()` 先整体读入内存再查
+            // 长度，恶意超大响应的 OOM 防御形同虚设；与 HubSource/ClawHubSource/
+            // McpSoSource 的统一流式上限口径对齐。
+            val body = response.body?.byteStream()?.use { stream ->
+                stream.readBytesLimited(MAX_BODY_BYTES)
+            }?.toString(Charsets.UTF_8) ?: return null
             val treeArray = json.parseToJsonElement(body).jsonObject["tree"]?.jsonArray ?: return null
             return treeArray.mapNotNull { el ->
                 val obj = el.jsonObject
@@ -121,6 +127,21 @@ class ModelScopeSource(
                 if (type == "blob" && path != null) path else null
             }
         }
+    }
+
+    /** 流式限读（与 HubSource/ClawHubSource/McpSoSource 同款）：超限返回 null。 */
+    private fun java.io.InputStream.readBytesLimited(max: Int): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        while (total < max) {
+            val n = read(buf, 0, minOf(buf.size, max - total))
+            if (n < 0) break
+            out.write(buf, 0, n)
+            total += n
+        }
+        if (total >= max && read() >= 0) return null
+        return out.toByteArray()
     }
 
     /** 解析 SKILL.md frontmatter 的 name/description（只读前 64KB）。 */
@@ -150,7 +171,7 @@ class ModelScopeSource(
         val request = Request.Builder()
             .url("https://raw.githubusercontent.com/modelscope/modelscope-skills/main/$path")
             .header("User-Agent", "ApexAgent/1.0")
-            .apply { gitHubToken?.let { header("Authorization", "Bearer $it") } }
+            .apply { gitHubTokenProvider()?.let { header("Authorization", "Bearer $it") } }
             .build()
         return try {
             httpClient.newCall(request).execute().use { response ->

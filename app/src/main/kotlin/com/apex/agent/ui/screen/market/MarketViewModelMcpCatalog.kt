@@ -98,14 +98,25 @@ internal fun MarketViewModel.loadMcpCatalog() {
         val seen = HashSet<String>()
         val deduped = entries.filter { seen.add(it.id) }
         val dedupDrops = entries.size - deduped.size
+        // P2（#206 加固收尾）：非法条目过滤 —— 注释承诺“非法条目不进入列表”
+        // 但旧实现只去重未滤非法（LazyColumn 的 item key 与安装装配都假定
+        // id 合法）。“重复”类 issue 的 entryId 与首个同 id，不计入非法集
+        //（去重逻辑已另行处理，避免误杀合法首个）。
+        val invalidIds = issues
+            .filterNot { it.reason.startsWith("id 重复") }
+            .map { it.entryId }
+            .toSet()
+        val legal = deduped.filterNot { it.id in invalidIds }
+        val illegalDrops = deduped.size - legal.size
         _uiState.update {
             it.copy(
-                mcpCatalog = deduped,
+                mcpCatalog = legal,
                 mcpCatalogLoaded = true,
                 mcpCatalogError = buildList {
                     errors.forEach { e -> add(e) }
                     issues.forEach { i -> add("${i.entryId}: ${i.reason}") }
                     if (dedupDrops > 0) add("跨文件重复 id：已丢弃 $dedupDrops 条")
+                    if (illegalDrops > 0) add("非法条目：已拦截 $illegalDrops 条（不进列表）")
                 }.takeIf { l -> l.isNotEmpty() }?.joinToString("；")
             )
         }

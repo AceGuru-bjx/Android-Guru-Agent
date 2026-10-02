@@ -22,8 +22,6 @@
     <string name="market_action_uninstall">Uninstall</string>
     <string name="market_action_load">Load</string>
     <string name="market_action_delete">Delete</string>
-    <string name="market_action_connect">Connect</string>
-    <string name="market_action_disconnect">Disconnect</string>
     <string name="market_action_search">Search</string>
     <string name="market_action_retry">Retry</string>
     <string name="market_action_refresh">Refresh</string>
