@@ -312,79 +312,98 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Generate xdelta3 patches (vs previous release)
+      - name: "Generate xdelta3 patches (multi-base: recent releases → this release)"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq xdelta3 >/dev/null
-          # 上一版本 tag：发布仓库优先（后续版本的家），回退开发仓库（历史版本）。
+          # ── 多基底补丁（v1.4.5：跨任意版本一步直达）────────────────────────
+          # 旧方案只对「上一版」出补丁 —— 用户隔两个版本就要走 N 段链式合成
+          #（下载量 ×N、合成耗时 ×N）。本方案对最近 PATCH_BASES 个版本各出
+          # 一份单跳补丁：窗口内任意版本 → 本版一步到位（rootfs 不变时补丁
+          # 体积与相邻版相当，~16MB 级）。窗口外的老版本仍可用 patches.json
+          # 的链式路径（多基底边让链也大幅缩短），再老就回退全量包。
           # 正则兼容自动构建序号版（v1.4.2.1）—— 连续合并 PR 未改版本号时，
-          # 上一版可能是 4 段 tag。
-          find_prev_tag() {
+          # 基底可能是 4 段 tag。
+          PATCH_BASES="${PATCH_BASES:-3}"
+          list_base_tags() {
             local repo="$1"
-            gh api "repos/$repo/releases?per_page=50" --jq '.[].tag_name' 2>/dev/null \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' | grep -v "^${TAG}$" | head -1 || true
+            gh api "repos/$repo/releases?per_page=60" --jq '.[].tag_name' 2>/dev/null \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' | grep -v "^${TAG}$" \
+              | head -"$PATCH_BASES" || true
           }
-          PREV_TAG=$(find_prev_tag "$RELEASE_REPO")
-          PREV_SRC="${RELEASE_REPO}"
-          if [ -z "$PREV_TAG" ]; then
-            PREV_TAG=$(find_prev_tag "$DEV_REPO")
-            PREV_SRC="${DEV_REPO}"
+          BASES=$(list_base_tags "$RELEASE_REPO")
+          BASE_SRC="${RELEASE_REPO}"
+          if [ -z "$BASES" ]; then
+            BASES=$(list_base_tags "$DEV_REPO")
+            BASE_SRC="${DEV_REPO}"
           fi
-          if [ -z "$PREV_TAG" ]; then
-            echo "⚠️ 未找到上一版本 release —— 跳过补丁生成（首版正常）"
+          if [ -z "$BASES" ]; then
+            echo "⚠️ 未找到历史版本 release —— 跳过补丁生成（首版正常）"
             exit 0
           fi
-          echo "🔗 上一版本：${PREV_TAG}（来源 ${PREV_SRC}）"
+          # 首个基底 = 上一版（primary：进 version.json 的单补丁档，兼容老客户端）
+          PRIMARY_BASE=$(echo "$BASES" | head -1)
+          echo "🔗 基底窗口（来源 ${BASE_SRC}，共 $(echo "$BASES" | wc -l) 个）："
+          echo "$BASES" | sed 's/^/    - /'
           # meta/ 存内部工作文件（不进 Release 资产）；dist/ 只放对外产物
+          # TSV 四列：variant | fromTag | patch 文件名 | primary(1=上一版)
           mkdir -p prev meta
           : > meta/patch_meta.tsv
-          for VARIANT in arm64 universal; do
-            NEW_APK=$(ls dist/*-${VARIANT}-*.apk | head -1)
-            # 下载旧包 → 出补丁 → 立即删旧包（universal ~900MB，磁盘峰值控制）
-            gh release download "$PREV_TAG" --repo "$PREV_SRC" \
-              --pattern "*-${VARIANT}-*.apk" --dir prev/ --clobber >/dev/null 2>&1 || true
-            PREV_APK=$(ls prev/*-${VARIANT}-*.apk 2>/dev/null | head -1 || true)
-            if [ -z "$PREV_APK" ]; then
-              echo "⚠️ ${PREV_TAG} 无 ${VARIANT} 资产 —— 跳过该变体补丁"
-              continue
-            fi
-            PATCH_NAME="patch_${VARIANT}_${PREV_TAG}_to_${TAG}.vcdiff"
-            echo "⚙️  xdelta3: ${PREV_APK} + ${NEW_APK} → ${PATCH_NAME}"
-            # 显式 -S lzma：与 App 内 VcdiffDecoder 的支持面对齐（Ubuntu 发行版
-            # 默认即 lzma，但显式化可免 runner 升级后的行为漂移）；不支持时回退
-            # 无二级压缩的原生 VCDIFF（App 同样可解码，体积略大）
-            if ! xdelta3 -e -f -S lzma -s "$PREV_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
-              echo "⚠️ -S lzma 不可用（${VARIANT}）—— 回退无二级压缩"
-              if ! xdelta3 -e -f -s "$PREV_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
-                echo "⚠️ xdelta3 失败（${VARIANT}）—— 跳过该补丁"
+          for BASE in $BASES; do
+            for VARIANT in arm64 universal; do
+              NEW_APK=$(ls dist/*-${VARIANT}-*.apk | head -1)
+              # 下载基底包 → 出补丁 → 立即删基底（universal ~900MB，磁盘峰值控制）
+              rm -f prev/*.apk
+              gh release download "$BASE" --repo "$BASE_SRC" \
+                --pattern "*-${VARIANT}-*.apk" --dir prev/ --clobber >/dev/null 2>&1 || true
+              BASE_APK=$(ls prev/*-${VARIANT}-*.apk 2>/dev/null | head -1 || true)
+              if [ -z "$BASE_APK" ]; then
+                echo "⚠️ ${BASE} 无 ${VARIANT} 资产 —— 跳过该补丁"
                 continue
               fi
-            fi
-            # 补丁体积守卫：> 60% 新包即无意义（rootfs 大改时直接下全量）
-            NEW_SIZE=$(stat -c%s "$NEW_APK")
-            PATCH_SIZE=$(stat -c%s "dist/${PATCH_NAME}")
-            if (( PATCH_SIZE * 10 > NEW_SIZE * 6 )); then
-              echo "🗑️  补丁 ${PATCH_SIZE}B > 60% 新包 ${NEW_SIZE}B —— 丢弃（不发布）"
-              rm -f "dist/${PATCH_NAME}"
-              continue
-            fi
-            echo -n "${VARIANT}|${PREV_TAG}|${PATCH_NAME}" >> meta/patch_meta.tsv
-            echo "" >> meta/patch_meta.tsv
-            echo "✅ ${PATCH_NAME} — $((PATCH_SIZE / 1024 / 1024)) MB（$((PATCH_SIZE * 100 / NEW_SIZE))% of ${VARIANT}）"
-            rm -f prev/*.apk
+              PATCH_NAME="patch_${VARIANT}_${BASE}_to_${TAG}.vcdiff"
+              echo "⚙️  xdelta3: ${BASE_APK} + ${NEW_APK} → ${PATCH_NAME}"
+              # 显式 -S lzma：与 App 内 VcdiffDecoder 的支持面对齐（Ubuntu 发行版
+              # 默认即 lzma，但显式化可免 runner 升级后的行为漂移）；不支持时回退
+              # 无二级压缩的原生 VCDIFF（App 同样可解码，体积略大）
+              if ! xdelta3 -e -f -S lzma -s "$BASE_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
+                echo "⚠️ -S lzma 不可用（${VARIANT}）—— 回退无二级压缩"
+                if ! xdelta3 -e -f -s "$BASE_APK" "$NEW_APK" "dist/${PATCH_NAME}"; then
+                  echo "⚠️ xdelta3 失败（${VARIANT}）—— 跳过该补丁"
+                  continue
+                fi
+              fi
+              # 补丁体积守卫：> 60% 新包即无意义（rootfs 大改时直接下全量）
+              NEW_SIZE=$(stat -c%s "$NEW_APK")
+              PATCH_SIZE=$(stat -c%s "dist/${PATCH_NAME}")
+              if (( PATCH_SIZE * 10 > NEW_SIZE * 6 )); then
+                echo "🗑️  补丁 ${PATCH_SIZE}B > 60% 新包 ${NEW_SIZE}B —— 丢弃（不发布）"
+                rm -f "dist/${PATCH_NAME}"
+                continue
+              fi
+              PRIMARY_FLAG=0
+              if [ "$BASE" = "$PRIMARY_BASE" ]; then PRIMARY_FLAG=1; fi
+              echo -n "${VARIANT}|${BASE}|${PATCH_NAME}|${PRIMARY_FLAG}" >> meta/patch_meta.tsv
+              echo "" >> meta/patch_meta.tsv
+              echo "✅ ${PATCH_NAME} — $((PATCH_SIZE / 1024 / 1024)) MB（$((PATCH_SIZE * 100 / NEW_SIZE))% of ${VARIANT}）"
+            done
           done
           rm -rf prev
           # 补丁说明进 Job Summary
           if [ -s meta/patch_meta.tsv ]; then
             {
               echo ""
-              echo "### 🔧 增量补丁（${PREV_TAG} → ${TAG}）"
-              while IFS='|' read -r VARIANT FROM NAME; do
-                echo "- \`${NAME}\` — $(( $(stat -c%s "dist/${NAME}") / 1024 / 1024 )) MB"
+              echo "### 🔧 增量补丁（多基底 → ${TAG}）"
+              while IFS='|' read -r VARIANT FROM NAME PRIMARY; do
+                MARK=""
+                if [ "$PRIMARY" = "1" ]; then MARK="（上一版 · primary）"; fi
+                echo "- \`${NAME}\` — $(( $(stat -c%s "dist/${NAME}") / 1024 / 1024 )) MB${MARK}"
               done < meta/patch_meta.tsv
+              echo ""
+              echo "窗口内任意版本可单跳升级到本版；更早版本由 patches.json 链式增量覆盖。"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -417,6 +436,8 @@ jobs:
           arm64 = asset(f"ApexAgent-v{version}-release-arm64-{sha8}.apk")
           universal = asset(f"ApexAgent-v{version}-release-universal-{sha8}.apk")
 
+          # 单补丁档只收 primary（上一版 → 本版）——老客户端 schema 兼容；
+          # 多基底单跳补丁全部走 patches.json（新客户端按索引直选/短路）。
           patch = None
           if os.path.exists("meta/patch_meta.tsv") and os.path.getsize("meta/patch_meta.tsv") > 0:
               patch = {}
@@ -425,7 +446,12 @@ jobs:
                       line = line.strip()
                       if not line:
                           continue
-                      variant, from_tag, fname = line.split("|")
+                      parts = line.split("|")
+                      # 四列：variant | fromTag | fname | primary（旧三列兼容）
+                      variant, from_tag, fname = parts[0], parts[1], parts[2]
+                      primary = parts[3] if len(parts) > 3 else "1"
+                      if primary != "1":
+                          continue
                       patch[variant] = {"fromTag": from_tag,
                                         "url": f"{base}/{fname}",
                                         "sizeBytes": os.path.getsize(f"dist/{fname}"),
@@ -449,11 +475,21 @@ jobs:
           # 行列表而非三引号多行串：块标量内 0 列文本会撕裂 YAML 结构。
           # 双落点双份 body：发布仓库（只存产物）与开发仓库（源码主页，镜像发布）。
           mb = lambda a: a["sizeBytes"] / 1024 / 1024
+          # 发布页补丁清单：多基底全量列出（文件名即基底信息，用户可辨识）
           patch_lines = "无（首次发布或 rootfs 大改）"
-          if patch:
-              patch_lines = "\n".join(
-                  f"- `{v}`: {p['fromTag']} → {tag} — {p['sizeBytes']//1024//1024} MB（xdelta3 VCDIFF）"
-                  for v, p in patch.items())
+          if os.path.exists("meta/patch_meta.tsv") and os.path.getsize("meta/patch_meta.tsv") > 0:
+              rows = []
+              with open("meta/patch_meta.tsv") as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      parts = line.split("|")
+                      variant, from_tag, fname = parts[0], parts[1], parts[2]
+                      size_mb = os.path.getsize(f"dist/{fname}") // 1024 // 1024
+                      rows.append(f"- `{variant}`: {from_tag} → {tag} — {size_mb} MB（xdelta3 VCDIFF）")
+              if rows:
+                  patch_lines = "\n".join(rows)
 
           def release_body(header_note):
               return "\n".join([
@@ -471,7 +507,8 @@ jobs:
                   patch_lines,
                   "",
                   "应用方式：App 内「关于 → 检查更新」下载补丁后**自动合成并拉起安装**",
-                  "（v1.4.5+ 内置 VCDIFF 解码器，无需命令行；跨多版本会自动链式应用）。",
+                  "（v1.4.5+ 内置 VCDIFF 解码器，无需命令行；窗口内版本单跳直达，",
+                  "更早版本自动链式应用）。",
                   "",
                   "### 📋 版本清单",
                   "`version.json` —— App 内「关于 → 检查更新」即读取此文件（含 SHA-256 校验）。",
@@ -540,8 +577,11 @@ jobs:
                       line = line.strip()
                       if not line:
                           continue
-                      variant, from_tag, fname = line.split("|")
+                      parts = line.split("|")
+                      # 四列：variant | fromTag | fname | primary（旧三列兼容）
+                      variant, from_tag, fname = parts[0], parts[1], parts[2]
                       # 幂等守卫：同 (variant, fromTag, toTag) 不重复追加
+                      #（多基底补丁也在此索引累积 —— 窗口内任意版本单跳直达）
                       dup = any(
                           p.get("variant") == variant and
                           p.get("fromTag") == from_tag and
@@ -594,7 +634,7 @@ jobs:
           make_latest: true
           files: dist/*
 
-      - name: Mirror Release to dev repository (主仓库同步发布)
+      - name: Mirror Release to dev repository (主仓库同步发布，仅 APK)
         if: needs.resolve.outputs.publishing == 'true'
         uses: softprops/action-gh-release@v2
         with:
@@ -602,11 +642,18 @@ jobs:
           # 防回环关键：GITHUB_TOKEN 产生的事件（tag/release 创建）不会触发新的
           # workflow run —— 若此处改用 PAT，创建的 tag 会以 push 事件再次点燃
           # 本流水线的 tags 触发器，形成死循环。
+          # v1.4.5 职责收紧：主仓库只镜像 APK + SHA 清单 + version.json ——
+          # 增量补丁（*.vcdiff）与补丁索引（patches.json）只放发布仓库，
+          # App 下载补丁固定走发布仓库直链（version.json/patches.json 的 URL
+          # 均指向 RELEASE_REPO）。dist/ 的补丁文件绝不进入主仓库。
           tag_name: ${{ needs.resolve.outputs.tag }}
           name: "Release ${{ needs.resolve.outputs.tag }}"
           body_path: release_body_dev.md
           make_latest: true
-          files: dist/*
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.apk
+            dist/version.json
 
       - name: Commit version.json to release repo main branch
         if: needs.resolve.outputs.publishing == 'true'

@@ -21,6 +21,9 @@ import java.io.File
  * 职责边界：
  * - **顺序下载**：补丁链逐段入队系统 DownloadManager（通知栏进度、断点
  *   续传、进程被杀不丢），每段完成即 SHA-256 校验，坏一段立即失败；
+ * - **断点续传（v1.4.5）**：流水线重启时逐段检查已落盘补丁 —— 体积对账
+ *   + SHA-256 对账通过的段直接跳过下载，只补缺失/损坏的段；跨进程重启、
+ *   跨页面导航的中断都能从断点继续，不重拉已完成的分段；
  * - **链式合成**：已安装 APK（applicationInfo.sourceDir，只读）+ 补丁 1 →
  *   产物 A；A + 补丁 2 → 产物 B…… 乒乓复用临时文件，峰值磁盘 ≈
  *   2×APK + 补丁体积（开始前做剩余空间预检，不足则劝导全量/清理）；
@@ -30,8 +33,9 @@ import java.io.File
  *   授权 URI），**不直接拉起安装器** —— 先上报 [State.Ready]，由 UI 弹
  *   「立即安装」确认框（用户主导安装时机），点击后经 [launchInstaller]
  *   拉起系统安装器；
- * - **自清理**：开工先清上次残留（含旧命令行方案遗留的 .vcdiff），成功
- *   后清全部补丁与中间产物，只留最终 APK 供安装器读取。
+ * - **自清理**：开工先清上次残留（链外旧补丁 / 中间产物 / 非目标版本合成
+ *   包；**链内补丁保留供断点续传**），成功后清全部补丁与中间产物，只留
+ *   最终 APK 供安装器读取。
  *
  * 状态经 [StateListener] 单向上报（IO 线程回调，UI 层自行切主线程）；
  * 全部失败折叠为 [State.Failed]（按 [FailKind] 本地化，不向上抛）——
@@ -90,7 +94,8 @@ class PatchUpdateEngine(
     /**
      * 启动流水线（幂等：正在跑则先取消旧的）。
      *
-     * @param scope 调用方组合域（离开页面即取消下载轮询与合成协程）
+     * @param scope 调用方作用域 —— v1.4.5 起传 [UpdateCenter] 的应用级作用域：
+     *   离开「关于页」不再中断下载与合成（后台持续 + 断点续传）
      * @param chain 补丁链（[UpdateChecker.resolvePatchChain] 的结果，非空有序）
      * @param manifest 更新清单（终局 SHA-256/体积对账）
      * @param mirror 已解析的下载镜像（URL 改写）
@@ -109,11 +114,11 @@ class PatchUpdateEngine(
         }
     }
 
-    /** 取消流水线并清理中间产物（补丁文件保留供人工诊断）。 */
+    /** 取消流水线（保留已下载补丁与中间产物 —— 下次 start 从断点继续）。 */
     fun cancel() {
         job?.cancel()
         job = null
-        runCatching { cleanStaleIntermediates(keepPatches = true) }
+        // 不清理：链内已验证补丁是断点续传的资产；仅在成功/换链时回收
     }
 
     /**
@@ -147,7 +152,7 @@ class PatchUpdateEngine(
         listener: StateListener
     ) {
         try {
-            runCatching { cleanStaleIntermediates(keepPatches = false) }
+            runCatching { cleanStaleIntermediates(chain) }
             val variant = chain.steps.first().variant
             val expectedAsset = assetForVariant(manifest, variant)
             val expectedSize = expectedAsset?.sizeBytes ?: 0L
@@ -166,11 +171,24 @@ class PatchUpdateEngine(
                 }
             }
 
-            // ── 阶段一：逐段下载补丁链 ────────────────────────────────────
+            // ── 阶段一：逐段下载补丁链（已验证段跳过 = 断点续传）──────────
             val patchFiles = ArrayList<File>(chain.steps.size)
             for ((index, step) in chain.steps.withIndex()) {
                 val number = index + 1
                 val fileName = step.url.substringAfterLast('/')
+                val segmentFile = downloader.localFile(fileName)
+                if (isSegmentComplete(segmentFile, step)) {
+                    // 断点续传：该段已完整落盘且指纹对账通过 —— 不重下
+                    AppLogger.instance.info(
+                        LogCategory.SYSTEM, "PatchUpdateEngine",
+                        "断点续传：补丁 $number/${chain.steps.size} 已就绪（$fileName）—— 跳过下载"
+                    )
+                    listener.onStateChanged(
+                        State.Downloading(number, chain.steps.size, 100, segmentFile.length())
+                    )
+                    patchFiles.add(segmentFile)
+                    continue
+                }
                 val enqueued = downloader.enqueue(
                     url = mirror.rewrite(step.url),
                     fileName = fileName,
@@ -310,14 +328,30 @@ class PatchUpdateEngine(
         }
     }
 
-    /** 清理旧中间产物；keepPatches=true 保留 .vcdiff 供人工诊断。 */
-    private fun cleanStaleIntermediates(keepPatches: Boolean) {
+    /**
+     * 补丁段完整性判定（断点续传的门闩）：
+     * - 体积对账先行（零成本）：清单带 sizeBytes 时长度不等 = 断段；
+     * - SHA-256 全量对账（~50ms/16MB）：防坏段/半段被误认完整；
+     * - 旧索引无 SHA：体积对账即放行（与全量包下载同策略）。
+     */
+    private fun isSegmentComplete(file: File, step: PatchIndex.Entry): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+        if (step.sizeBytes > 0 && file.length() != step.sizeBytes) return false
+        return step.sha256.isNullOrBlank() || downloader.verifySha256(file, step.sha256)
+    }
+
+    /**
+     * 清理旧中间产物：链式合成临时件 / 非目标版本合成包 / **链外**旧补丁
+     * （当前链内的 .vcdiff 保留 —— 断点续传资产，成功后由流水线尾部回收）。
+     */
+    private fun cleanStaleIntermediates(chain: PatchIndex.Chain) {
+        val chainFiles = chain.steps.map { it.url.substringAfterLast('/') }.toHashSet()
         val files = workDir.listFiles() ?: return
         for (file in files) {
             val name = file.name
             val stale = name.startsWith("ApexAgent-chain-step") ||
                 (name.startsWith("ApexAgent-v") && name.endsWith("-patched.apk")) ||
-                (!keepPatches && name.endsWith(".vcdiff"))
+                (name.endsWith(".vcdiff") && name !in chainFiles)
             if (stale) runCatching { file.delete() }
         }
     }

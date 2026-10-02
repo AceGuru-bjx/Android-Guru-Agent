@@ -63,12 +63,14 @@ import com.apex.agent.update.MirrorPrefs
 import com.apex.agent.update.MirrorSpeedProbe
 import com.apex.agent.update.PatchIndex
 import com.apex.agent.update.PatchUpdateEngine
+import com.apex.agent.update.UpdateCenter
 import com.apex.agent.update.UpdateCheckResult
 import com.apex.agent.update.UpdateChecker
 import com.apex.agent.update.UpdateDownloader
 import com.apex.agent.update.UpdateManifest
 import com.apex.agent.update.UpdateTarget
 import com.apex.agent.update.resolveAuto
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -121,12 +123,23 @@ private sealed interface DownloadFinished {
 internal fun UpdatePanel() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val checker = remember { UpdateChecker() }
+    // ── v1.4.5：更新中枢接管检查与增量流水线（应用级 —— 离开本页继续跑，
+    //    中断后从断点续传）。本面板只是中枢的一块仪表盘 + 全量包本地路径。──
+    val center = UpdateCenter
+    val checker = center.checker
     val probe = remember { MirrorSpeedProbe() }
     val downloader = remember { UpdateDownloader(context) }
-    val patchEngine = remember { PatchUpdateEngine(context, downloader) }
 
-    var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
+    // 中枢状态 → 组合（单一真相源：浮窗与本页共享同一份检查结果）
+    val checkStateRaw by center.checkState.collectAsStateWithLifecycle()
+    val patchIndex by center.patchIndex.collectAsStateWithLifecycle()
+    val patchFlow by center.patchState.collectAsStateWithLifecycle()
+    val updateState: UpdateUiState = when (val s = checkStateRaw) {
+        UpdateCenter.CheckState.Idle -> UpdateUiState.Idle
+        UpdateCenter.CheckState.Checking -> UpdateUiState.Checking
+        is UpdateCenter.CheckState.Done -> UpdateUiState.Done(s.result)
+    }
+
     var selectedMirror by remember { mutableStateOf(MirrorPrefs.load(context)) }
     var speeds by remember { mutableStateOf<Map<DownloadMirror, Long>>(emptyMap()) }
     var probing by remember { mutableStateOf(false) }
@@ -135,10 +148,6 @@ internal fun UpdatePanel() {
     var downloadPercent by remember { mutableStateOf(0) }
     var downloadedBytes by remember { mutableStateOf(0L) }
     var finished by remember { mutableStateOf<DownloadFinished?>(null) }
-
-    // 增量链路：全量补丁索引（跨版本数据源）+ 流水线状态（IO 回调 → 主线程）
-    var patchIndex by remember { mutableStateOf<PatchIndex.Model?>(null) }
-    var patchFlow by remember { mutableStateOf<PatchUpdateEngine.State?>(null) }
 
     // 就绪产物重入口：「稍后安装」之后（含离开页面再回来）仍可一键安装，
     // 不必重新下载/合成 —— readyPatch 为引擎合成的增量包，readyFull 为已
@@ -151,20 +160,26 @@ internal fun UpdatePanel() {
     val startedHintFmt = stringResource(R.string.settings_about_update_download_started)
 
     fun triggerCheck() {
-        if (updateState == UpdateUiState.Checking) return
-        updateState = UpdateUiState.Checking
-        scope.launch {
-            val result = checker.check(BuildConfig.VERSION_CODE)
-            // 有新版才拉补丁全量索引（最新版时白拉一趟）
-            if (result is UpdateCheckResult.Available) {
-                patchIndex = checker.fetchPatchIndex()
-            }
-            updateState = UpdateUiState.Done(result)
-        }
+        if (updateState is UpdateUiState.Checking) return
+        // 关于页手动检查 = 强制（跳过 6h 节流）：用户进更新面板即期待最新结果
+        center.checkForUpdate(
+            currentVersionCode = BuildConfig.VERSION_CODE,
+            force = true,
+            fromTrigger = "about-page"
+        )
     }
 
     // ── 进入页面自动静默检查一次（v1.4.3：不必再手动点第一次）────────────────
     LaunchedEffect(Unit) { triggerCheck() }
+
+    // ── 引擎就绪 → 登记重入口（「稍后安装」后动作区仍可一键回弹）──────────────
+    // 中枢状态流变 Ready 时同步本地 readyPatch（磁盘复核扫描的运行时孪生）
+    LaunchedEffect(patchFlow) {
+        val flow = patchFlow
+        if (flow is PatchUpdateEngine.State.Ready) {
+            readyPatch = flow
+        }
+    }
 
     // ── 就绪产物重入口：清单就绪后扫描磁盘（上次「稍后安装」的包仍可直接装）──
     // 优先级：清掉陈旧合成产物 → 复核增量就绪包 → 复核全量就绪包。
@@ -192,7 +207,7 @@ internal fun UpdatePanel() {
             }
             return@LaunchedEffect
         }
-        if (!patchEngine.isRunning) {
+        if (!center.patchEngine.isRunning) {
             withContext(Dispatchers.IO) {
                 // 陈旧合成产物（非目标版本的 -patched.apk）——引擎产物而非
                 // DownloadManager 托管文件，引擎空闲时清理安全
@@ -205,7 +220,7 @@ internal fun UpdatePanel() {
             }
         }
         val asset = checker.preferredAsset(manifest)
-        val patchFile = patchEngine.readyApkFor(manifest)
+        val patchFile = center.patchEngine.readyApkFor(manifest)
         val patchOk = withContext(Dispatchers.IO) {
             patchFile.exists() && downloader.verifySha256(patchFile, asset?.sha256)
         }
@@ -306,10 +321,9 @@ internal fun UpdatePanel() {
         }
     }
 
-    // ── 发起增量更新（引擎内全自动：链下载 → 合成 → 校验 → 就绪弹安装按钮）──
+    // ── 发起增量更新（中枢内全自动：链下载 → 合成 → 校验 → 就绪弹安装按钮）──
+    // 应用级流水线：离开本页下载与合成继续；中断后重启只补缺失分段（断点续传）
     fun startPatchFlow(chain: PatchIndex.Chain, manifest: UpdateManifest) {
-        if (patchEngine.isRunning) return
-        patchFlow = null
         // 补丁体积小（11~18MB/段）：AUTO 且已有测速则复用，否则直连 GitHub
         // —— 不为小文件现场跑一轮四节点探测
         val resolved = if (selectedMirror == DownloadMirror.AUTO && speeds.isNotEmpty()) {
@@ -317,22 +331,12 @@ internal fun UpdatePanel() {
         } else if (selectedMirror == DownloadMirror.AUTO) {
             DownloadMirror.DIRECT
         } else selectedMirror
-        patchEngine.start(scope, chain, manifest, resolved) { state ->
-            // 引擎在 IO 线程回调 → 组合域（主线程）落状态；Ready 同时登记
-            // 就绪重入口（「稍后安装」后仍可从动作区一键回弹安装确认框）
-            scope.launch {
-                patchFlow = state
-                if (state is PatchUpdateEngine.State.Ready) readyPatch = state
-            }
-        }
+        center.startPatchFlow(chain, manifest, resolved)
     }
 
-    // ── 立即安装（就绪产物 → 系统安装器；结果回 patchFlow 状态机）──────────
-    // 与引擎协程解耦：Ready 之后的安装触发不依赖流水线存活，可反复重发。
+    // ── 立即安装（就绪产物 → 系统安装器；结果经中枢状态流回弹）──────────
     fun installNow(apk: File) {
-        patchEngine.launchInstaller(apk) { state ->
-            scope.launch { patchFlow = state }
-        }
+        center.launchInstaller(apk)
     }
 
     // ═══ 面板主体 ═══
@@ -541,7 +545,11 @@ internal fun UpdatePanel() {
                                 val ready = readyPatch
                                 if (ready != null) {
                                     Button(
-                                        onClick = { patchFlow = ready },
+                                        onClick = {
+                                            // 就绪重入口：把磁盘复核通过的合成包重新
+                                            // 挂回中枢状态 → 弹安装确认框
+                                            center.restoreReadyState(ready.apk, ready.sizeBytes)
+                                        },
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Icon(
@@ -594,14 +602,54 @@ internal fun UpdatePanel() {
                                                 .padding(12.dp),
                                             verticalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Text(
-                                                stringResource(
-                                                    R.string.about_update_patch_recommended
-                                                ),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    stringResource(
+                                                        R.string.about_update_patch_recommended
+                                                    ),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                // 单跳直达 / N 段链式 —— 多基底补丁的
+                                                // 直达边让窗口内版本一步到位
+                                                Surface(
+                                                    shape = RoundedCornerShape(5.dp),
+                                                    color = if (chain.steps.size == 1) {
+                                                        MaterialTheme.colorScheme.primary
+                                                            .copy(alpha = 0.14f)
+                                                    } else {
+                                                        MaterialTheme.colorScheme
+                                                            .secondaryContainer.copy(alpha = 0.7f)
+                                                    }
+                                                ) {
+                                                    Text(
+                                                        text = if (chain.steps.size == 1) {
+                                                            stringResource(
+                                                                R.string.about_update_patch_direct
+                                                            )
+                                                        } else {
+                                                            stringResource(
+                                                                R.string.about_update_patch_chain_n,
+                                                                chain.steps.size
+                                                            )
+                                                        },
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (chain.steps.size == 1) {
+                                                            MaterialTheme.colorScheme.primary
+                                                        } else {
+                                                            MaterialTheme.colorScheme
+                                                                .onSecondaryContainer
+                                                        },
+                                                        modifier = Modifier.padding(
+                                                            horizontal = 6.dp, vertical = 2.dp
+                                                        )
+                                                    )
+                                                }
+                                            }
                                             val saved = if (full.sizeBytes > 0) {
                                                 // 守卫：清单缺 sizeBytes（旧 schema/手写清单）时
                                                 // 默认 0，Long 除零会直接抛 ArithmeticException
@@ -619,6 +667,9 @@ internal fun UpdatePanel() {
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.outline
                                             )
+                                            // 链路可视化：本地 →（分段）→ 目标，
+                                            // 每段标注体积 —— 用户看清「怎么走」
+                                            PatchChainPath(chain)
                                             Button(
                                                 onClick = { startPatchFlow(chain, manifest) },
                                                 modifier = Modifier.fillMaxWidth()
@@ -840,7 +891,7 @@ internal fun UpdatePanel() {
         is PatchUpdateEngine.State.Ready -> {
             val manifest = availableManifest
             AlertDialog(
-                onDismissRequest = { patchFlow = null },
+                onDismissRequest = { center.resetPatchState() },
                 title = { Text(stringResource(R.string.about_update_install_ready_title)) },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -867,7 +918,7 @@ internal fun UpdatePanel() {
                 },
                 dismissButton = {
                     // 稍后安装：保留 readyPatch 重入口（动作区一键回弹本框）
-                    TextButton(onClick = { patchFlow = null }) {
+                    TextButton(onClick = { center.resetPatchState() }) {
                         Text(stringResource(R.string.about_update_install_later))
                     }
                 }
@@ -875,7 +926,7 @@ internal fun UpdatePanel() {
         }
 
         is PatchUpdateEngine.State.Installed -> AlertDialog(
-            onDismissRequest = { patchFlow = null },
+            onDismissRequest = { center.resetPatchState() },
             title = { Text(stringResource(R.string.about_update_patch_done_title)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -892,7 +943,7 @@ internal fun UpdatePanel() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { patchFlow = null }) {
+                TextButton(onClick = { center.resetPatchState() }) {
                     Text(stringResource(R.string.settings_about_update_close))
                 }
             }
@@ -921,7 +972,7 @@ internal fun UpdatePanel() {
                 )
             }
             AlertDialog(
-                onDismissRequest = { patchFlow = null },
+                onDismissRequest = { center.resetPatchState() },
                 title = { Text(stringResource(R.string.about_update_patch_failed_title)) },
                 text = {
                     Text(
@@ -939,7 +990,7 @@ internal fun UpdatePanel() {
                     }
                     TextButton(
                         onClick = {
-                            patchFlow = null
+                            center.resetPatchState()
                             if (manifest != null && chain != null) {
                                 startPatchFlow(chain, manifest)
                             }
@@ -951,7 +1002,7 @@ internal fun UpdatePanel() {
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        patchFlow = null
+                        center.resetPatchState()
                         startDownload()
                     }) {
                         Text(stringResource(R.string.about_update_patch_use_full))
@@ -966,7 +1017,10 @@ internal fun UpdatePanel() {
 
 // ── 小控件 ──────────────────────────────────────────────────────────────────
 
-/** 增量流水线进度：下载段（N/M · 百分比）或合成段（补丁 N/M · 百分比）。 */
+/**
+ * 增量流水线进度：下载段（N/M · 百分比 · 已下载字节）或合成段（补丁 N/M ·
+ * 百分比）—— v1.4.5 附「后台持续 + 断点续传」提示（离开页面不中断）。
+ */
 @Composable
 private fun PatchFlowProgress(flow: PatchUpdateEngine.State) {
     Column(
@@ -979,13 +1033,31 @@ private fun PatchFlowProgress(flow: PatchUpdateEngine.State) {
                     progress = { flow.percent / 100f },
                     modifier = Modifier.fillMaxWidth()
                 )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        stringResource(
+                            R.string.about_update_patch_downloading,
+                            flow.step, flow.steps, flow.percent
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    if (flow.bytesSoFar > 0) {
+                        Text(
+                            formatMb(flow.bytesSoFar),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                }
                 Text(
-                    stringResource(
-                        R.string.about_update_patch_downloading,
-                        flow.step, flow.steps, flow.percent
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline
+                    stringResource(R.string.about_update_patch_background_note),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
                 )
             }
 
@@ -1002,9 +1074,59 @@ private fun PatchFlowProgress(flow: PatchUpdateEngine.State) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline
                 )
+                Text(
+                    stringResource(R.string.about_update_patch_background_note),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+                )
             }
 
             else -> Unit
+        }
+    }
+}
+
+/**
+ * 补丁链路可视化 —— 本地版本 →（每段补丁 · 体积）→ 目标版本。
+ * 等宽小字 + 箭头，实验室标签风格；单段链只画一行直达。
+ */
+@Composable
+private fun PatchChainPath(chain: PatchIndex.Chain) {
+    val scheme = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        // 路径行：vLocal → vMid → … → vTarget（节点 = 补丁边界版本）
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val nodes = buildList {
+                add(chain.steps.firstOrNull()?.fromTag?.removePrefix("v") ?: "?")
+                chain.steps.forEach { add(it.toTag.removePrefix("v")) }
+            }
+            nodes.forEachIndexed { index, node ->
+                if (index > 0) {
+                    Text(
+                        " → ",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = scheme.outline
+                    )
+                }
+                Text(
+                    node,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = if (index == nodes.lastIndex) FontWeight.SemiBold
+                    else FontWeight.Normal,
+                    color = if (index == nodes.lastIndex) scheme.primary else scheme.onSurfaceVariant
+                )
+            }
+        }
+        // 分段体积行（>1 段才展开；单跳已在按钮上标总体积）
+        if (chain.steps.size > 1) {
+            Text(
+                chain.steps.joinToString(" · ") { formatMb(it.sizeBytes) },
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = scheme.outline
+            )
         }
     }
 }
