@@ -35,6 +35,34 @@ class ApexAccessibilityService : AccessibilityService() {
 
         /** #236 心跳门控用：keepAlive=false 的 JSON 快速判别（与 BootReceiver 同款）。 */
         private val KEEP_ALIVE_OFF_REGEX = Regex("\"keepAlive\"\\s*:\\s*false")
+
+        // #210：服务连接/断开的进程内广播。DefaultPrivilegeManager 借此把
+        // _accessibilityAvailable StateFlow 与真实生命周期同步 —— 此前状态流
+        // 构造后恒为初始值，用户开启无障碍后 Agent 仍走 input 命令回退。
+        // COW 列表：onServiceConnected 主线程遍历 vs 任意线程注册/反注册。
+        private val lifecycleListeners =
+            java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+
+        /**
+         * 注册无障碍可用性监听（sticky：注册即用当前真实状态回调一次，
+         * 消除「服务先连、管理器后建」的时序窗口）。
+         *
+         * @param listener 参数 connected=true 服务已连接，false 服务已断开
+         */
+        fun addLifecycleListener(listener: (Boolean) -> Unit) {
+            lifecycleListeners.add(listener)
+            listener(instance != null)
+        }
+
+        fun removeLifecycleListener(listener: (Boolean) -> Unit) {
+            lifecycleListeners.remove(listener)
+        }
+
+        private fun notifyAvailabilityChanged(connected: Boolean) {
+            lifecycleListeners.forEach { listener ->
+                try { listener(connected) } catch (_: Exception) {}
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -46,6 +74,8 @@ class ApexAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // #210：先落 instance 再广播，监听方回调内读到的状态与广播语义一致。
+        notifyAvailabilityChanged(true)
 
         // 心跳：每30秒检查主进程。
         // P2 fix（生命周期竞态）：旧实现在主线程做 binder IPC（runningAppProcesses），
@@ -74,6 +104,8 @@ class ApexAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         scope.cancel()
         instance = null
+        // #210：断开事件驱动 StateFlow 回落 false，下游选路立刻感知。
+        notifyAvailabilityChanged(false)
         super.onDestroy()
     }
 

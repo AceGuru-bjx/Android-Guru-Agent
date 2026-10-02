@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -34,7 +35,39 @@ class DefaultPrivilegeManager @Inject constructor(
 
     init {
         checkRoot()
-        // Shizuku和无障碍状态会在运行时更新
+        // #210：无障碍服务连接/断开事件驱动 _accessibilityAvailable（sticky：注册即回当前态）。
+        // 此前 StateFlow 构造后恒为初始值 —— 用户授权后 Agent 仍走 input 命令回退。
+        ApexAccessibilityService.addLifecycleListener { connected ->
+            _accessibilityAvailable.value = connected
+        }
+        watchShizukuBinder()
+    }
+
+    /**
+     * #212：Shizuku binder 生命周期 → StateFlow 实时回灌。
+     *
+     * received（sticky）/ dead / 授权结果三类事件直接写 _shizukuAvailable
+     * （同步赋值，无协程派发延迟），同步失效 PrivilegeDetector 的 30s 级别缓存，
+     * 保证授权/停止后 executeShell、终端通道、persistence 安装立即按新状态选路。
+     * 与 ApexApp 的日志监听并存（Shizuku 支持多监听者）：本处是状态真源。
+     */
+    private fun watchShizukuBinder() {
+        try {
+            Shizuku.addBinderReceivedListenerSticky {
+                _shizukuAvailable.value = checkShizuku()
+                PrivilegeDetector.invalidateCache()
+            }
+            Shizuku.addBinderDeadListener {
+                _shizukuAvailable.value = false
+                PrivilegeDetector.invalidateCache()
+            }
+            Shizuku.addRequestPermissionResultListener { _, _ ->
+                _shizukuAvailable.value = checkShizuku()
+                PrivilegeDetector.invalidateCache()
+            }
+        } catch (_: Exception) {
+            // Shizuku 未安装/未初始化：StateFlow 保持 false，executeShell 走 Root/NONE 路径
+        }
     }
 
     private fun checkRoot() {
@@ -325,19 +358,29 @@ class DefaultPrivilegeManager @Inject constructor(
         }
     }
 
+    /**
+     * #210：全仓此前零调用，StateFlow 构造后恒为 false。现在挂在三个生命周期点：
+     * 1. [watchShizukuBinder] 的 binder received/dead/授权结果回调（同步写流，不走本方法）；
+     * 2. ApexApp 的 Shizuku 事件回调（binder 变化后全量重探）；
+     * 3. 权限页 ON_RESUME / 授权动作返回（PermissionsViewModel.refresh）。
+     * 幂等：任意时刻任意次数调用结果一致；IO 调度 —— checkRoot 最多 fork 2s，
+     * 不压调用方线程。
+     */
     override suspend fun refreshStatus() {
-        checkRoot()
-        _shizukuAvailable.value = checkShizuku()
-        _accessibilityAvailable.value = ApexAccessibilityService.instance != null
+        withContext(Dispatchers.IO) {
+            checkRoot()
+            _shizukuAvailable.value = checkShizuku()
+            _accessibilityAvailable.value = ApexAccessibilityService.instance != null
+        }
     }
 
     private fun checkShizuku(): Boolean {
         // 之前是 TODO stub，永远返回 false；现在委托给 ShizukuCommandExecutor 真实探测
         // binder 存活 + 已授权（内部调用 Shizuku.pingBinder() + checkSelfPermission）。
         //
-        // TODO（听众接线）：ApexApp.initShizuku() 已注册 addBinderReceivedListenerSticky /
-        // addBinderDeadListener，但只 LOG，未把 binder 状态回灌 _shizukuAvailable；
-        // 应在那些回调里触发 refreshStatus() 让 StateFlow 实时反映 Shizuku 启停。
+        // #212 已接线：ApexApp.initShizuku() 与本类 [watchShizukuBinder] 均在 binder
+        // received/dead/授权结果回调里回灌 _shizukuAvailable，本方法负责“探测”，
+        // 事件驱动负责“实时”，二者配合让状态流不再滞后于 Shizuku 启停。
         return try {
             ShizukuCommandExecutor.isAvailable() && ShizukuCommandExecutor.hasPermission()
         } catch (e: Exception) {
