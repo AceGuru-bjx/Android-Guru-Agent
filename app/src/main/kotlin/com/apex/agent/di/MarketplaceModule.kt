@@ -28,7 +28,9 @@ object MarketplaceModule {
         httpClient: OkHttpClient,
         githubTokenManager: GithubTokenManager
     ): ModelScopeSource {
-        return ModelScopeSource(httpClient, gitHubToken = githubTokenManager.getToken())
+        // P2（市场审计）：传 provider 而非快照 —— @Singleton 构造时固化 token 的话，
+        // 用户登录/更换 GitHub token 后源永不感知（匿名配额继续降级）。
+        return ModelScopeSource(httpClient, gitHubTokenProvider = { githubTokenManager.getToken() })
     }
 
     /**

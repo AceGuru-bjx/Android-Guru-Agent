@@ -178,6 +178,17 @@ fun MarketScreen(viewModel: MarketViewModel = hiltViewModel()) {
             onDismiss = viewModel::dismissMcpStartup
         )
     }
+
+    // ═══ P1（市场审计）：安装确认门禁 —— 干运行预览（manifest 摘要/依赖/权限/
+    // promptInjection 警示）非空时弹窗，用户确认后才落盘+激活。唤醒此前零接线的
+    // ManifestDryRunDialog（点对即装 → 不可信内容先目检）。═══
+    state.installPreview?.let { preview ->
+        ManifestDryRunDialog(
+            preview = preview,
+            onConfirm = viewModel::confirmPendingInstall,
+            onDismiss = viewModel::dismissPendingInstall
+        )
+    }
 }
 
 /**

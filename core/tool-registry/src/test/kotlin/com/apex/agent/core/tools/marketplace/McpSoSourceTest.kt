@@ -154,7 +154,8 @@ class McpSoSourceTest {
         val result = McpSoSource.parseConfigEntry(json, fallbackName = "Google Search")
         assertTrue(result.isSuccess)
         val config = result.getOrThrow()
-        assertEquals("google-search", config.name)
+        // P2（市场审计）：目录卡名优先于远端键名 —— 徽标判定/防重装以目录名为键
+        assertEquals("Google Search", config.name)
         assertEquals(McpTransport.HTTP, config.transport)
         assertEquals("https://mcp.hasdata.com/mcp?apis=google_serp", config.url)
         assertEquals(mapOf("x-api-key" to "YOUR_KEY"), config.headers)

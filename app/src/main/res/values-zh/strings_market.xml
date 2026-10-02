@@ -22,8 +22,6 @@
     <string name="market_action_uninstall">卸载</string>
     <string name="market_action_load">加载</string>
     <string name="market_action_delete">删除</string>
-    <string name="market_action_connect">连接</string>
-    <string name="market_action_disconnect">断开</string>
     <string name="market_action_search">搜索</string>
     <string name="market_action_retry">重试</string>
     <string name="market_action_refresh">刷新</string>

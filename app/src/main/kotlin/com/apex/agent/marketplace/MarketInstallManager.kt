@@ -64,8 +64,29 @@ class MarketInstallManager @Inject constructor(
     // ═══ Skill：JSON 内容安装（全部安装路径的收口点：URL/模板/文件/魔搭/GitHub/ClawHub 都汇到这里）═══
     // 市场热加载闭环：install → registry 落盘 + changes 广播（工具表/目录热更）
     // → 这里再进激活集 → 下一轮系统提示词即携带新技能方法论，零重启零手动。
-    suspend fun installSkillFromJson(content: String): Result<String> =
+    //
+    // P1（市场审计）：安装确认门禁 —— 市场加载的 Skill JSON 是不可信第三方内容
+    // （promptInjection 直接进下一轮系统提示词），落盘+自动激活前给用户一次目检。
+    // 宿主（MarketViewModel）注入 UI 确认实现；null = 无门禁（单测/直连，旧行为）。
+    // @Volatile：主线程注入与 IO 线程安装读的可见性。
+    @Volatile
+    var installConfirmGate: (suspend (ManifestPreview) -> Boolean)? = null
+
+    /** 用户在确认对话框点了取消（调用方可据此静默或给出友好文案，区别于真失败）。 */
+    class InstallCancelledByUser : Exception("已取消安装，未写入任何内容")
+
+    suspend fun installSkillFromJson(content: String, trusted: Boolean = false): Result<String> =
         withContext(Dispatchers.IO) {
+            val gate = installConfirmGate
+            if (!trusted && gate != null) {
+                val preview = dryRunInstall(content).getOrNull()
+                    ?: return@withContext Result.failure(
+                        Exception("manifest 解析失败，已拒绝安装（无法预览的内容不盲装）")
+                    )
+                if (!gate(preview)) {
+                    return@withContext Result.failure(InstallCancelledByUser())
+                }
+            }
             skillRegistry.install(content).map { manifest ->
                 // 安装即装备：用户从市场装技能的意图就是要用；不激活的话
                 // 渐进披露目录里只是多一行摘要，方法论仍是「未装载」。
@@ -164,7 +185,8 @@ class MarketInstallManager @Inject constructor(
             "data_analyzer" -> SkillInstallTool.DATA_ANALYZER_TEMPLATE
             else -> return Result.failure(Exception("未知模板 $templateId"))
         }
-        return installSkillFromJson(manifestJson)
+        // 内置模板是应用自带可信内容，跳过安装确认门禁（弹窗即骚扰）。
+        return installSkillFromJson(manifestJson, trusted = true)
     }
 
     // ═══ Skill：本地文件导入（SAF Uri → .zip / .json 自动识别）═══
@@ -201,8 +223,11 @@ class MarketInstallManager @Inject constructor(
                     }
                 } else {
                     val content = String(bytes, Charsets.UTF_8)
-                    skillRegistry.install(content).fold(
-                        onSuccess = { "已安装 Skill：${it.name}（${it.id}，来自本地 JSON）" },
+                    // P1：本地 JSON 同样过门禁（不可信内容统一确认链）；改走收口点
+                    // installSkillFromJson —— 顺带补齐此前缺失的「安装即装备」激活
+                    // （旧直连 skillRegistry.install 装完不激活，目录里只是多一行摘要）。
+                    installSkillFromJson(content).fold(
+                        onSuccess = { it },
                         onFailure = { throw it }
                     )
                 }
