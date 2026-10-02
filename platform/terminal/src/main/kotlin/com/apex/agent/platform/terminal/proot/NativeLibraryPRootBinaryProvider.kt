@@ -4,6 +4,7 @@ import com.apex.agent.platform.terminal.linux.CpuArchitecture
 import com.apex.agent.platform.terminal.workspace.AbsolutePath
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.TimeUnit
 
 /**
  * P71: 生产 PRoot 二进制 provider —— 从 APK 的 nativeLibraryDir 定位 libproot.so。
@@ -16,14 +17,46 @@ import java.io.RandomAccessFile
  *  2. ELF 机器类型（读文件头 e_machine，字节级判定，不 exec）与设备支持 ABI 匹配
  *  3. `--version` 输出解析（真实 exec；探针失败 → version 为 null 但二进制仍可用 ——
  *     版本是诊断信息而非硬门槛，ptrace 环境差异不应阻断可用二进制）
+ *  4. T91（D5）：argv 能力双探针 → [PRootArgvCapabilities]（**两项独立**实测 ——
+ *     CI 实测 Debian 5.4 支持 `--kill-on-exit` 但不支持 `--`，能力正交，不能
+ *     耦合在单一方言里）。探针结果按二进制路径记忆化（provider 为 DI 单例，
+ *     availability/prepare 每会话都 verify —— 不允许每次 spawn 都多两次 exec）。
+ *
+ * 探针语义（两项同构）：
+ *  - `--kill-on-exit`：exec `<binary> --kill-on-exit --version`，exit 0 = 支持
+ *    （不 ptrace，任何环境可用）；
+ *  - `--`：exec `<binary> -- <sh> -c true`（带路径回退），exit 0 = 支持。
+ *    该探针会真实 exec guest 命令（经 tracer）—— ptrace 受限环境会给出
+ *    **假阴性**；假阴性方向安全：省略 `--` 在任何 proot 上均合法（上游形状
+ *    是 Termux 方言的子集）。任一路径 exit 0 即判支持（设备 /bin/sh 可能
+ *    不存在 → 回退 /system/bin/sh；CI runner 反之）。
+ *  - 两探针不可判定（exec 异常/超时）→ 保守省略该项。
  */
 class NativeLibraryPRootBinaryProvider(
     private val hostEnv: PRootHostEnvironment,
     /** 设备支持的 ABI 列表（app 注入 Build.SUPPORTED_ABIS；空 = 跳过 ABI 检查（JVM 测试））。 */
     private val supportedAbis: () -> List<String> = { emptyList() },
     /** 版本探针：给定二进制 → "--version" 输出首行（或 null）。默认真实 exec。 */
-    private val versionProbe: (File) -> String? = { binary -> defaultVersionProbe(binary, hostEnv) }
+    private val versionProbe: (File) -> String? = { binary -> defaultVersionProbe(binary, hostEnv) },
+    /**
+     * T91（D5）：`--kill-on-exit` 能力探针：true = 支持，false = 不支持，
+     * null = 不可判定（→ 保守省略）。默认真实 exec。
+     */
+    private val killOnExitProbe: (File) -> Boolean? = { binary ->
+        defaultKillOnExitProbe(binary, hostEnv)
+    },
+    /**
+     * T91（D5）：`--` 终结符能力探针（与 kill-on-exit 独立）：true = 支持，
+     * false = 不支持，null = 不可判定（→ 保守省略）。默认真实 exec（带
+     * shell 路径回退，见类 KDoc —— 假阴性方向安全）。
+     */
+    private val separatorProbe: (File) -> Boolean? = { binary ->
+        defaultSeparatorProbe(binary, hostEnv)
+    }
 ) : PRootBinaryProvider {
+
+    /** T91（D5）：探针结果记忆化（二进制路径 → 能力集；provider 为 DI 单例）。 */
+    private val capabilityCache = java.util.concurrent.ConcurrentHashMap<String, PRootArgvCapabilities>()
 
     override suspend fun locate(): Result<AbsolutePath> = runCatching {
         val f = hostEnv.prootBinary
@@ -57,9 +90,26 @@ class NativeLibraryPRootBinaryProvider(
             path = binary,
             version = versionText?.let { parseVersion(it) },
             architecture = elfArch,
-            executable = f.canExecute()
+            executable = f.canExecute(),
+            capabilities = capabilitiesFor(f)
         )
     }
+
+    // ─── T91（D5）：能力双探针（独立实测 + 记忆化） ───
+
+    /**
+     * 实测判定二进制能力集（记忆化）。每项探针三态：true = 发该项选项；
+     * false / null = 省略（省略在任何 proot 上均合法 —— 保守方向）。
+     */
+    internal fun capabilitiesFor(binary: File): PRootArgvCapabilities =
+        capabilityCache.computeIfAbsent(binary.absolutePath) {
+            val killOnExit = runCatching { killOnExitProbe(binary) }.getOrNull()
+            val separator = runCatching { separatorProbe(binary) }.getOrNull()
+            PRootArgvCapabilities(
+                supportsKillOnExit = killOnExit == true,
+                supportsOptionSeparator = separator == true
+            )
+        }
 
     // ─── ELF 解析（字节级，无 exec —— 在任何环境可跑） ───
 
@@ -112,7 +162,13 @@ class NativeLibraryPRootBinaryProvider(
         private const val EM_AARCH64 = 183
         private const val EM_386 = 3
 
-        /** 默认探针：真实 exec `<binary> --version`（Android/JVM 通用）。 */
+        /** `--kill-on-exit` 选项字面量（argv 构造/探针单一事实源）。 */
+        const val KILL_ON_EXIT_OPTION: String = "--kill-on-exit"
+
+        /** 探针单次有界等待（无界挂起不可判定 —— 与 E2E 探针同款防御）。 */
+        private const val PROBE_TIMEOUT_SECONDS = 10L
+
+        /** 默认版本探针：真实 exec `<binary> --version`（Android/JVM 通用）。 */
         private fun defaultVersionProbe(binary: File, hostEnv: PRootHostEnvironment): String? {
             return try {
                 val envMap = hostEnv.hostEnv()
@@ -128,5 +184,77 @@ class NativeLibraryPRootBinaryProvider(
                 null
             }
         }
+
+        /**
+         * T91（D5）：`--kill-on-exit` 能力探针 —— exec `<binary> --kill-on-exit
+         * --version`：exit 0 → true（选项被识别）；非零 → false（unknown
+         * option，如上游 5.1.0）；异常/超时 → null。不 ptrace，环境无关。
+         */
+        private fun defaultKillOnExitProbe(binary: File, hostEnv: PRootHostEnvironment): Boolean? {
+            return try {
+                val envMap = hostEnv.hostEnv()
+                val pb = ProcessBuilder(
+                    listOf(binary.absolutePath, KILL_ON_EXIT_OPTION, "--version")
+                )
+                pb.environment().clear()
+                pb.environment().putAll(envMap)
+                val proc = pb.start()
+                proc.inputStream.bufferedReader().readText()
+                proc.errorStream.bufferedReader().readText()
+                val exited = proc.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                if (!exited) {
+                    runCatching { proc.destroyForcibly() }
+                    null
+                } else {
+                    proc.exitValue() == 0
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        /**
+         * T91（D5）：`--` 终结符能力探针 —— exec `<binary> -- <sh> -c true`：
+         * `--` 被识别（Termux 补丁）→ guest `/bin/sh -c true` 经 tracer 真实执行
+         * → exit 0 → true；`--` 不被识别（上游）→ proot 立即报 unknown option
+         * → 非零 → false。shell 路径回退：设备 Android 的 /bin/sh 可能不存在
+         * （→ /system/bin/sh），CI runner 反之 —— 任一路径 exit 0 即判支持。
+         *
+         * 假阴性方向安全：ptrace 受限环境下 Termux proot 也会失败 → 判 false →
+         * 省略 `--` —— 省略形状在任何 proot 上均合法，仅丢失显式分界。
+         */
+        private fun defaultSeparatorProbe(binary: File, hostEnv: PRootHostEnvironment): Boolean? {
+            val envMap = hostEnv.hostEnv()
+            for (shell in SEPARATOR_PROBE_SHELLS) {
+                val supported = try {
+                    val pb = ProcessBuilder(
+                        listOf(binary.absolutePath, "--", shell, "-c", "true")
+                    )
+                    pb.environment().clear()
+                    pb.environment().putAll(envMap)
+                    val proc = pb.start()
+                    proc.inputStream.bufferedReader().readText()
+                    proc.errorStream.bufferedReader().readText()
+                    val exited = proc.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    if (!exited) {
+                        runCatching { proc.destroyForcibly() }
+                        null
+                    } else {
+                        proc.exitValue() == 0
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+                if (supported == true) return true
+                // false = 该 shell 路径被 proot 明确拒绝（unknown option '--' 或
+                // shell 不存在）→ 换下一个路径；null = 不可判定 → 继续尝试其余
+                // 路径（全部不可判定才落保守省略）
+            }
+            // 至少一条路径明确 false（unknown option）→ 不支持；全部不可判定 → 保守省略
+            return false
+        }
+
+        /** 分隔符探针的 shell 回退序列（设备/桌面双端覆盖）。 */
+        private val SEPARATOR_PROBE_SHELLS = listOf("/bin/sh", "/system/bin/sh")
     }
 }

@@ -51,6 +51,7 @@ class TerminalDiagnosticsToolTest {
         override fun screenStateFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.platform.terminal.screen.TerminalScreenState>? = null
         override fun semanticStateFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<TerminalSemanticState>? = null
         override fun styledScreenFlow(sessionId: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?>? = null
+        override fun terminalEventFlow(sessionId: Long, afterCursor: Long): kotlinx.coroutines.flow.Flow<com.apex.agent.platform.terminal.events.TerminalEvent>? = null
         override suspend fun recover(): List<Long> = emptyList()
         override suspend fun recoveredSnapshot(sessionId: Long): TerminalSemanticState? = null
     }
