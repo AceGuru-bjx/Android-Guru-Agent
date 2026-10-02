@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
+import com.apex.agent.core.tools.mcp.McpConfigValidator
 import com.apex.agent.core.tools.mcp.McpServerConfig
 import com.apex.agent.core.tools.mcp.McpTransport
 
@@ -53,20 +54,23 @@ import com.apex.agent.core.tools.mcp.McpTransport
  *   MCP server 的形态（`npx -y @xxx`、`uvx xxx`、`python xxx.py`）。
  * - [McpTransport.HTTP] / [McpTransport.SSE] —— 填远端 URL + 可选鉴权。
  *
- * 校验按传输方式分别生效：STDIO 要求命令非空，远端要求 URL 以 http 开头。
+ * #206：校验升级为 [McpConfigValidator] 全量预检（重名 / URL 协议 / 裸命令 /
+ *   宿主运行时缺失 / 环境变量注入字符…），错误阻断保存并逐条展示，警告仅提示。
  *
  * @param sandboxAvailable PRoot 沙箱是否就绪（内嵌 Ubuntu rootfs 已安装，由
  *   MarketViewModel 传入，Issue #163）。就绪时 STDIO 表单的「在 PRoot 沙箱中
  *   运行」开关可用且默认开（Android 宿主没有 npx/node，本地命令几乎必然要
  *   沙箱）；未就绪时开关禁用并提示先安装 Ubuntu 环境 —— 默认值 false 保证
  *   接线缺失时用户看到的是诚实的「不可用」而不是能点但必败的开关。
+ * @param validate #206 实时预检（市场 VM 提供：含既有配置名与沙箱就绪态）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddMcpDialog(
     onDismiss: () -> Unit,
     onAdd: (McpServerConfig) -> Unit,
-    sandboxAvailable: Boolean = false
+    sandboxAvailable: Boolean = false,
+    validate: ((McpServerConfig) -> List<McpConfigValidator.Finding>)? = null
 ) {
     McpConfigFormDialog(
         title = stringResource(R.string.market_mcp_add_title),
@@ -74,7 +78,8 @@ fun AddMcpDialog(
         sandboxAvailable = sandboxAvailable,
         confirmLabel = stringResource(R.string.market_mcp_add_connect),
         onDismiss = onDismiss,
-        onConfirm = onAdd
+        onConfirm = onAdd,
+        validate = validate
     )
 }
 
@@ -87,6 +92,7 @@ fun AddMcpDialog(
  *
  * @param initial 当前配置快照（预填表单）。
  * @param sandboxAvailable PRoot 沙箱就绪态（与 [AddMcpDialog] 同源）。
+ * @param validate #206 实时预检（编辑模式下重名检测会排除自身名，由 VM 侧处理）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,7 +100,8 @@ fun EditMcpDialog(
     initial: McpServerConfig,
     sandboxAvailable: Boolean = false,
     onSave: (McpServerConfig) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    validate: ((McpServerConfig) -> List<McpConfigValidator.Finding>)? = null
 ) {
     McpConfigFormDialog(
         title = stringResource(R.string.market_mcp_edit_title),
@@ -102,7 +109,8 @@ fun EditMcpDialog(
         sandboxAvailable = sandboxAvailable,
         confirmLabel = stringResource(R.string.market_mcp_edit_save),
         onDismiss = onDismiss,
-        onConfirm = onSave
+        onConfirm = onSave,
+        validate = validate
     )
 }
 
@@ -112,7 +120,12 @@ fun EditMcpDialog(
  * - initial == null → 添加模式：名称可编辑，transport 默认 STDIO，沙箱开关默认
  *   跟随可用性；
  * - initial != null → 编辑模式：名称锁定（锁定原因见 [EditMcpDialog]），全部字段
- *   预填，保留原 enabled 偏好。
+ *   预填，保留原 enabled 偏好与工位 scope（#206 修复：旧实现编辑保存会把
+ *   scope 静默重置回 "all"，分级归属丢失）。
+ *
+ * #206 预检接线：[validate] 非空时按当前草稿实时跑 [McpConfigValidator] ——
+ * 错误阻断保存（确认键禁用 + 红字逐条），警告以次要色提示（可保存）。
+ * 基础的格式校验（空名/非法字符/空命令）保留在本地，其余交给预检。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -122,7 +135,8 @@ private fun McpConfigFormDialog(
     sandboxAvailable: Boolean,
     confirmLabel: String,
     onDismiss: () -> Unit,
-    onConfirm: (McpServerConfig) -> Unit
+    onConfirm: (McpServerConfig) -> Unit,
+    validate: ((McpServerConfig) -> List<McpConfigValidator.Finding>)? = null
 ) {
     val isEdit = initial != null
     var name by remember { mutableStateOf(initial?.name ?: "") }
@@ -149,7 +163,35 @@ private fun McpConfigFormDialog(
     val isStdio = transport == McpTransport.STDIO
     val commandValid = command.trim().isNotBlank()
     val urlValid = url.trim().startsWith("http")
-    val valid = nameValid && (if (isStdio) commandValid else urlValid)
+    val baseValid = nameValid && (if (isStdio) commandValid else urlValid)
+
+    /** 当前表单草稿（确认与预检共用同一构造 —— 不会出现「预检的配置和保存的不一致」）。 */
+    fun buildDraft() = McpServerConfig(
+        name = name.trim(),
+        url = if (isStdio) "" else url.trim(),
+        transport = transport,
+        apiKey = apiKey.trim().takeIf { !isStdio && it.isNotBlank() },
+        // 编辑模式保留原 enabled 偏好（用户禁用的不会因编辑被重新打开）
+        enabled = if (isEdit) initial?.enabled ?: true else true,
+        command = command.trim().takeIf { isStdio && it.isNotBlank() },
+        args = if (isStdio) args.trim().split(ARGS_SPLIT).filter { it.isNotBlank() } else emptyList(),
+        env = if (isStdio) parseKeyValueLines(env) else emptyMap(),
+        // Issue #163：沙箱开关透传（远端形态强制 false；
+        // 未就绪时双重保险归 false，防止意外态写出沙箱配置）
+        runInSandbox = isStdio && runInSandbox && sandboxAvailable,
+        // 编辑模式保留导入路径写入的自定义请求头
+        headers = initial?.headers ?: emptyMap(),
+        // #206 修复：保留工位 scope（旧实现丢失后分级归属被打回 all）
+        scope = initial?.scope ?: "all"
+    )
+
+    // #206 预检：错误阻断保存；警告仅展示。编辑模式下名称锁定，重名检测对
+    // 自身名必然误报 —— 过滤掉（名称不可改，不会真产生覆盖）。
+    val findings = validate?.let { fn -> fn(buildDraft()) }
+        ?.filterNot { f -> isEdit && f.code == McpConfigValidator.Code.NAME_DUPLICATE }
+        .orEmpty()
+    val errorFindings = findings.filter { it.isError }
+    val valid = baseValid && errorFindings.isEmpty()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -279,30 +321,23 @@ private fun McpConfigFormDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+
+                // #206 预检结果：错误红字逐条（阻断保存），警告次要色（可保存）。
+                if (findings.isNotEmpty()) {
+                    findings.forEach { finding ->
+                        Text(
+                            text = finding.message,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (finding.isError) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = {
-                    onConfirm(
-                        McpServerConfig(
-                            name = name.trim(),
-                            url = if (isStdio) "" else url.trim(),
-                            transport = transport,
-                            apiKey = apiKey.trim().takeIf { !isStdio && it.isNotBlank() },
-                            // 编辑模式保留原 enabled 偏好（用户禁用的不会因编辑被重新打开）
-                            enabled = if (isEdit) initial?.enabled ?: true else true,
-                            command = command.trim().takeIf { isStdio && it.isNotBlank() },
-                            args = if (isStdio) args.trim().split(ARGS_SPLIT).filter { it.isNotBlank() } else emptyList(),
-                            env = if (isStdio) parseKeyValueLines(env) else emptyMap(),
-                            // Issue #163：沙箱开关透传（远端形态强制 false；
-                            // 未就绪时双重保险归 false，防止意外态写出沙箱配置）
-                            runInSandbox = isStdio && runInSandbox && sandboxAvailable,
-                            // 编辑模式保留导入路径写入的自定义请求头
-                            headers = initial?.headers ?: emptyMap()
-                        )
-                    )
-                },
+                onClick = { onConfirm(buildDraft()) },
                 enabled = valid
             ) { Text(confirmLabel) }
         },

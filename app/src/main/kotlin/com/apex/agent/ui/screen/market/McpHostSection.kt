@@ -56,7 +56,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.apex.agent.R
-import com.apex.agent.core.tools.ToolCategory
 import com.apex.agent.mcphost.McpHostManager
 import com.apex.agent.platform.mcphost.McpHostConfig
 import com.apex.agent.platform.mcphost.HostAuditEntry
@@ -406,24 +405,41 @@ private fun PortField(
     )
 }
 
-/** 分类 FilterChip 组（17 分类，风险分类开启时整组上方已有关注文案）。 */
+/**
+ * 分类 FilterChip 组（18 分类，#206：按 7 域分节渲染 + 本地化标签 ——
+ * 旧实现平铺裸枚举名 SHELL/FILE…，英文用户与非开发者完全无法理解）。
+ * 存储值仍是 ToolCategory.name（兼容已存配置）。
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CategoryChips(
     allowed: List<String>,
     onToggle: (String) -> Unit
 ) {
-    FlowRow(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        ToolCategory.entries.forEach { category ->
-            val selected = allowed.any { it.equals(category.name, ignoreCase = true) }
-            FilterChip(
-                selected = selected,
-                onClick = { onToggle(category.name) },
-                label = { Text(category.name, style = MaterialTheme.typography.labelSmall) }
+    Column {
+        com.apex.agent.core.tools.ToolDomain.inDisplayOrder().forEach { domain ->
+            val domainSelected = domain.categories.count { c ->
+                allowed.any { it.equals(c.name, ignoreCase = true) }
+            }
+            Text(
+                text = "${domain.label}（$domainSelected/${domain.categories.size}）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 1.dp)
             )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                domain.categories.forEach { category ->
+                    val selected = allowed.any { it.equals(category.name, ignoreCase = true) }
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onToggle(category.name) },
+                        label = { Text(category.label, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
         }
     }
 }
