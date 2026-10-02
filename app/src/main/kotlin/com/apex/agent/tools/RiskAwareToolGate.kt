@@ -22,8 +22,11 @@ import com.apex.agent.core.tools.ToolRisk
  *   的既有对话框）向用户弹窗：仅允许一次 / 本会话允许 / 拒绝；
  * - "仅允许一次" → 本次放行但不记录（下次再问）；
  * - "本会话允许" → 状态机记 ALLOWED_SESSION，之后静默放行；
- * - 拒绝 / 超时 → 状态机记 DENIED_SESSION，后续调用直接拒绝并给模型
- *   可执行指引（换方案，勿重试同一工具）；
+ * - 拒绝（用户显式点击，或弹窗被主动取消）→ 状态机记 DENIED_SESSION，
+ *   后续调用直接拒绝并给模型可执行指引（换方案，勿重试同一工具）；
+ * - 确认超时（#215）→ 超时未决：状态机不动（下次调用重新询问，
+ *   本会话不被静默封禁），本次调用明确失败并附「确认超时」语义 ——
+ *   绝不把超时静默记成会话级拒绝；
  * - `selfGated` 工具（shell_execute 已预置）跳过本门——它们自带更细粒度
  *   的命令级确认，双重弹窗只会骚扰用户。
  *
@@ -65,12 +68,21 @@ class RiskAwareToolGate(
         arguments: String
     ): GateDecision {
         val answer = gateway.ask(buildQuestion(metadata, arguments))
-        return when (answer.selectedOptionId) {
-            "allow_session" -> {
+        return when {
+            // #215 超时未决：不写 DENIED_SESSION —— 本会话该工具不被静默封禁，
+            // 下次调用重新询问；本次调用明确失败并附「确认超时」语义，
+            // 模型不会把无响应误读为同意（失败卡片对用户可见，不静默）。
+            answer.timedOut -> GateDecision.Deny(
+                "confirmation for '${tool.id}' timed out " +
+                    "(${ASK_TIMEOUT_MS / 1000}s, ${categoryLabel(metadata.category)}/${riskLabel(metadata.risk)}); " +
+                    "treat it as unanswered, not denied — the tool will be re-offered on the next call, " +
+                    "so ask the user again or pick a safer alternative"
+            )
+            answer.selectedOptionId == "allow_session" -> {
                 manager.allowForSession(tool.id)
                 GateDecision.Allow
             }
-            "allow_once" -> {
+            answer.selectedOptionId == "allow_once" -> {
                 // 不记录 —— 下次调用重新询问（真正的"一次"）。
                 GateDecision.Allow
             }

@@ -70,9 +70,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
@@ -83,7 +80,9 @@ import java.util.concurrent.atomic.AtomicLong
  * Code 屏以工作区为中心、工具卡以 diff/验证为核心），但引擎侧契约完全一致：
  * AgentEvent 流 → UI 状态归约 → ConfirmationSink/submitUserInput 回传。
  *
- * 精简的事件归约（16ms 级流式节流不做 —— 编码回复长度可控，直接增量 append）：
+ * 精简的事件归约（16ms 级流式节流不做 —— 编码回复长度可控，直接增量 append），
+ * 实现已按 God-file 预算拆至同包扩展 [CodeEventReducer.kt]（模式同
+ * AgentChatEventApplier）：
  * - ResponseChunk → 当前助手消息追加；
  * - ToolCallStart/Complete → 工具卡（code_edit/write 渲染 diff 摘要）；
  * - UserInputRequired → 挂起等待用户输入（ask_user）；
@@ -129,7 +128,10 @@ class CodeViewModel @Inject constructor(
     private val settingsRepository: com.apex.agent.ui.screen.settings.SettingsRepository,
     // v1.2 长任务中心：追踪器（事件流聚合）+ 复制引擎 + 存储（列表面板直读）
     // + 档位效能统计（长任务记录 → 工作区×档位聚合，档位效能页签数据源）
-    private val longTaskTracker: LongTaskTracker,
+    // 可见性：longTaskTracker 开放供 CodeEventReducer.kt（main 侧拆分）消费；
+    // taskCopyEngine / longTaskStore / thinkingEvolutionTracker 开放供
+    // CodeLongTaskCenterOps.kt（PR 侧拆分）消费——两个拆分文件并存所需。
+    internal val longTaskTracker: LongTaskTracker,
     internal val taskCopyEngine: TaskCopyEngine,
     internal val longTaskStore: LongTaskStore,
     internal val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
@@ -154,7 +156,7 @@ class CodeViewModel @Inject constructor(
     /** 工具/权限门的主动提问（AgentQuestion 结构化选项；与 ask_user 的纯文本通道并存）。 */
     val pendingAgentQuestion: StateFlow<AgentQuestion?> = userQuestionBridge.pendingQuestion
 
-    private val idGen = AtomicLong(0)
+    internal val idGen = AtomicLong(0)
     private var runJob: Job? = null
     private var editorJob: Job? = null
     private var sessionPersistJob: Job? = null
@@ -190,6 +192,14 @@ class CodeViewModel @Inject constructor(
 
     /** 上一轮 run 的错误数（引擎 3 滑窗口径近似：run 内滑窗错误峰值）。 */
     private var lastRunErrors = 0
+
+    // ═══ #209 错误条「重试」通道 ═══
+
+    /** 最近一次引擎运行的完整输入（含 @引用块/斜杠提示词；重试时原样重放）。 */
+    private var lastRunEngineInput: String? = null
+
+    /** 最近一次引擎运行的展示目标（长任务追踪文案；与 runEngine 口径一致）。 */
+    private var lastRunDisplayGoal: String? = null
 
     /** 工作区恢复/冲刷串行锁（快速连续切换时防交错）。 */
     private val sessionMutex = Mutex()
@@ -444,6 +454,11 @@ class CodeViewModel @Inject constructor(
     private fun runEngine(engineInput: String, displayGoal: String? = null) {
         val goal = displayGoal ?: engineInput
 
+        // #209：记录本次运行输入 —— 失败后错误条「重试」按原样重放
+        //（sendMessage / 斜杠路由 / 模板启动等所有入口统一覆盖）。
+        lastRunEngineInput = engineInput
+        lastRunDisplayGoal = displayGoal
+
         // Issue #164：发送前同步全局规则（设置页改动无需重启，下轮生效）。
         // 引擎侧注入详见 CodeAgentEngine.refreshContext + RulesProvider。
         codeEngineImpl?.updateGlobalRules(settingsRepository.agentSettings.value.globalRules)
@@ -485,7 +500,7 @@ class CodeViewModel @Inject constructor(
         startRenderTicker()
 
         runJob = viewModelScope.launch {
-            _uiState.update { it.copy(isRunning = true, error = null) }
+            _uiState.update { it.copy(isRunning = true, error = null, errorRetriable = false) }
             var aborted = false
             try {
                 codeEngine.execute(UserInput(text = engineInput)).collect { event ->
@@ -498,7 +513,9 @@ class CodeViewModel @Inject constructor(
                 aborted = true
                 // abort 或 VM 清理：静默
             } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "执行失败") }
+                // #209：异常文本先净化（类名映射/首行有效信息/过滤堆栈与 null），
+                // 再进错误条 —— 裸英文堆栈串不再直出；本次运行可一键重试。
+                showError(sanitizeErrorText(e), retriable = true)
             } finally {
                 _uiState.update {
                     it.copy(
@@ -565,7 +582,28 @@ class CodeViewModel @Inject constructor(
     }
 
     fun dismissError() {
-        _uiState.update { it.copy(error = null) }
+        _uiState.update { it.copy(error = null, errorRetriable = false) }
+    }
+
+    /**
+     * #209 错误条「重试」：原样重放最近一次引擎运行（runEngine 同路径 ——
+     * 不重复追加用户气泡，对话历史语义与 Agent 屏 retryLastUser 一致）。
+     * 无可重放运行或仍在运行时空操作。
+     */
+    fun retryLastRun() {
+        val input = lastRunEngineInput ?: return
+        if (_uiState.value.isRunning) return
+        runEngine(input, lastRunDisplayGoal)
+    }
+
+    /**
+     * 错误条统一出口（#209）：[retriable] = true 时 UI 渲染「重试」按钮 ——
+     * 仅引擎运行失败类错误（引擎 Error 事件按 recoverable 透传、collect 异常
+     * 恒为 true）；参数校验/状态冲突类（任务运行中、工作区冲突等）默认 false，
+     * 避免把重放入口挂在语义无关的错误上。
+     */
+    internal fun showError(message: String, retriable: Boolean = false) {
+        _uiState.update { it.copy(error = message, errorRetriable = retriable) }
     }
 
     fun clearConversation() {
@@ -689,17 +727,6 @@ class CodeViewModel @Inject constructor(
         }
     }
 
-    /** todo → 可渲染行（追踪器快照用：「☑ 文本」）。 */
-    private fun renderTodosForTracker(todos: List<CodeTodoTool.Todo>): List<String> = todos.map { todo ->
-        val mark = when (todo.status) {
-            "completed" -> "☑"
-            "in_progress" -> "◐"
-            "cancelled" -> "✕"
-            else -> "☐"
-        }
-        "$mark ${todo.content}"
-    }
-
     // ═══ 输入草稿（#154：@file:line 程序化插入通道）═══
 
     fun updateInputDraft(text: String) {
@@ -766,7 +793,7 @@ class CodeViewModel @Inject constructor(
     fun createWorkspace(name: String) {
         val created = workspaceManager.create(name)
         if (created == null) {
-            _uiState.update { it.copy(error = "无法创建工作区（名称为空或已存在）") }
+            showError("无法创建工作区（名称为空或已存在）")
             return
         }
         bindWorkspace(created)
@@ -779,11 +806,11 @@ class CodeViewModel @Inject constructor(
 
     fun deleteWorkspace(workspaceId: String) {
         if (_uiState.value.isRunning) {
-            _uiState.update { it.copy(error = "任务运行中，不能删除工作区") }
+            showError("任务运行中，不能删除工作区")
             return
         }
         if (workspaceId == "default") {
-            _uiState.update { it.copy(error = "默认工作区不可删除") }
+            showError("默认工作区不可删除")
             return
         }
         workspaceManager.delete(workspaceId)
@@ -905,7 +932,7 @@ class CodeViewModel @Inject constructor(
     }
 
     /** 会话快照防抖落盘（800ms；对齐 Agent 模式 ChatHistoryManager 惯例）。 */
-    private fun scheduleSessionPersist() {
+    internal fun scheduleSessionPersist() {
         val wsId = boundWorkspaceId ?: return
         sessionPersistJob?.cancel()
         sessionPersistJob = viewModelScope.launch {
@@ -917,166 +944,6 @@ class CodeViewModel @Inject constructor(
                 .onFailure { AppLogger.instance.warn(LogCategory.UI, "CodeSession", "会话快照落盘失败：${it.message}") }
         }
     }
-
-    // ═══ 事件归约 ═══
-
-    private fun reduce(event: AgentEvent) {
-        when (event) {
-            is AgentEvent.IterationStart -> {
-                _uiState.update { it.copy(currentIteration = event.iteration) }
-                // AUTO 可解释性已前移到发送前预检（resolveRuntimeThinkingLevel
-                // 产生 adaptiveDecision + 系统消息）；引擎侧从不接收 AUTO，
-                // 此处不再拉取引擎决策。
-            }
-
-            is AgentEvent.ResponseChunk -> _uiState.update { state ->
-                val messages = state.messages.toMutableList()
-                val last = messages.lastOrNull()
-                if (last != null && last.role == CodeChatMessage.Role.ASSISTANT && last.isStreaming) {
-                    messages[messages.size - 1] = last.copy(text = last.text + event.text)
-                } else {
-                    messages += CodeChatMessage(
-                        id = idGen.incrementAndGet(),
-                        role = CodeChatMessage.Role.ASSISTANT,
-                        text = event.text,
-                        isStreaming = true
-                    )
-                }
-                state.copy(messages = messages)
-            }
-
-            is AgentEvent.ResponseComplete -> {
-                _uiState.update { state ->
-                    state.copy(
-                        messages = state.messages.map { m ->
-                            if (m.isStreaming) m.copy(isStreaming = false) else m
-                        }
-                    )
-                }
-                scheduleSessionPersist()
-            }
-
-            is AgentEvent.ThinkingChunk -> Unit // 编码屏不渲染思维链（保持输出紧凑）
-
-            is AgentEvent.ToolCallStart -> _uiState.update { state ->
-                state.copy(
-                    messages = state.messages + CodeChatMessage(
-                        id = idGen.incrementAndGet(),
-                        role = CodeChatMessage.Role.TOOL,
-                        text = "",
-                        toolName = event.toolName,
-                        isStreaming = true
-                    )
-                )
-            }
-
-            is AgentEvent.ToolOutputChunk -> _uiState.update { state ->
-                val messages = state.messages.toMutableList()
-                val idx = messages.indexOfLast { it.role == CodeChatMessage.Role.TOOL && it.isStreaming }
-                if (idx >= 0) {
-                    val m = messages[idx]
-                    messages[idx] = m.copy(text = (m.text + event.chunk).take(4000))
-                }
-                state.copy(messages = messages)
-            }
-
-            is AgentEvent.ToolCallComplete -> {
-                _uiState.update { state ->
-                    val messages = state.messages.toMutableList()
-                    val idx = messages.indexOfLast { it.role == CodeChatMessage.Role.TOOL && it.isStreaming }
-                    val card = CodeChatMessage(
-                        id = idGen.incrementAndGet(),
-                        role = CodeChatMessage.Role.TOOL,
-                        text = event.output.take(4000),
-                        toolName = event.toolName,
-                        toolSuccess = event.success,
-                        durationMs = event.durationMs,
-                        isStreaming = false
-                    )
-                    if (idx >= 0) messages[idx] = card else messages += card
-                    state.copy(messages = messages, todos = codeTodoTool.snapshot())
-                }
-                // v1.2 长任务追踪：todo 变化即刷新追踪器快照（工具完成后是
-                // code_todo 改写的主要时点）
-                longTaskTracker.noteTodos(renderTodosForTracker(codeTodoTool.snapshot()))
-                // #154：编辑/写成功的文件自动成为「当前文件」（编辑器跟随最新现场）
-                if (event.success && (event.toolName == "code_edit" || event.toolName == "code_write")) {
-                    extractToolPath(event.arguments)?.let { openEditorFile(it) }
-                }
-                scheduleSessionPersist()
-            }
-
-            is AgentEvent.UserInputRequired -> _uiState.update {
-                it.copy(pendingQuestion = event.prompt)
-            }
-
-            // ═══ #197 PLAN 模式事件（Coding 屏 Build/Plan 双档）═══
-            is AgentEvent.PlanGenerated -> _uiState.update {
-                it.copy(plan = event.plan)
-            }
-
-            is AgentEvent.PlanAwaitingConfirmation -> _uiState.update {
-                it.copy(plan = event.plan, awaitingPlanConfirmation = true)
-            }
-
-            is AgentEvent.PlanConfirmed -> _uiState.update {
-                it.copy(
-                    awaitingPlanConfirmation = false,
-                    messages = it.messages + CodeChatMessage(
-                        id = idGen.incrementAndGet(),
-                        role = CodeChatMessage.Role.SYSTEM,
-                        text = "计划已确认，开始执行（${event.plan.steps.size} 步）"
-                    )
-                )
-            }
-
-            is AgentEvent.Error -> {
-                _uiState.update { it.copy(error = event.message) }
-                scheduleSessionPersist()
-            }
-
-            is AgentEvent.ContextCompressed -> {
-                _uiState.update {
-                    it.copy(
-                        contextUsedTokens = event.afterTokens,
-                        messages = it.messages + CodeChatMessage(
-                            id = idGen.incrementAndGet(),
-                            role = CodeChatMessage.Role.SYSTEM,
-                            text = "上下文已压缩（${event.beforeTokens} → ${event.afterTokens} tokens，${event.strategy}）"
-                        )
-                    )
-                }
-                scheduleSessionPersist()
-            }
-
-            is AgentEvent.Complete -> {
-                val summary = buildString {
-                    append("完成 · ${event.totalIterations} 轮 · ${event.totalToolCalls} 次工具 · ${event.totalDurationMs / 1000}s")
-                }
-                _uiState.update {
-                    it.copy(
-                        messages = it.messages + CodeChatMessage(
-                            id = idGen.incrementAndGet(),
-                            role = CodeChatMessage.Role.SYSTEM,
-                            text = summary
-                        ),
-                        todos = codeTodoTool.snapshot()
-                    )
-                }
-                scheduleSessionPersist()
-            }
-
-            is AgentEvent.Aborted -> _uiState.update { it.copy(isRunning = false) }
-
-            // Plan/Spec/Reflection/Step 事件在 CODING(BUILD) 循环不触发，保持完备即可
-            else -> Unit
-        }
-    }
-
-    /** 从工具调用参数 JSON 里提取 path 字段（code_edit/code_write 的文件跟随）。 */
-    private fun extractToolPath(arguments: String): String? = runCatching {
-        Json.parseToJsonElement(arguments).jsonObject["path"]?.jsonPrimitive?.content
-    }.getOrNull()?.takeIf { it.isNotBlank() }
 
     override fun onCleared() {
         runJob?.cancel()
@@ -1129,5 +996,52 @@ class CodeViewModel @Inject constructor(
 
         /** 渲染攒批窗口：25ms = 上限 40Hz（规格书：脉冲式输出）。 */
         const val RENDER_TICK_MS = 25L
+
+        // ═══ #209 错误文案净化（错误条不直出裸异常文本）═══
+
+        /** 高频异常类型 → 中文可读文案（模型运行时类与 llm-adapter 的 LlmErrorText 口径对齐）。 */
+        private val ERROR_FRIENDLY_TEXT: Map<String, String> = mapOf(
+            "SocketTimeoutException" to "网络请求超时，请检查网络后重试",
+            "ConnectException" to "网络连接失败，请检查网络或服务地址",
+            "UnknownHostException" to "无法解析服务地址，请检查网络或 API 配置",
+            "SocketException" to "网络连接异常断开，请检查网络后重试",
+            "SSLException" to "安全连接（SSL/TLS）失败，请检查证书或代理设置",
+            "EOFException" to "连接被服务端提前关闭，请稍后重试",
+            "IOException" to "数据读写异常，请检查网络或存储后重试",
+            "SerializationException" to "响应数据解析失败，请重试或更换模型",
+            "JsonEncodingException" to "响应数据解析失败（非 JSON 内容），请重试"
+        )
+
+        /** 堆栈帧样式行（at com.example.Foo.bar(Foo.kt:12)）——过滤目标。 */
+        private val STACK_FRAME_LINE = Regex("^\\s*at \\S+\\(")
+
+        /** 「a.b.ClassName: 前缀」样式 —— 剥离类名前缀只留可读描述。 */
+        private val EXCEPTION_NAME_PREFIX = Regex("^[\\w.$]+(?:Exception|Error)\\s*:\\s*")
+
+        /**
+         * 异常 → 错误条可读文案（#209）：
+         * 1. 高频类型直接映射中文（见 [ERROR_FRIENDLY_TEXT]）；
+         * 2. 其余取 message 首个有意义行（过滤空行/null 字样/堆栈帧/类名前缀）；
+         * 3. 全部无效时回退「执行失败（异常类型）」—— 堆栈与 null 字样绝不直出。
+         */
+        fun sanitizeErrorText(e: Throwable): String {
+            ERROR_FRIENDLY_TEXT[e::class.simpleName]?.let { return it }
+            val detail = e.message
+                ?.lineSequence()
+                ?.map { it.trim() }
+                ?.firstOrNull { line ->
+                    line.isNotEmpty() &&
+                        !line.equals("null", ignoreCase = true) &&
+                        !line.startsWith("Caused by:") &&
+                        !STACK_FRAME_LINE.containsMatchIn(line)
+                }
+                ?.let { EXCEPTION_NAME_PREFIX.replace(it, "").trim() }
+                .orEmpty()
+            return if (detail.isEmpty()) {
+                "执行失败（${e::class.simpleName ?: "未知异常"}）"
+            } else {
+                detail
+            }
+        }
     }
 }

@@ -22,6 +22,9 @@ data class CodeUiState(
     val isRunning: Boolean = false,
     val currentIteration: Int = 0,
     val error: String? = null,
+    // #209：当前 error 是否提供「重试」入口 —— 仅引擎运行失败类错误为 true；
+    // 参数校验/状态冲突类（任务运行中、工作区冲突等）保持 false，避免误导重放。
+    val errorRetriable: Boolean = false,
     val pendingQuestion: String? = null,
 
     // ── v1.5 思考逻辑（双引擎：深潜 = 自研七档 / 标准 = 标准任务循环）──

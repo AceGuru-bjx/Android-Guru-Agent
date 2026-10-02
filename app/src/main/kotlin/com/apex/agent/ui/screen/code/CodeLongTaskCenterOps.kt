@@ -78,7 +78,7 @@ private fun CodeViewModel.refreshThinkingStats() {
  */
 fun CodeViewModel.copyTask(id: String, options: LongTaskCopyOptions, relaunch: Boolean) {
     if (_uiState.value.isRunning) {
-        _uiState.update { it.copy(error = "任务运行中，不能复制重跑") }
+        showError("任务运行中，不能复制重跑")
         return
     }
     viewModelScope.launch {
@@ -93,7 +93,7 @@ fun CodeViewModel.copyTask(id: String, options: LongTaskCopyOptions, relaunch: B
                 appendSystemMessage("已创建任务副本「${copy.title}」（可从长任务面板重跑）")
             }
         }.onFailure { e ->
-            _uiState.update { it.copy(error = "复制任务失败：${e.message ?: "未知错误"}") }
+            showError("复制任务失败：${e.message ?: "未知错误"}")
         }
     }
 }
@@ -101,13 +101,13 @@ fun CodeViewModel.copyTask(id: String, options: LongTaskCopyOptions, relaunch: B
 /** 直接重跑一条历史记录（默认携带上下文/todos/文件清单）。 */
 fun CodeViewModel.relaunchTask(id: String) {
     if (_uiState.value.isRunning) {
-        _uiState.update { it.copy(error = "任务运行中，不能重跑") }
+        showError("任务运行中，不能重跑")
         return
     }
     viewModelScope.launch {
         val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
         if (record == null) {
-            _uiState.update { it.copy(error = "任务记录不存在") }
+            showError("任务记录不存在")
             return@launch
         }
         val prompt = taskCopyEngine.buildRelaunchPrompt(
@@ -127,13 +127,13 @@ fun CodeViewModel.relaunchTask(id: String) {
  */
 fun CodeViewModel.resumeTask(id: String, checkpointId: String? = null) {
     if (_uiState.value.isRunning) {
-        _uiState.update { it.copy(error = "任务运行中，不能续跑") }
+        showError("任务运行中，不能续跑")
         return
     }
     viewModelScope.launch {
         val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
         if (record == null) {
-            _uiState.update { it.copy(error = "任务记录不存在") }
+            showError("任务记录不存在")
             return@launch
         }
         val resumePrompt = taskCopyEngine.buildResumePrompt(record, checkpointId)
@@ -162,12 +162,12 @@ fun CodeViewModel.compareWithParent(id: String) {
         val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
         val parentId = record?.parentTaskId
         if (record == null || parentId == null) {
-            _uiState.update { it.copy(error = "无父任务可对比（非复制运行）") }
+            showError("无父任务可对比（非复制运行）")
             return@launch
         }
         val parent = withContext(Dispatchers.IO) { longTaskStore.get(parentId) }
         if (parent == null) {
-            _uiState.update { it.copy(error = "父任务记录已删除") }
+            showError("父任务记录已删除")
             return@launch
         }
         val diff = LongTaskDiff.compare(parent, record)

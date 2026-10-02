@@ -42,7 +42,9 @@ import kotlin.math.abs
  *  - 长按：起选 → 拖选扩选 → 抬手弹上下文菜单（复制/粘贴/全选）；
  *  - 滚动：单指位移 → 行滚动；甩动 → OverScroller 惯性（`verticalScrollBounce`
  *    开时边界有回弹衰减）；键入自动跳底（Termux `scrollForNewInput`）；
- *  - 捏合：字号 ±（1.25/0.8 阈值防抖）；
+ *  - 捏合：字号 ±（1.25/0.8 阈值防抖）—— **T91 起默认关闭**
+ *    （[TerminalViewSettings.pinchZoomEnabled]=false；捏合事件在 View 层被短路，
+ *    字号调节走宿主设置页 Slider）；
  *  - 双指快击：鼠标模式右键；
  *  - 硬件键：Ctrl+字母 → 控制字节；Alt+键 → ESC 前缀；方向/F 键 → TerminalKey。
  *
@@ -604,7 +606,9 @@ class TerminalView @JvmOverloads constructor(
             is TerminalGestureModel.GestureEvent.Fling ->
                 startScrollAnimation(event.velocityYPx)
             is TerminalGestureModel.GestureEvent.Pinch ->
-                handlePinch(event.scale)
+                // T91（D1）：设置未显式开启时在 View 层短路 —— 捏合手势完全沉寂
+                //（不进累子、不驱动 resizeTerminal），避免任何残留路径驱动字号。
+                if (settings.pinchZoomEnabled) handlePinch(event.scale)
             is TerminalGestureModel.GestureEvent.TapSecondFinger ->
                 handleSecondFingerTap(event.x, event.y)
         }

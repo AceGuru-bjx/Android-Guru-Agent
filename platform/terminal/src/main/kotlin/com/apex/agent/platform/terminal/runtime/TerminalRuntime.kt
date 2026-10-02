@@ -281,6 +281,16 @@ interface TerminalRuntime {
      */
     fun styledScreenFlow(sessionId: Long): Flow<com.apex.agent.terminalemulator.TerminalRenderSnapshot?>?
 
+    /**
+     * T91（D2-D4）：per-session 事件推流（TerminalEventBus 的 crash-safe 增量订阅
+     * —— afterCursor 锚点后的 OutputProduced/ProcessExited/SessionClosed/StateChanged
+     * 全量推送）。null = session 不存在。
+     *
+     * 消费方：terminal IPC 控制器（跨进程回调桥）。与 §41 家族同源 —— 事件驱动，
+     * 非轮询。additive（PR #60 冻结规则：只加不改）。
+     */
+    fun terminalEventFlow(sessionId: Long, afterCursor: Long = 0L): Flow<TerminalEvent>?
+
     // ───────── recover ─────────
     // Spec §39 — crash recovery. Call once on startup. Returns recovered session ids.
     // Dead PTY sessions appear as EXITED/BROKEN (never faked alive).
