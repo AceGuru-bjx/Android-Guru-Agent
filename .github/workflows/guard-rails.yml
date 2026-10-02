@@ -66,11 +66,11 @@ jobs:
         with:
           fetch-depth: 0
           # PR 事件 checkout 真实 head（非 merge ref）—— base..head 恰为 PR 提交
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Commit message convention check (type(scope): subject —— keywords)
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: "${{ github.event.pull_request.base.sha }}"
+          PUSH_BEFORE: "${{ github.event.before }}"
         run: |
           BASE="${PR_BASE:-$PUSH_BEFORE}"
           if [ -z "$BASE" ]; then BASE=$(git rev-parse HEAD~1); fi
