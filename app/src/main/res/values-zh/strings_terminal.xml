@@ -141,6 +141,11 @@
     <string name="term_session_dead_local">Android shell 进程已结束。\n重启将打开新的本地 shell。</string>
     <string name="term_session_restart">重启会话</string>
 
+    <!-- E2：活跃会话关闭确认（防误触，会话条 X 钮）-->
+    <string name="term_close_confirm_title">关闭此会话？</string>
+    <string name="term_close_confirm_text">会话进程将被立即终止，其中正在运行的任务（编译 / apt / 训练等）会随之丢失且无法恢复。</string>
+    <string name="term_close_confirm_ok">关闭会话</string>
+
     <!-- 配色方案选择器（Termux 风格主题）-->
     <string name="term_scheme_section">配色方案</string>
     <string name="term_scheme_current">当前主题</string>

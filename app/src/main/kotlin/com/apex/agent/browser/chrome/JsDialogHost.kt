@@ -17,7 +17,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,6 +27,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /*
  * JsDialogHost —— JS alert / confirm / prompt 的「人机双通道」对话框。
@@ -44,7 +44,7 @@ fun JsDialogHost(
     gateway: BrowserEngineGateway,
     config: ChromeConfig = ChromeConfig(),
 ) {
-    val requests by gateway.dialogRequests.collectAsState()
+    val requests by gateway.dialogRequests.collectAsStateWithLifecycle()
     val request = requests.firstOrNull() ?: return
     val p = chromePalette()
 

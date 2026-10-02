@@ -161,15 +161,18 @@ class WebFetchTool(
     }
 
     private fun extractStructure(html: String, url: String): String {
-        val title = Regex("<title[^>]*>(.*?)</title>", RegexOption.IGNORE_CASE)
+        // v2 预编译补齐：同函数旧版每次调用现编 6 个 Regex（:126-127 注释宣称
+        // 「全部提升为顶层预编译常量」却漏了本函数与 extractLinks），
+        // 现照 RX_* 先例提为文件级常量。
+        val title = RX_TITLE_BLOCK
             .find(html)?.groupValues?.get(1)?.trim() ?: "(untitled)"
-        val h1s = Regex("<h1[^>]*>(.*?)</h1>", RegexOption.IGNORE_CASE).findAll(html)
-            .map { it.groupValues[1].replace(Regex("<[^>]+>"), "") }.toList()
-        val h2s = Regex("<h2[^>]*>(.*?)</h2>", RegexOption.IGNORE_CASE).findAll(html)
-            .map { it.groupValues[1].replace(Regex("<[^>]+>"), "") }.toList()
-        val links = Regex("href=\"([^\"]+)\"").findAll(html).count()
-        val paragraphs = Regex("<p[^>]*>").findAll(html).count()
-        val images = Regex("<img[^>]*>").findAll(html).count()
+        val h1s = RX_H1_BLOCK.findAll(html)
+            .map { it.groupValues[1].replace(RX_ANY_TAG, "") }.toList()
+        val h2s = RX_H2_BLOCK.findAll(html)
+            .map { it.groupValues[1].replace(RX_ANY_TAG, "") }.toList()
+        val links = RX_HREF_ATTR.findAll(html).count()
+        val paragraphs = RX_P_OPEN.findAll(html).count()
+        val images = RX_IMG_OPEN.findAll(html).count()
         val textLen = extractReadableText(html, Int.MAX_VALUE).length
 
         return buildString {
@@ -194,11 +197,11 @@ class WebFetchTool(
     }
 
     private fun extractLinks(html: String, maxChars: Int): String {
-        val links = Regex("href=\"([^\"]+)\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+        val links = RX_A_HREF_TEXT
             .findAll(html)
             .map { m ->
                 val url = m.groupValues[1]
-                val text = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim().take(60)
+                val text = m.groupValues[2].replace(RX_ANY_TAG, "").trim().take(60)
                 if (url.startsWith("http") || url.startsWith("/")) "$text → $url" else null
             }
             .filterNotNull()
@@ -702,6 +705,16 @@ private val RX_CODE_CLOSE = Regex("</code>", RegexOption.IGNORE_CASE)
 private val RX_ANY_TAG = Regex("<[^>]+>")
 private val RX_BLANK_LINES = Regex("\\n{3,}")
 private val RX_SPACES = Regex("[ \\t]+")
+
+// ═══ v2 预编译补齐：extractStructure / extractLinks 的 6+ 个正则 ═══
+// （与上方 RX_* 同款文件级常量；模式串与旧实现逐字一致，仅预编译。）
+private val RX_TITLE_BLOCK = Regex("<title[^>]*>(.*?)</title>", RegexOption.IGNORE_CASE)
+private val RX_H1_BLOCK = Regex("<h1[^>]*>(.*?)</h1>", RegexOption.IGNORE_CASE)
+private val RX_H2_BLOCK = Regex("<h2[^>]*>(.*?)</h2>", RegexOption.IGNORE_CASE)
+private val RX_HREF_ATTR = Regex("href=\"([^\"]+)\"")
+private val RX_P_OPEN = Regex("<p[^>]*>")
+private val RX_IMG_OPEN = Regex("<img[^>]*>")
+private val RX_A_HREF_TEXT = Regex("href=\"([^\"]+)\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
 
 // ═══ P1（OOM）响应体限流：web_fetch / http_request 共用 ═══
 // 旧实现 body?.string() 无上限整体入内存 —— 高速网络下 30s readTimeout 可拉

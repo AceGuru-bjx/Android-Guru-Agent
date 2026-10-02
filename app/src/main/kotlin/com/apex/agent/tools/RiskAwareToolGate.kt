@@ -21,10 +21,10 @@ import com.apex.agent.core.tools.ToolRisk
  * - HIGH 风险工具首次调用 → 经 [UserQuestionGateway]（复用 ask_user_choice
  *   的既有对话框）向用户弹窗：仅允许一次 / 本会话允许 / 拒绝；
  * - **#230（P1 security）**：MEDIUM 级**文件改写类**工具（write_file /
- *   edit_file / file_write / file_edit）同样纳入确认链 —— 旧实现 MEDIUM 一律
- *   静默放行，Agent 可无声覆写用户文件，与「三级权限链是核心卖点」的安全
- *   叙事直接冲突。弹窗文案区分风险档（「写入确认」vs「高风险确认」）；
- *   会话记忆复用同一状态机（本会话允许后不再骚扰）。
+ *   edit_file 及 Coding 模式的 code_write / code_edit）同样纳入确认链 ——
+ *   旧实现 MEDIUM 一律静默放行，Agent 可无声覆写用户文件，与「三级权限链
+ *   是核心卖点」的安全叙事直接冲突。弹窗文案区分风险档（「写入确认」vs「高风险
+ *   确认」）；会话记忆复用同一状态机（本会话允许后不再骚扰）。
  *   纵深防御说明：opencode 式 PermissionModeGate 在 DEFAULT 模式下已对
  *   非只读工具弹 Ask（PermissionAwareToolGate 的 ExplicitAllow 短路保证
  *   不双弹窗）；本层兜底的是 BYPASS/ACCEPT_EDITS 之外的**其他宿主与直连
@@ -202,9 +202,12 @@ class RiskAwareToolGate(
         const val ASK_TIMEOUT_MS = 5 * 60 * 1000L
 
         /** #230：MEDIUM 级也需要确认的**文件改写类**工具 id 集合。
-         * （delete_file 已是 HIGH —— inferRisk 黑名单；此处只补写/编两类。） */
+         * （delete_file 已是 HIGH —— inferRisk 黑名单；此处只补写/编两类。）
+         * 第二轮修正：删掉全仓不存在的幽灵 id（file_write / file_edit），
+         * 补齐 Coding 模式的 code_write / code_edit（否则 Coding 会话的写
+         * 工具游离在确认链之外）。 */
         val FILE_MUTATING_TOOLS = setOf(
-            "write_file", "edit_file", "file_write", "file_edit"
+            "write_file", "edit_file", "code_write", "code_edit"
         )
     }
 }

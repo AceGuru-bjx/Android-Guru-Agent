@@ -6,6 +6,8 @@ import com.apex.agent.core.engine.compression.ContextCompressor
 import com.apex.agent.core.engine.compression.CompressionReport
 import com.apex.agent.core.engine.compression.TokenEstimator
 import com.apex.agent.core.engine.compression.ToolOutputTruncator
+import com.apex.agent.core.engine.orchestrator.LoopDetector
+import com.apex.agent.core.engine.orchestrator.RecoveryPlanner
 import com.apex.agent.core.engine.task.DanglingToolCallRepair
 import com.apex.agent.core.engine.plan.PLAN_CONFIRMATION_TIMEOUT_MS
 import com.apex.agent.core.engine.plan.PlanDecision
@@ -74,6 +76,10 @@ class ApexAgentEngine(
     // internal —— EngineToolExecution.kt 同包扩展直调（工具执行流）。
     internal val toolExecutor: ToolExecutor,
     // internal —— EngineCompressionGate.kt 读取 maxContextTokens/preserveRecentTurns。
+    // @Volatile：updateConfig/patchConfig 由 UI 线程调用，引擎循环在 IO 协程读
+    // —— 引用替换的可见性与 isRunning 同一顾虑（P2-7）。AgentConfig 本身是
+    // 不可变 data class，@Volatile 保证的是「换成哪份快照」跨线程一致可见。
+    @Volatile
     internal var config: AgentConfig = AgentConfig.STANDARD,
     // internal —— EngineCompressionGate.kt 同包扩展直调（历史压缩触发）。
     internal val memory: ConversationMemory? = null,
@@ -197,6 +203,16 @@ class ApexAgentEngine(
     // internal —— EngineToolExecution.kt 同包扩展直调（终端主动性滑窗）。
     internal val terminalAdvisor = TerminalProactivityAdvisor()
 
+    /**
+     * 循环检测（编排器路径同款下沉，3-C/C8）：引擎路径此前只有失败连击
+     * 统计（[resilience].onToolCallOutcome），模型反复调用同一「成功」工具
+     * 的空转检测不到。每次逻辑工具调用（内部重试收敛后）record 一次，
+     * 检出重复/振荡即注入换路提示 —— 两个类都是纯内存状态机，零外部依赖。
+     */
+    // internal —— EngineToolExecution.kt 同包扩展直调（循环检测/恢复提示）。
+    internal val loopDetector = LoopDetector()
+    internal val loopRecovery = RecoveryPlanner()
+
     // ═══ Tool System v4 — 请求工具计划 / 名称映射 / 降级状态 ═══
 
     /**
@@ -233,6 +249,9 @@ class ApexAgentEngine(
      * 故用实例字段累计，并在每次 [execute] 入口重置。
      */
     // internal —— EngineToolExecution.kt 同包扩展直调（任务失败标记）。
+    // @Volatile：写发生在引擎循环协程，读发生在 execute 的 finally
+    // （同一字段跨挂起点）与外部诊断线程 —— 与 isRunning 同一可见性顾虑。
+    @Volatile
     internal var anyActionFailed = false
 
     /**
@@ -416,6 +435,9 @@ class ApexAgentEngine(
         toolDegradationLevel = 0
         // 长任务韧性：新任务重置重试/换路预算（与降级复位同位）。
         resilience.resetForTask()
+        // 循环检测：新任务清空检测窗口与恢复预算（与编排器 reset 语义一致）。
+        loopDetector.reset()
+        loopRecovery.reset()
         // #165：SessionStart 开号 + UserPromptSubmit。
         sessionHooks?.onSessionBeginIfNeeded()
         sessionHooks?.onUserPrompt(input.text)

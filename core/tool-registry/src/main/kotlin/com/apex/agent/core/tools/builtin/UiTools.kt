@@ -100,10 +100,16 @@ class UiTapTool(
 
 /**
  * UI滑动工具 —— 优先使用 AccessibilityService 语义交互，回退到 input 命令。
+ *
+ * @param screenMetrics 可选的真实屏幕分辨率提供者（宽,高 像素）——shell 回落
+ * 分支的方向坐标按真实分辨率计算（与 PrivilegeUiProvider.directionToCoords 同款
+ * 比例），替代 1080x2400 硬编码；a11y 分支本身经 UiInteractionProvider 走宿主
+ * 侧真实分辨率，不依赖此参数。未注入时保持 1080x2400 假设（旧行为）。
  */
 class UiSwipeTool(
     private val shellExecutor: suspend (String) -> String,
-    private val uiProvider: UiInteractionProvider? = null
+    private val uiProvider: UiInteractionProvider? = null,
+    private val screenMetrics: (() -> Pair<Int, Int>)? = null
 ) : AgentTool {
 
     override val id = "ui_swipe"
@@ -148,13 +154,8 @@ class UiSwipeTool(
         }
 
         if (direction != null) {
-            val coords = when (direction) {
-                "up" -> listOf(540, 1800, 540, 600)
-                "down" -> listOf(540, 600, 540, 1800)
-                "left" -> listOf(900, 1200, 180, 1200)
-                "right" -> listOf(180, 1200, 900, 1200)
-                else -> return "Error: Unknown direction"
-            }
+            val coords = directionCoords(direction)
+                ?: return "Error: Unknown direction"
             val cmd = "input swipe ${coords[0]} ${coords[1]} ${coords[2]} ${coords[3]} $duration"
 
             if (uiProvider?.isAvailable == true) {
@@ -174,6 +175,25 @@ class UiSwipeTool(
             return uiProvider.performGesture(GestureAction.Swipe(x1, y1, x2, y2, duration))
         }
         return shellExecutor("input swipe $x1 $y1 $x2 $y2 $duration")
+    }
+
+    /**
+     * 方向 → 滑动坐标：垂直向取 0.75h→0.25h，水平向取 0.8w→0.2w
+     * （与 PrivilegeUiProvider.directionToCoords 同款比例，整数运算免浮点）。
+     * 未注入 [screenMetrics] 时退回 1080x2400 假设——退化值与旧硬编码一致
+     * （up = 540,1800,540,600）。
+     */
+    private fun directionCoords(direction: String): List<Int>? {
+        val (w, h) = screenMetrics?.invoke() ?: (1080 to 2400)
+        val cx = w / 2
+        val cy = h / 2
+        return when (direction) {
+            "up" -> listOf(cx, h * 3 / 4, cx, h / 4)
+            "down" -> listOf(cx, h / 4, cx, h * 3 / 4)
+            "left" -> listOf(w * 4 / 5, cy, w / 5, cy)
+            "right" -> listOf(w / 5, cy, w * 4 / 5, cy)
+            else -> null
+        }
     }
 }
 
@@ -249,9 +269,14 @@ class UiDumpTool(
 
 /**
  * 截图工具
+ *
+ * @param fallbackScreenshot 可选降级通道：shell `screencap` 失败时的高权限截图
+ * （如无障碍 API 30 通道）。签约：入参为保存路径，返回成功消息（非 null）或
+ * null（失败）；由宿主注入，缺省保持纯 shell 行为。
  */
 class ScreenshotTool(
-    private val shellExecutor: suspend (String) -> String
+    private val shellExecutor: suspend (String) -> String,
+    private val fallbackScreenshot: (suspend (savePath: String) -> String?)? = null
 ) : AgentTool {
 
     override val id = "screenshot"
@@ -282,11 +307,14 @@ class ScreenshotTool(
         // Shell-escape the screenshot path — unescaped `;` / `$(...)` / `'` in the path
         // would inject into `screencap -p $path`.
         val result = shellExecutor("screencap -p ${ShellQuote.shellQuote(path)}")
-        return if (result.contains("Error") && !result.contains("written")) {
-            "Error: $result"
-        } else {
-            "OK: Screenshot saved to $path"
+        if (result.contains("Error") && !result.contains("written")) {
+            // shell screencap 失败（无 root/Shizuku 时 /sdcard 受限）→ 注入的
+            // 高权限通道（如无障碍截图 + 落盘）兜底；未注入或也失败 → 原错误上抛。
+            val fallback = fallbackScreenshot?.invoke(path)
+            if (fallback != null) return fallback
+            return "Error: $result"
         }
+        return "OK: Screenshot saved to $path"
     }
 }
 

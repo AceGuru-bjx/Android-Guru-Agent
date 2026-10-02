@@ -4,6 +4,8 @@ import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.codetools.diagnostics.CodeDiagnostics
 import com.apex.agent.core.codetools.diagnostics.appendDiagnostics
 import com.apex.agent.core.codetools.edit.FuzzyReplacer
+import com.apex.agent.core.codetools.io.FileWriteGuard
+import com.apex.agent.core.codetools.io.TextFileStyle
 import com.apex.agent.core.tools.ToolArguments
 import com.apex.agent.core.tools.ToolErrorCode
 import com.apex.agent.core.tools.ToolMetadata
@@ -12,7 +14,6 @@ import com.apex.agent.core.tools.builtin.BaseTool
 import com.apex.agent.core.tools.builtin.FilePathSafety
 import com.apex.agent.core.tools.toolSchema
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * # code_edit — 精确替换式编辑（opencode edit 契约）
@@ -28,8 +29,10 @@ import java.util.concurrent.ConcurrentHashMap
  *   字符 ≥ 4×）→ 拒绝并要求重读文件 —— 宁可多一轮，不可错改；
  * - `old_string` 为空且文件不存在 → 允许创建新文件（write 语义兜底）。
  *
- * 工程细节：CRLF/LF 检测与还原、BOM 保留、按文件路径互斥锁（防并发编辑竞态）、
- * 统一 diff 摘要回显（模型自我验证改对了没有）、编辑成功后的即时诊断回注
+ * 工程细节：CRLF/LF 检测与还原、BOM 保留（[TextFileStyle]）、原子写与按文件
+ * 路径互斥锁（[FileWriteGuard] —— 与 code_write 共享同一把 per-path 锁，
+ * 防跨工具并发写竞态）、统一 diff 摘要回显（模型自我验证改对了没有）、
+ * 编辑成功后的即时诊断回注
  * （注入 [diagnostics] 时，对编辑后的完整内容追加「⚠️ 诊断」块）。
  */
 class CodeEditTool(
@@ -73,9 +76,6 @@ class CodeEditTool(
         ))
     }
 
-    /** 按路径的互斥锁：同文件并发编辑防撕裂（跨线程安全的 ReentrantLock 池）。 */
-    private val locks = ConcurrentHashMap<String, Any>()
-
     override suspend fun executeStructured(arguments: String): ToolResult {
         val args = when (val parsed = ToolArguments.of(arguments)) {
             is ToolArguments.ParseOutcome.Ok -> parsed.args
@@ -98,9 +98,8 @@ class CodeEditTool(
             return ToolResult.fail(ToolErrorCode.SANDBOX_VIOLATION, e.message ?: "path escapes workspace")
         }
 
-        val lock = locks.computeIfAbsent(file.canonicalPath) { Any() }
-        synchronized(lock) {
-            return executeLocked(root, file, path, oldString, newString, replaceAll)
+        return FileWriteGuard.withPathLock(file) {
+            executeLocked(root, file, path, oldString, newString, replaceAll)
         }
     }
 
@@ -120,8 +119,7 @@ class CodeEditTool(
                     "file already exists: $path — provide a non-empty old_string to edit it (or use code_write to overwrite)"
                 )
             }
-            file.parentFile?.mkdirs()
-            file.writeText(newString, Charsets.UTF_8)
+            FileWriteGuard.writeFileAtomically(file, newString)
             return ToolResult.ok(
                 appendDiagnostics(
                     "✅ created $path (${newString.count { it == '\n' } + 1} lines, ${newString.length} chars)",
@@ -149,16 +147,13 @@ class CodeEditTool(
             )
         }
 
-        // 读原文：保留 BOM / 探测 CRLF
+        // 读原文：保留 BOM / 探测 CRLF（TextFileStyle 归一到 LF 做匹配，写出时
+        // 按原行尾风格还原）
         val raw = file.readText(Charsets.UTF_8)
-        val bom = raw.startsWith(BOM)
-        val body = if (bom) raw.substring(BOM.length) else raw
-        val crlf = body.contains("\r\n")
-
-        // 归一到 LF 做匹配，写出时按原行尾风格还原
-        val normalized = if (crlf) body.replace("\r\n", "\n") else body
-        val normalizedOld = if (crlf) oldString.replace("\r\n", "\n") else oldString
-        val normalizedNew = if (crlf) newString.replace("\r\n", "\n") else newString
+        val style = TextFileStyle.of(raw)
+        val normalized = style.normalize(raw)
+        val normalizedOld = if (style.hasCrlf) oldString.replace("\r\n", "\n") else oldString
+        val normalizedNew = if (style.hasCrlf) newString.replace("\r\n", "\n") else newString
 
         val outcome = FuzzyReplacer.replace(normalized, normalizedOld, normalizedNew, replaceAll)
         return when (outcome) {
@@ -171,10 +166,11 @@ class CodeEditTool(
                     "Add surrounding lines to make it unique, or set replace_all=true."
             )
             is FuzzyReplacer.Outcome.Replaced -> {
-                val newBody = if (crlf) outcome.newContent.replace("\n", "\r\n") else outcome.newContent
-                val output = (if (bom) BOM else "") + newBody
-                file.writeText(output, Charsets.UTF_8)
-                val diff = UnifiedDiff.mini(body, outcome.newContent, path, 6)
+                val output = style.apply(outcome.newContent)
+                FileWriteGuard.writeFileAtomically(file, output)
+                // diff 在归一形态（LF、无 BOM）上计算 —— 两侧同为归一形态，
+                // 行尾差异不会把局部编辑夸大成全文件变更。
+                val diff = UnifiedDiff.mini(normalized, outcome.newContent, path, 6)
                 ToolResult.ok(
                     appendDiagnostics(
                         "✅ edited $path (lines ${outcome.startLine}-${outcome.endLine}, strategy=${outcome.strategy})\n$diff",
@@ -190,7 +186,6 @@ class CodeEditTool(
 
     private companion object {
         const val MAX_FILE_BYTES = 4L * 1024 * 1024
-        const val BOM = "﻿"
     }
 }
 

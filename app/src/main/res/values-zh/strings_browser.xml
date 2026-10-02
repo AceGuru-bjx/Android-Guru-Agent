@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 浏览器浮层字符串（中文）—— 英文默认在 values/strings_browser.xml；
+     语言切换经 LanguageManager + MainActivity attachBaseContext/recreate 生效。 -->
+<resources>
+    <!-- 长按悬浮球结束浏览器会话的 Toast -->
+    <string name="browser_session_released">已结束浏览器会话，悬浮球已收起</string>
+</resources>

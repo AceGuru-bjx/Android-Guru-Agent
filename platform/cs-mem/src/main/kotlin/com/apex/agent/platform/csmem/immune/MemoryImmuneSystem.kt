@@ -23,7 +23,14 @@ import javax.inject.Singleton
  *   2. 敏感关键词检测：非受信 App 中出现钓鱼/支付类话术
  *   3. 结构完整性：UI 树不应完全为空或异常稀疏（无障碍劫持特征）
  *   4. 包名可信分级：受信包名豁免敏感词策略，未知包名提高警戒
- *   5. 记忆隔离 (Quarantine)：可疑 UI 指纹持久化隔离，不写入长期记忆
+ *   5. 记忆隔离 (Quarantine)：可疑节点（含子树）剔除出写入管线，
+ *      指纹持久化隔离（后续帧同指纹节点同样被剔除）
+ *
+ * 写入语义（节点级/帧级区分）：
+ *   - SAFE：照常写入；
+ *   - SUSPICIOUS（如疑似悬浮窗）：仅隔离可疑节点（含子树），不阻断整帧
+ *     ——合法全屏容器等单点误报不再灭掉整帧记忆；
+ *   - HIGH_RISK / MALICIOUS：整帧阻断（safe=false，防钓鱼内容入库）。
  *
  * 注意：完整的 OCR 视觉比对需要集成 MLKit Text Recognition，
  *       当前阶段实现结构/文本特征 + 屏幕几何检测，已覆盖主要攻击面。
@@ -57,20 +64,30 @@ class MemoryImmuneSystem @Inject constructor(
         private const val OVERLAY_AREA_RATIO = 0.8f
     }
 
-    /** 隔离名单 —— 被标记为可疑的 UI 指纹集合（内存 + 持久化） */
-    private val quarantineSet = mutableSetOf<String>().apply {
-        addAll(loadQuarantine())
-    }
+    /**
+     * 隔离名单 —— 被标记为可疑的 UI 指纹集合（内存 + 持久化）。
+     *
+     * 线程安全：agent 写入协程（Dispatchers.IO，validateUiTree 写）与主线程
+     * （MemoryViewModel 隔离区计数，quarantinedCount 读）并发访问——普通
+     * mutableSetOf 迭代中遇写会抛 ConcurrentModificationException，改用
+     * ConcurrentHashMap.newKeySet（minSdk 26 ≥ API 24）。
+     */
+    private val quarantineSet: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<String>().apply {
+            addAll(loadQuarantine())
+        }
 
     /**
      * 对 UI 树执行安全检查。
      *
+     * @param nodes 当前 UI 树的根节点列表（嵌套树；内部展平后逐节点检查，
+     * 每节点恰好一次——兼容只提供扁平列表的旧调用方/替身）
+     * @param appPackage 来源 App 包名（可能为 null，此时按未知包处理）
+     * @return 安全检查结果（[ImmuneResult.safe]=false 表示应整帧阻断；
+     * SUSPICIOUS 级 safe=true 但应配合 [stripQuarantinedNodes] 剔除被隔离节点）
+     *
      * 屏幕分辨率从 [Context] 的 WindowManager 获取，避免调用方误传 (0,0)
      * 导致悬浮窗检测失效。
-     *
-     * @param nodes 当前 UI 树
-     * @param appPackage 来源 App 包名（可能为 null，此时按未知包处理）
-     * @return 安全检查结果
      */
     fun validateUiTree(
         nodes: List<UiNode>,
@@ -80,8 +97,12 @@ class MemoryImmuneSystem @Inject constructor(
         val issues = mutableListOf<String>()
         var threatLevel = ThreatLevel.SAFE
 
+        // 展平嵌套树：悬浮窗/敏感词检查需覆盖全部节点（嵌套输入下仅看顶层
+        // 会漏掉整棵子树，检测系统性失效）。
+        val flatNodes = flattenNodes(nodes)
+
         // 检查1：悬浮窗检测 —— 检测全屏覆盖的可点击节点
-        val overlayNodes = detectOverlay(nodes, screenW, screenH)
+        val overlayNodes = detectOverlay(flatNodes, screenW, screenH)
         if (overlayNodes.isNotEmpty()) {
             issues.add("检测到 ${overlayNodes.size} 个可疑全屏节点（疑似悬浮窗攻击）")
             threatLevel = maxLevel(threatLevel, ThreatLevel.SUSPICIOUS)
@@ -93,7 +114,7 @@ class MemoryImmuneSystem @Inject constructor(
         // 检查2：敏感关键词检测（仅非受信包触发）
         val isTrusted = appPackage in TRUSTED_PACKAGES
         var sensitiveHit = 0
-        for (node in nodes) {
+        for (node in flatNodes) {
             for (pattern in SENSITIVE_PATTERNS) {
                 if (node.text.contains(pattern) || node.contentDescription.contains(pattern)) {
                     if (!isTrusted) {
@@ -112,9 +133,8 @@ class MemoryImmuneSystem @Inject constructor(
         }
 
         // 检查3：结构完整性 —— UI 树不应完全为空或异常稀疏
-        val nodeCount = countAllNodes(nodes)
-        if (nodes.isEmpty() || nodeCount < 3) {
-            issues.add("UI 树异常稀疏（${nodeCount} 节点），可能存在无障碍劫持")
+        if (flatNodes.size < 3) {
+            issues.add("UI 树异常稀疏（${flatNodes.size} 节点），可能存在无障碍劫持")
             threatLevel = maxLevel(threatLevel, ThreatLevel.SUSPICIOUS)
         }
 
@@ -125,7 +145,9 @@ class MemoryImmuneSystem @Inject constructor(
             threatLevel = maxLevel(threatLevel, ThreatLevel.HIGH_RISK)
         }
 
-        val safe = threatLevel == ThreatLevel.SAFE
+        // 节点级/帧级区分：SUSPICIOUS 仅隔离可疑节点（stripQuarantinedNodes
+        // 剔除含子树），不阻断整帧；HIGH_RISK/MALICIOUS 才整帧阻断。
+        val safe = threatLevel.ordinal <= ThreatLevel.SUSPICIOUS.ordinal
         if (!safe) persistQuarantine()
 
         return ImmuneResult(
@@ -134,6 +156,18 @@ class MemoryImmuneSystem @Inject constructor(
             issues = issues,
             quarantinedNodes = quarantineSet.toList()
         )
+    }
+
+    /**
+     * 从 UI 树中剔除被隔离的节点（含其子树）。
+     *
+     * SUSPICIOUS 级（如疑似悬浮窗）只影响可疑子树，其余节点照常进入记忆
+     * 写入管线。隔离名单跨帧持久化——历史被隔离指纹的后续出现同样剔除。
+     */
+    fun stripQuarantinedNodes(nodes: List<UiNode>, result: ImmuneResult): List<UiNode> {
+        if (result.quarantinedNodes.isEmpty()) return nodes
+        val blocked = HashSet<String>(result.quarantinedNodes)
+        return filterTree(nodes, blocked)
     }
 
     /**
@@ -204,9 +238,28 @@ class MemoryImmuneSystem @Inject constructor(
         return "${node.className}_${node.resourceId}_${node.text}"
     }
 
-    private fun countAllNodes(nodes: List<UiNode>): Int {
-        return nodes.sumOf { 1 + countAllNodes(it.children) }
+    /** 嵌套 UiNode 树 → 扁平列表（DFS 先序，每节点恰好一次）。 */
+    private fun flattenNodes(nodes: List<UiNode>): List<UiNode> {
+        val out = ArrayList<UiNode>(nodes.size * 2)
+        for (node in nodes) {
+            collectNodes(node, out)
+        }
+        return out
     }
+
+    private fun collectNodes(node: UiNode, out: MutableList<UiNode>) {
+        out.add(node)
+        for (child in node.children) {
+            collectNodes(child, out)
+        }
+    }
+
+    /** 递归剔除被隔离节点（含其子树），保留其余结构。 */
+    private fun filterTree(nodes: List<UiNode>, blocked: Set<String>): List<UiNode> =
+        nodes.mapNotNull { node ->
+            if (nodeFingerprint(node) in blocked) null
+            else node.copy(children = filterTree(node.children, blocked))
+        }
 
     private fun maxLevel(a: ThreatLevel, b: ThreatLevel): ThreatLevel {
         return if (a.ordinal >= b.ordinal) a else b
@@ -230,6 +283,10 @@ class MemoryImmuneSystem @Inject constructor(
 
 /**
  * 免疫系统检查结果。
+ *
+ * @param safe 是否允许整帧写入（true = 不阻断；SUSPICIOUS 级为 true，
+ * 但调用方应配合 [MemoryImmuneSystem.stripQuarantinedNodes] 剔除
+ * [quarantinedNodes] 命中的节点及其子树）
  */
 data class ImmuneResult(
     val safe: Boolean,
@@ -241,7 +298,7 @@ data class ImmuneResult(
 enum class ThreatLevel {
     /** 安全，无异常 */
     SAFE,
-    /** 可疑，已隔离但不阻断执行 */
+    /** 可疑：隔离相关节点（含子树），不阻断整帧写入 */
     SUSPICIOUS,
     /** 高危，阻断写入 + 建议终止任务 */
     HIGH_RISK,

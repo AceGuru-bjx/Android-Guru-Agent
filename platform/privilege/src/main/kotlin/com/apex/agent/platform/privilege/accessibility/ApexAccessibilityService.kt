@@ -2,6 +2,7 @@ package com.apex.agent.platform.privilege.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
@@ -100,6 +101,13 @@ class ApexAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    override fun onUnbind(intent: Intent): Boolean {
+        // #210：用户在系统设置关闭无障碍：系统先 onUnbind 再 onDestroy。
+        // 两处都广播（消费方按 sticky 语义读 instance 真值，幂等）。
+        notifyAvailabilityChanged(false)
+        return super.onUnbind(intent)
+    }
 
     override fun onDestroy() {
         scope.cancel()

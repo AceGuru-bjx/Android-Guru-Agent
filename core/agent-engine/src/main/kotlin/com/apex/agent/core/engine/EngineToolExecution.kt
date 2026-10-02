@@ -201,6 +201,24 @@ internal suspend fun ApexAgentEngine.executeToolCallStreaming(
     // #170：终端主动性 —— 一次性 shell 连击/失败连击滑窗（下一迭代判定建议）。
     terminalAdvisor.onToolCallCompleted(registryToolId, actionSuccess, toolCall.arguments)
 
+    // ═══ 循环检测（编排器路径同款下沉，3-C/C8）═══
+    // 引擎路径此前只有失败连击统计（resilience.onToolCallOutcome），模型反复
+    // 调用同一「成功」工具的空转检测不到。每个逻辑调用（含内部重试收敛后）
+    // record 一次；检出重复/振荡 → 注入换路提示并冷却窗口（一次循环只提示
+    // 一次）。恢复预算用尽后不再注入 —— 终止兜底交给 maxIterations。
+    loopDetector.record(toolCall.name, toolCall.arguments)
+    loopDetector.detect()?.let { signal ->
+        loopDetector.acknowledge()
+        if (loopRecovery.canRecover()) {
+            addMessage(LlmMessage.System(loopRecovery.buildLoopRecoveryPrompt(signal)))
+            AppLogger.instance.warn(
+                LogCategory.TOOL, "ApexAgentEngine",
+                "loop detected (${signal::class.simpleName}) after '${toolCall.name}' — " +
+                    "recovery prompt injected"
+            )
+        }
+    }
+
     // 隐式记忆采集（报告 P2）：记录每个已执行动作及其成败。
     // 传入 actionSuccess 供 CS-Mem 蒸馏时过滤失败动作（避免"鼠标连点失败"
     // 也被压进 FSM 宏技能，使学到的宏技能必然无法回放）。

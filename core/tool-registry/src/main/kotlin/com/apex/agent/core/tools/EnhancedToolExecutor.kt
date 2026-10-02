@@ -302,7 +302,15 @@ class EnhancedToolExecutor(
             } else {
                 emitStream(emitFn, toolId, tool, effectiveArguments, invocation)
             }
-            traceRecorder?.complete(span)
+            // 终端事件分流（与非流式失败路径 completeFailure 对齐）：流内以
+            // ToolStreamEvent.Error 收尾时，trace 不得记成功 —— 否则排障时
+            // trace 说 ok、熔断/统计说 fail，三套观测口径分裂。errorSlugOf 对
+            // 非 Error 文本返回 null，与非流式失败路径同源。
+            if (terminalIsError) {
+                traceRecorder?.completeFailure(span, errorSlugOf(terminalResult ?: ""))
+            } else {
+                traceRecorder?.complete(span)
+            }
             // 正常收流：以终端事件（Complete / Error / 空流）为结果。
             notifyAfterToolHooks(
                 toolId, effectiveArguments,
@@ -490,6 +498,9 @@ class EnhancedToolExecutor(
     private fun ioFailureResult(toolId: String, e: IOException): String =
         "Error: execution failed: I/O error in '$toolId': ${e.message ?: e::class.simpleName}"
 
+    // 注意：本方法与 SafeAgentTool 的 SecurityException 折叠串共享同一机器可判
+    // 前缀 "Error: permission denied"（RetryClassifier 终止前缀与
+    // FailureClassifier.PERMISSION_PATTERNS 均命中）—— 改措辞时两处必须同步。
     private fun securityResult(toolId: String, e: SecurityException): String =
         "Error: permission denied: ${e.message ?: toolId}"
 

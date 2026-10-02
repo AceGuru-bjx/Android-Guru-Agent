@@ -1,5 +1,7 @@
 package com.apex.agent.ui.screen.terminal
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -119,6 +121,7 @@ class TerminalViewModel @Inject constructor(
 
     private var renderJob: Job? = null
     private var semanticJob: Job? = null
+    private var clipboardJob: Job? = null
     private var pollJob: Job? = null
     private var creating = false
 
@@ -161,13 +164,9 @@ class TerminalViewModel @Inject constructor(
                     createMutex.withLock { createSessionInternal(backendId = BACKEND_UBUNTU) }
                 } else {
                     autoUbuntuSessionPending = true
-                    // join 自动预备（幂等单飞；已进行中则等待共享结果）。
-                    // ★ 降级兜底（输入失灵根因）：ensureReady 失败/超时且用户仍未
-                    // 手工建过会话时，自动拉起 LOCAL 会话 —— 旧实现停在这里等用户
-                    // 自己发现「点键盘没反应」：终端 View 都没挂上，页面即死区。
-                    // LOCAL 会话零依赖（mksh + PTY）秒建；环境面板仍在后台重试，
-                    // READY 到达后不抢用户已用的会话（autoUbuntuSessionPending
-                    // 已失效，除非用户把 LOCAL 也关了）。
+                    // join 自动预备（幂等单飞）。★ 降级兜底（输入失灵根因）：
+                    // ensureReady 失败/超时且用户未手工建过会话时，自动拉起
+                    // LOCAL 会话，不再停在空屏等用户。
                     val r = withContext(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching { ubuntuLifecycle.ensureReady() }.getOrNull()
                     }
@@ -238,9 +237,16 @@ class TerminalViewModel @Inject constructor(
     private fun startSessionPolling() {
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
-            while (isActive) {
-                delay(2000)
-                refreshSessions()
+            // 事件驱动刷新（事件只做触发器，刷新走 snapshot(SESSIONS)）；
+            // 流不可用（fake runtime）时退回 2s 轮询兜底。
+            val lifecycle = terminalRuntime.sessionLifecycleEvents()
+            if (lifecycle != null) {
+                lifecycle.collect { refreshSessionsInternal() }
+            } else {
+                while (isActive) {
+                    delay(2000)
+                    refreshSessions()
+                }
             }
         }
     }
@@ -259,12 +265,13 @@ class TerminalViewModel @Inject constructor(
     /** 切换 styled/semantic 收集者到当前活跃会话（事件驱动 + sample 防洪泛）。 */
     private fun observeActiveSession() {
         val sid = _activeSessionId.value ?: run {
-            renderJob?.cancel(); semanticJob?.cancel()
+            renderJob?.cancel(); semanticJob?.cancel(); clipboardJob?.cancel()
             _renderState.value = null; _semanticState.value = null
             return
         }
         renderJob?.cancel()
         semanticJob?.cancel()
+        clipboardJob?.cancel()
         _renderState.value = null
         _semanticState.value = null
         renderJob = viewModelScope.launch {
@@ -285,6 +292,24 @@ class TerminalViewModel @Inject constructor(
                 _semanticState.value = state
             }
         }
+        // OSC 52 剪贴板（vim/tmux 远程复制）：feed 后 drain 上抛，仅订阅活跃会话（后台引擎侧排队）。
+        clipboardJob = viewModelScope.launch {
+            terminalRuntime.clipboardRequestsFlow(sid)
+                ?.collect { text -> applyOsc52Clipboard(text) }
+        }
+    }
+
+    /** OSC 52 落地：护栏 —— 超长（>1MB）丢弃留痕；写失败静默降级。 */
+    private fun applyOsc52Clipboard(text: String) {
+        if (text.isEmpty()) return
+        if (text.length > MAX_OSC52_CLIPBOARD_CHARS) {
+            Log.w("TerminalVM", "OSC 52 clipboard request dropped (${text.length} chars > limit)")
+            return
+        }
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("terminal", text))
+        }.onFailure { Log.w("TerminalVM", "OSC 52 clipboard write failed: ${it.message}") }
     }
 
     fun createSession(backendId: String) {
@@ -1158,6 +1183,9 @@ class TerminalViewModel @Inject constructor(
     companion object {
         const val BACKEND_LOCAL = "local"
         const val BACKEND_UBUNTU = "linux-ubuntu"
+
+        /** OSC 52 剪贴板长度上限（1M 字符 ≈ 1MB UTF-8 —— Termux 同款基本护栏）。 */
+        private const val MAX_OSC52_CLIPBOARD_CHARS = 1 shl 20
         private val ALIVE_STATES = setOf(
             com.apex.agent.platform.terminal.session.SessionState.CREATED,
             com.apex.agent.platform.terminal.session.SessionState.STARTING,

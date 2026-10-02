@@ -8,6 +8,7 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import com.apex.agent.R
 import java.io.File
 
 /**
@@ -35,7 +36,7 @@ object FileOpener {
         try {
             val file = File(filePath)
             if (!file.exists() || !file.canRead()) {
-                Toast.makeText(context, "文件不存在或不可读", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.file_open_not_readable), Toast.LENGTH_SHORT).show()
                 return
             }
 
@@ -54,15 +55,19 @@ object FileOpener {
             }
 
             // Android 11+ 不再依赖 resolveActivity —— 直接 startActivity + ActivityNotFoundException
-            val chooser = Intent.createChooser(intent, "选择应用打开").apply {
+            // i18n（#2-c P1-5）：chooser 标题走双语资源（英文用户不再看到中文）。
+            val chooser = Intent.createChooser(
+                intent,
+                context.getString(R.string.file_open_chooser_title)
+            ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)
         } catch (e: ActivityNotFoundException) {
-            Toast.makeText(context, "未找到支持打开此文件的应用", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.file_open_no_app), Toast.LENGTH_SHORT).show()
         } catch (e: IllegalArgumentException) {
             // FileProvider 路径越界（理论上 file_paths.xml 覆盖全路径后不会触发）
-            Toast.makeText(context, "文件路径不被 FileProvider 支持", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.file_open_provider_reject), Toast.LENGTH_SHORT).show()
             Log.w(TAG, "FileProvider rejected path: ${e.message}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to open file: ${e.message}")
@@ -84,7 +89,7 @@ object FileOpener {
             context.startActivity(intent)
             true
         } catch (e: ActivityNotFoundException) {
-            Toast.makeText(context, "未找到可打开此链接的应用", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.file_open_no_link_app), Toast.LENGTH_SHORT).show()
             false
         } catch (e: Exception) {
             Log.w(TAG, "Failed to open url: $url (${e.message})")

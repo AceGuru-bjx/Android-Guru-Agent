@@ -44,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -88,11 +89,14 @@ fun LogViewerScreen() {
     var records by remember { mutableStateOf<List<LogRecord>>(emptyList()) }
     var stats by remember { mutableStateOf(AppLogger.instance.stats.value) }
 
-    var selectedCategory by remember { mutableStateOf<LogCategory?>(null) }
-    var minLevel by remember { mutableStateOf(LogLevel.VERBOSE) }
-    var keyword by remember { mutableStateOf("") }
-    var sessionId by remember { mutableStateOf<Long?>(null) }
-    var autoScroll by remember { mutableStateOf(true) }
+    // 过滤/滚动瞬态 rememberSaveable（#2-c P2-7）：LogCategory/LogLevel 为 enum
+    //（Serializable，可入 Bundle），旋转/进程重建后过滤条件与自动滚动不丢；
+    // records/stats 为数据流衍生态（重建后由 recordsFlow 重放），不入存档。
+    var selectedCategory by rememberSaveable { mutableStateOf<LogCategory?>(null) }
+    var minLevel by rememberSaveable { mutableStateOf(LogLevel.VERBOSE) }
+    var keyword by rememberSaveable { mutableStateOf("") }
+    var sessionId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var autoScroll by rememberSaveable { mutableStateOf(true) }
     val listState = rememberLazyListState()
 
     // 实时刷新：订阅全量快照流，在 collect 时套用当前过滤条件。
@@ -139,7 +143,8 @@ fun LogViewerScreen() {
         )
 
         // ── 工具条：复制全部 / 清空（带确认） / 导出 ──
-        var showClearConfirm by remember { mutableStateOf(false) } // 修复：清空整个环形缓冲区为破坏性操作，原一点即清
+        var showClearConfirm by rememberSaveable { mutableStateOf(false) } // 修复：清空整个环形缓冲区为破坏性操作，原一点即清
+        var exporting by rememberSaveable { mutableStateOf(false) } // E3：导出串后台拼装进行中（按钮置灰防连点）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -171,13 +176,21 @@ fun LogViewerScreen() {
                 Text(stringResource(R.string.log_clear))
             }
             FilledTonalButton(
+                // 修复性能（#2-c P1-3）：导出串的 joinToString 同样可达数 MB，旧实现
+                // 在 onClick 主线程拼串后才进 exportAndShare（其 IO 协程只包写盘）。
+                // 照 copy 钮同款模式：copyScope + withContext(IO) 拼串；进行中
+                // 按钮置灰（防连点叠拼串任务）即导出中的 loading 反馈。
                 onClick = {
-                    exportAndShare(
-                        context,
-                        records.joinToString("\n") { it.toFlatString() },
-                        exportLogsTitle
-                    )
+                    exporting = true
+                    copyScope.launch {
+                        val text = withContext(Dispatchers.IO) {
+                            records.joinToString("\n") { it.toFlatString() }
+                        }
+                        exportAndShare(context, text, exportLogsTitle)
+                        exporting = false
+                    }
                 },
+                enabled = !exporting,
                 contentPadding = ButtonDefaults.ButtonWithIconContentPadding
             ) {
                 Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.width(16.dp))

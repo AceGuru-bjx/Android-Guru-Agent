@@ -51,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,11 +112,15 @@ fun TerminalScreen(
     val blacklist by viewModel.blacklist.collectAsStateWithLifecycle()
     val whitelist by viewModel.whitelist.collectAsStateWithLifecycle()
 
-    var showNewSessionDialog by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showEnvironmentCenter by remember { mutableStateOf(false) }
-    var showSchemePicker by remember { mutableStateOf(false) }
-    var showHistory by remember { mutableStateOf(false) }
+    // 弹层瞬态 rememberSaveable（#2-c P2-7）：旋转/进程重建后 dialog/sheet
+    // 开关态不丢，避免用户重建流程（尤其确认类弹层）被系统事件打断后重来。
+    var showNewSessionDialog by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showEnvironmentCenter by rememberSaveable { mutableStateOf(false) }
+    var showSchemePicker by rememberSaveable { mutableStateOf(false) }
+    var showHistory by rememberSaveable { mutableStateOf(false) }
+    // E2 防误触：待确认关闭的会话 id（null = 无确认弹层）。
+    var closeConfirmTargetId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     // 保持屏幕常亮：看长任务输出（编译 / apt / 训练日志）时不被息屏打断 ——
     // Termux 默认持有 wakelock，这里用等价的 window flag，交给用户开关。
@@ -205,7 +210,16 @@ fun TerminalScreen(
                 sessions = sessions,
                 activeId = activeId,
                 onSelect = viewModel::selectSession,
-                onClose = viewModel::closeSession
+                onClose = { id ->
+                    // E2 防误触：活跃会话的关闭钮先弹确认（closeSession 会杀 PTY，
+                    // 跑着的编译/apt/训练任务误点即丢且无法恢复）；
+                    // 死会话（进程已退出）无现场可丢，直接移除。
+                    if (sessions.firstOrNull { it.id == id }?.isAlive == true) {
+                        closeConfirmTargetId = id
+                    } else {
+                        viewModel.closeSession(id)
+                    }
+                }
             )
         }
 
@@ -334,6 +348,33 @@ fun TerminalScreen(
                 },
                 onClear = { viewModel.clearCommandHistory() },
                 onDismiss = { showHistory = false }
+            )
+        }
+    }
+
+    // ═══ E2：活跃会话关闭确认（防误触丢现场 —— 最后防线）═══
+    closeConfirmTargetId?.let { targetId ->
+        TerminalConsoleTheme {
+            AlertDialog(
+                onDismissRequest = { closeConfirmTargetId = null },
+                title = { Text(stringResource(R.string.term_close_confirm_title)) },
+                text = { Text(stringResource(R.string.term_close_confirm_text)) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.closeSession(targetId)
+                        closeConfirmTargetId = null
+                    }) {
+                        Text(
+                            stringResource(R.string.term_close_confirm_ok),
+                            color = ConsoleTheme.danger
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { closeConfirmTargetId = null }) {
+                        Text(stringResource(R.string.term_cancel))
+                    }
+                }
             )
         }
     }

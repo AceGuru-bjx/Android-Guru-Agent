@@ -1,5 +1,6 @@
 package com.apex.agent.core.tools.mcp
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -69,7 +70,14 @@ class McpManager(
      * 真实状态写进事件 detail —— 「rootfs 未就绪」在拉起进程之前就可见，
      * 而不是等到 launcher 报错才知。null = 宿主未提供（不检查，行为与旧版一致）。
      */
-    private val sandboxReadinessProbe: (() -> Boolean)? = null
+    private val sandboxReadinessProbe: (() -> Boolean)? = null,
+    /**
+     * 诊断日志出口（HookRegistry 同款模式）：core:tool-registry 无
+     * core:logging 依赖（刻意保持纯 JVM），getAllTools 等聚合路径的
+     * 异常/失败现场经此回调外送。宿主注入 AppLogger，测试注入捕获列表；
+     * 默认 no-op —— 既有构造点（app/di/McpModule）零改动兼容。
+     */
+    private val errorLog: (String) -> Unit = {}
 ) {
     private val clients = LinkedHashMap<String, McpClient>()
     private val configs = LinkedHashMap<String, McpServerConfig>()
@@ -225,14 +233,33 @@ class McpManager(
 
     /**
      * 获取所有可用MCP工具（对 clients 快照迭代，锁内零网络调用）。
+     *
+     * 单台服务器失败不再静默：Result 失败与抛出的异常均经 [errorLog]
+     * 外送留痕（旧实现 `catch (_: Exception) {}` 违反仓库「防御式 IO：
+     * 异常折叠 + 留痕」纪律）。CancellationException 照常重抛 ——
+     * [McpClient.listTools] 现已遵守全仓取消纪律，聚合层不得再把它吞掉。
      */
     suspend fun getAllTools(): List<McpToolDef> {
-        val snapshot = synchronized(lock) { clients.values.toList() }
+        val snapshot = synchronized(lock) { clients.entries.map { it.key to it.value } }
         val allTools = mutableListOf<McpToolDef>()
-        for (client in snapshot) {
+        for ((serverName, client) in snapshot) {
             try {
-                client.listTools().onSuccess { allTools.addAll(it) }
-            } catch (_: Exception) {}
+                client.listTools()
+                    .onSuccess { allTools.addAll(it) }
+                    .onFailure { e ->
+                        errorLog(
+                            "McpManager.getAllTools: server '$serverName' listTools failed: " +
+                                "${e.message ?: e::class.simpleName}"
+                        )
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errorLog(
+                    "McpManager.getAllTools: server '$serverName' listTools threw: " +
+                        "${e.message ?: e::class.simpleName}"
+                )
+            }
         }
         return allTools
     }

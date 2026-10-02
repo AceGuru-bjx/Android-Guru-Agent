@@ -23,4 +23,11 @@
     <!-- 详细输入（分层编辑入口） -->
     <string name="detailed_input">详细输入</string>
     <string name="detailed_input_hint">在此分层编辑长文本，支持多行</string>
+
+    <!-- FileOpener（通用附件/链接外开反馈） -->
+    <string name="file_open_not_readable">文件不存在或不可读</string>
+    <string name="file_open_chooser_title">选择应用打开</string>
+    <string name="file_open_no_app">未找到支持打开此文件的应用</string>
+    <string name="file_open_provider_reject">文件路径不被 FileProvider 支持</string>
+    <string name="file_open_no_link_app">未找到可打开此链接的应用</string>
 </resources>

@@ -97,7 +97,11 @@ internal class BatchExecutionEngine(
                 stateMachine.transitionTo(
                     TaskState.AwaitingUserInput(prompt, inputType, stateMachine.currentProgress)
                 )
+                // 等待时长回填（旧实现硬编码 0）：用户等 5 分钟与 1 秒在统计上
+                // 无差别。core 纯 JVM —— System.nanoTime 差值（不受墙钟回拨影响）。
+                val waitStartNs = System.nanoTime()
                 val answer = userGate.await()
+                val waitedMs = (System.nanoTime() - waitStartNs) / 1_000_000L
                 if (!isStillRunning()) {
                     // Aborted while awaiting
                     stateMachine.transitionTo(TaskState.Finished.Aborted)
@@ -112,7 +116,7 @@ internal class BatchExecutionEngine(
                         output = answer,
                         fullOutput = answer,
                         success = true,
-                        durationMs = 0L
+                        durationMs = waitedMs
                     )
                 )
                 totalToolCalls++

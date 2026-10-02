@@ -6,6 +6,7 @@ import android.os.BatteryManager
 import androidx.core.content.getSystemService
 import androidx.hilt.work.HiltWorker
 import androidx.work.*
+import com.apex.agent.platform.csmem.entropy.EntropyManager
 import com.apex.agent.platform.csmem.store.MemoryGraphStore
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -15,17 +16,22 @@ import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** 梦境渲染触发的最低电量阈值（%），电量低于此值则推迟执行。 */
-private const val MIN_BATTERY_LEVEL = 50
+/**
+ * 梦境渲染触发的最低电量阈值（%），电量低于此值则推迟执行。
+ * 与 Constraints.setRequiresBatteryNotLow 的系统阈值（~20%）对齐——旧值 50
+ * 与约束矛盾（约束放行 25% 电量，Worker 却 retry，周期任务永远跑不了）。
+ */
+private const val MIN_BATTERY_LEVEL = 20
 
 /**
  * 梦境渲染引擎 —— 设备息屏/空闲时的记忆保鲜与拓扑同胚迁移。
  *
  * 机制：
- *   1. 触发条件：设备息屏 + 充电中 + WiFi 联网
+ *   1. 触发条件：设备息屏/空闲（setRequiresDeviceIdle）+ 充电中 + WiFi 联网
  *   2. 记忆保鲜：随机抽取低能 Episode/FSM，验证其有效性
- *   3. 拓扑同胚计算：尝试将旧版本 UI 拓扑图映射到新版本（跨版本记忆迁移）
- *   4. 能量衰减：全局记忆熵衰减（遗忘非关键记忆）
+ *   3. 宏技能晶化：高频高能 FSM 晋升 ROM 级固化（不衰减/不剪枝/不可删）
+ *   4. 拓扑同胚计算：尝试将旧版本 UI 拓扑图映射到新版本（跨版本记忆迁移）
+ *   5. 能量衰减：全局记忆熵衰减（遗忘非关键记忆）
  *
  * 理论依据：
  *   "梦境渲染"借鉴了人类睡眠中记忆巩固 (Memory Consolidation) 的概念——
@@ -34,7 +40,8 @@ private const val MIN_BATTERY_LEVEL = 50
 @Singleton
 class DreamRenderer @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val store: MemoryGraphStore
+    private val store: MemoryGraphStore,
+    private val entropyManager: EntropyManager
 ) {
     companion object {
         private const val WORK_NAME = "cs_mem_dream_render"
@@ -50,7 +57,8 @@ class DreamRenderer @Inject constructor(
     fun scheduleDreamRendering() {
         val constraints = Constraints.Builder()
             .setRequiresCharging(true)          // 充电中
-            .setRequiresBatteryNotLow(true)      // 电量不低于 20%
+            .setRequiresBatteryNotLow(true)      // 电量不低于 ~20%（与 MIN_BATTERY_LEVEL 对齐）
+            .setRequiresDeviceIdle(true)          // 设备息屏/空闲（梦境语义：不打扰用户）
             .setRequiredNetworkType(NetworkType.UNMETERED) // WiFi
             .build()
 
@@ -122,6 +130,29 @@ class DreamRenderer @Inject constructor(
             }
         } catch (e: Exception) {
             result.errors.add("Macro validation failed: ${e.message}")
+        }
+
+        // 3.5 宏技能晶化：高频高能宏晋升为 ROM 级固化（不衰减/不剪枝/不可删）。
+        // EntropyManager.shouldCrystallize（能量≥8、成功≥10 次、成功率≥90%）
+        // 与 MemoryGraphStore.crystallizeMacro 此前均为零生产调用——晶化能力
+        // 整个悬空，本步骤补齐闭环。
+        try {
+            var crystallized = 0
+            for (macro in store.getTopMacros(limit = 10)) {
+                if (macro.isCrystallized) continue
+                if (entropyManager.shouldCrystallize(
+                        energy = macro.energy,
+                        successCount = macro.successCount,
+                        failureCount = macro.failureCount
+                    )
+                ) {
+                    store.crystallizeMacro(macro.skillId)
+                    crystallized++
+                }
+            }
+            result.crystallizedCount = crystallized
+        } catch (e: Exception) {
+            result.errors.add("Crystallization failed: ${e.message}")
         }
 
         // 4. 拓扑同胚迁移：检测 App 版本变化 → 轻量属性相似度映射旧→新节点
@@ -229,12 +260,12 @@ class DreamWorker @AssistedInject constructor(
 
             val result = dreamRenderer.performDreamCycle()
             if (result.errors.isNotEmpty()) {
-                // 有非致命错误时仍标记为成功，避免 WorkManager 反复重试；
-                // 错误明细已记录在 result.errors 中供排查。
-                Result.success()
-            } else {
-                Result.success()
+                // 非致命错误（如瞬时 SQLite 锁）→ 退避重试（上限 3 次，超限转
+                // failure 防无限循环；错误明细已记录在 result.errors 供排查）。
+                // 旧实现两分支同为 Result.success()，重试策略形同虚设。
+                return if (runAttemptCount < 3) Result.retry() else Result.failure()
             }
+            Result.success()
         } catch (e: Exception) {
             if (runAttemptCount < 3) Result.retry() else Result.failure()
         }
@@ -248,6 +279,7 @@ data class DreamResult(
     var energyDecayed: Boolean = false,
     var prunedCount: Int = 0,
     var staleMacroCount: Int = 0,
+    var crystallizedCount: Int = 0,
     var migrationNotes: String? = null,
     var completedAt: Long = 0,
     val errors: MutableList<String> = mutableListOf()

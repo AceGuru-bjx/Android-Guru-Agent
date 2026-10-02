@@ -2,6 +2,8 @@ package com.apex.agent.di
 
 import android.content.Context
 import com.apex.agent.core.codetools.CodeWorkspaceRoots
+import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.core.tools.mcp.McpManager
 import com.apex.agent.github.GithubApiService
 import com.apex.agent.github.GithubTokenManager
@@ -99,7 +101,12 @@ object McpModule {
             ),
             // #205 沙箱就绪探针：与 launcher 门禁同源（current 标记文件）——
             // ENV_CHECK 事件里如实呈现 rootfs 状态，未装好在拉进程前就可见。
-            sandboxReadinessProbe = { File(rootfsBaseDir, "current").exists() }
+            sandboxReadinessProbe = { File(rootfsBaseDir, "current").exists() },
+            // 单台 MCP 服务器枚举失败不再静默（HookRegistry 的 errorLog 回调同款
+            // 模式）：core 无 logging 依赖，经回调外送到 AppLogger 留痕。
+            errorLog = { message ->
+                AppLogger.instance.warn(LogCategory.TOOL, "McpManager", message)
+            }
         )
         // ★ 预置内置 MCP 配置（幂等，用户自建同名配置不被动劫持）+ 后台
         // 自动连接。@Provides 副作用模式与 AttachmentModule 触发

@@ -129,12 +129,16 @@ class CsMemSessionManager @Inject constructor(
             return
         }
 
-        val rawNodes = uiTreeResult.nodes
+        // roots = 真实嵌套树（修剪/空间边/指纹父上下文的输入契约）；
+        // roots 为空时回退扁平 nodes（旧实现/测试替身的兼容语义）。
+        val treeRoots = uiTreeResult.roots.ifEmpty { uiTreeResult.nodes }
         val now = System.currentTimeMillis()
 
-        // 1.5 免疫检查（报告 P5 闭环）：检出高危/恶意 UI 则隔离，跳过本次记忆写入，
-        // 防止悬浮窗/钓鱼界面等被写入长期记忆（记忆中毒防御）。
-        val immune = immuneSystem.validateUiTree(rawNodes, appPackage)
+        // 1.5 免疫检查（报告 P5 闭环）：HIGH_RISK/MALICIOUS（钓鱼话术集中等）
+        // 整帧阻断写入，防止悬浮窗/钓鱼界面被写入长期记忆（记忆中毒防御）；
+        // SUSPICIOUS 级（疑似悬浮窗等单点信号）只隔离可疑节点（含子树），
+        // 其余照常写入——避免单点误报灭掉整帧记忆。
+        val immune = immuneSystem.validateUiTree(treeRoots, appPackage)
         if (!immune.safe) {
             AppLogger.instance.warn(
                 LogCategory.CS_MEM, "CsMemSession",
@@ -142,9 +146,10 @@ class CsMemSessionManager @Inject constructor(
             )
             return
         }
+        val sanitizedRoots = immuneSystem.stripQuarantinedNodes(treeRoots, immune)
 
         // 2. 修剪：物理 UI 树 → 语义交互图
-        val currentSemanticNodes = UiTreePruner.prune(rawNodes, appPackage, activityName, currentAppVersion())
+        val currentSemanticNodes = UiTreePruner.prune(sanitizedRoots, appPackage, activityName, currentAppVersion())
 
         // 3. 生成空间拓扑边
         val spatialEdges = UiTreePruner.generateSpatialEdges(currentSemanticNodes)
@@ -199,7 +204,7 @@ class CsMemSessionManager @Inject constructor(
 
         // 7. 更新状态
         previousGraph = currentGraph
-        previousNodes = rawNodes
+        previousNodes = sanitizedRoots
     }
 
     /**
@@ -339,8 +344,12 @@ class CsMemSessionManager @Inject constructor(
         val uiTreeResult = privilegeManager.getUiTree()
         if (!uiTreeResult.success) return
 
-        // 初始状态同样过免疫检查，避免首帧即写入可疑 UI（报告 P5 闭环）。
-        val immune = immuneSystem.validateUiTree(uiTreeResult.nodes, appPackage)
+        val treeRoots = uiTreeResult.roots.ifEmpty { uiTreeResult.nodes }
+
+        // 初始状态同样过免疫检查，避免首帧即写入可疑 UI（报告 P5 闭环）；
+        // SUSPICIOUS 级仅隔离可疑节点（含子树），其余照常写入（与 afterAction
+        // 的节点级/帧级区分一致）。
+        val immune = immuneSystem.validateUiTree(treeRoots, appPackage)
         if (!immune.safe) {
             AppLogger.instance.warn(
                 LogCategory.ENGINE, "CsMemSession",
@@ -348,8 +357,9 @@ class CsMemSessionManager @Inject constructor(
             )
             return
         }
+        val sanitizedRoots = immuneSystem.stripQuarantinedNodes(treeRoots, immune)
 
-        val currentSemanticNodes = UiTreePruner.prune(uiTreeResult.nodes, appPackage, activityName, currentAppVersion())
+        val currentSemanticNodes = UiTreePruner.prune(sanitizedRoots, appPackage, activityName, currentAppVersion())
         val spatialEdges = UiTreePruner.generateSpatialEdges(currentSemanticNodes)
 
         val initialGraph = MemoryGraph(
@@ -363,6 +373,6 @@ class CsMemSessionManager @Inject constructor(
 
         writerActor.ingestGraph(initialGraph)
         previousGraph = initialGraph
-        previousNodes = uiTreeResult.nodes
+        previousNodes = sanitizedRoots
     }
 }

@@ -136,9 +136,12 @@ class BypassExecutionEngine @Inject constructor(
             // 说明遇到了弹窗/广告/页面变体等偏离，立即失败交还 LLM 接管。
             val currentUi = privilegeManager.getUiTree()
             if (currentUi.success && currentUi.nodes.isNotEmpty()) {
+                // roots = 嵌套树（生产真值）；为空时回退扁平 nodes（测试替身）。
+                // prune 返回带嵌套 children 的根列表，必须经 flattenFingerprints
+                // 展平取全树指纹——只取顶层会漏掉全部深层状态节点。
+                val treeRoots = currentUi.roots.ifEmpty { currentUi.nodes }
                 val currentFingerprints = UiTreePruner
-                    .prune(currentUi.nodes, appPackage)
-                    .map { it.fingerprint }
+                    .flattenFingerprints(UiTreePruner.prune(treeRoots, appPackage))
                     .toSet()
                 if (transition.toState !in currentFingerprints) {
                     writerActor.recordMacro(macro.skillId, success = false)

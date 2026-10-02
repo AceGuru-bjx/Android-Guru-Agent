@@ -731,9 +731,34 @@ object ToolModule {
 
         // ═══ 7. UI 操作 (5, 优先 AccessibilityService 语义交互) ═══
         registry.register(SafeAgentTool(UiTapTool(shellExec, privilegeUiProvider)))
-        registry.register(SafeAgentTool(UiSwipeTool(shellExec, privilegeUiProvider)))
+        // 3-A 协调项：shell 回落分支的 swipe 方向坐标注入真实分辨率
+        //（与 PrivilegeUiProvider.getScreenMetrics 同源 —— ApplicationContext
+        // displayMetrics；未注入时工具内部保持 1080x2400 假设）。
+        registry.register(SafeAgentTool(UiSwipeTool(
+            shellExec, privilegeUiProvider,
+            screenMetrics = {
+                val dm = context.resources.displayMetrics
+                dm.widthPixels to dm.heightPixels
+            }
+        )))
         registry.register(SafeAgentTool(UiDumpTool(shellExec, privilegeUiProvider)))
-        registry.register(SafeAgentTool(ScreenshotTool(shellExec)))
+        // D6：截图降级通道 —— shell screencap 失败（无 root/Shizuku、/sdcard 受限）
+        // 时改走 privilegeManager 高权限链（无障碍 API 30 截图 → root screencap），
+        // 成功即按请求路径落盘；两通道都败 → 原错误上抛（诚实失败）。
+        registry.register(SafeAgentTool(ScreenshotTool(shellExec, fallbackScreenshot = { savePath ->
+            val shot = privilegeManager.takeScreenshot()
+            val bytes = shot.imageBytes
+            if (!shot.success || bytes == null) {
+                null
+            } else {
+                val written = runCatching {
+                    val out = File(savePath)
+                    out.parentFile?.mkdirs()
+                    out.writeBytes(bytes)
+                }.isSuccess
+                if (written) "OK: Screenshot saved to $savePath" else null
+            }
+        })))
         registry.register(SafeAgentTool(InputTextTool(shellExec)))
 
         // ═══ 8. 传感器 (2) ═══
@@ -769,15 +794,19 @@ object ToolModule {
 
         // ═══ 10. Terminal PTY — ATR 2.0 (9 new Agent-Native + 4 legacy compat + T73 ×2) ═══
         // 9 new Agent-Native tools (Spec §34) — non-blocking, incremental, event-driven.
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCreateTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalRunTool(terminalRuntime))))
+        // T-audit：会话级工具审计接线 —— 与 shell_execute 同一 #F-⑯ 标准。signal
+        //（SIGKILL 杀进程组）/ run（交互会话注入命令）/ close（关会话）是破坏力
+        // 最大的通道，create/write/resize/snapshot 顺手补齐；observe/wait 为纯
+        // 只读探针不记（审计噪声换取可举证性已足）。
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCreateTool(terminalRuntime)))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalRunTool(terminalRuntime)))))
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalObserveTool(terminalRuntime))))
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWaitTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalWriteTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSignalTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalResizeTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalSnapshotTool(terminalRuntime))))
-        registry.register(SafeAgentTool(TerminalToolAdapter(TerminalCloseTool(terminalRuntime))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalWriteTool(terminalRuntime)))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSignalTool(terminalRuntime)))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalResizeTool(terminalRuntime)))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalSnapshotTool(terminalRuntime)))))
+        registry.register(SafeAgentTool(TerminalToolAdapter(auditedTerminalTool(toolAuditLogger, TerminalCloseTool(terminalRuntime)))))
         // T73: 后端能力发现 + Ubuntu rootfs 安装引导（Agent 自主进入 Ubuntu 的入口）。
         registry.register(SafeAgentTool(TerminalToolAdapter(TerminalBackendsTool(terminalRuntime))))
         // T87：终端栈自诊断（会话/后端/exec 探针自证 —— Agent 可先诊断后行动）。
@@ -1118,3 +1147,35 @@ object ToolModule {
         redactor = secretRedactor
     )
 }
+
+/**
+ * 会话级 terminal 工具审计装饰器（D5）。
+ *
+ * shell_execute / terminal.exec 有完整 ToolAuditLogger 链，但 terminal.create /
+ * run / write / signal / resize / snapshot / close 此前直接注册零审计 ——
+ * Agent 对会话的全部破坏性操作不可举证。装饰 [TerminalTool]：invoke 首尾插桩
+ * 记 tool / command（参数截断）/ decision / durationMs / success，与
+ * shell_execute 的 executed/failed 词汇表对齐。审计异常静默（绝不阻断工具本身）。
+ */
+private fun auditedTerminalTool(
+    audit: ToolAuditLogger,
+    tool: com.apex.agent.platform.terminal.tools.TerminalTool
+): com.apex.agent.platform.terminal.tools.TerminalTool =
+    object : com.apex.agent.platform.terminal.tools.TerminalTool by tool {
+        override suspend fun invoke(arguments: String): String {
+            val startedAt = System.currentTimeMillis()
+            val result = runCatching { tool.invoke(arguments) }
+            runCatching {
+                audit.log(
+                    ToolAuditLogger.Event(
+                        tool = tool.id,
+                        decision = if (result.isSuccess) "executed" else "failed",
+                        command = arguments.take(512),
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        success = result.isSuccess
+                    )
+                )
+            }
+            return result.getOrThrow()
+        }
+    }

@@ -58,13 +58,7 @@ object UiTreePruner {
     ): Boolean {
         if (depth > MAX_DEPTH) return false
 
-        // 先递归处理子节点
-        val childResults = mutableListOf<SemanticNode>()
-        for (child in raw.children) {
-            pruneRecursive(child, childResults, parentFingerprint = null, depth + 1, consecutivePassThrough = 0, appVersion = appVersion)
-        }
-
-        // 尝试从原始数据创建 SemanticNode
+        // 先生成本节点语义——子节点的 parentHash 需要本节点指纹作上下文。
         val semantic = SemanticNode.fromRaw(
             className = raw.className,
             text = raw.text,
@@ -77,6 +71,19 @@ object UiTreePruner {
             domDepth = depth,
             appVersion = appVersion
         )
+
+        // 子节点的父上下文（NodeFingerprint.parentHash 真正区分嵌套位置）：
+        // - 本节点有效 → 用其指纹：同属性元素在不同容器中得到不同指纹
+        //   （旧实现恒传 null，两个页面的"确定"按钮指纹相同，记忆无法区分）；
+        // - 本节点被过滤（不可见/纯装饰）→ 透传祖辈指纹（该层对上下文透明）。
+        // 合并规则 3 丢弃的中间容器仍可作为 hash 载体——指纹只要求稳定且
+        // 上下文敏感，不要求载体本身留在最终图里。
+        val childParentHash = semantic?.fingerprint ?: parentFingerprint
+
+        val childResults = mutableListOf<SemanticNode>()
+        for (child in raw.children) {
+            pruneRecursive(child, childResults, parentFingerprint = childParentHash, depth + 1, consecutivePassThrough = 0, appVersion = appVersion)
+        }
 
         if (semantic == null) {
             // 该节点被过滤（不可见或无意义），但其子树可能有效

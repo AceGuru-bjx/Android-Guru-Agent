@@ -25,6 +25,7 @@ import com.lzf.easyfloat.enums.ShowPattern
 import com.lzf.easyfloat.enums.SidePattern
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import com.apex.agent.ui.language.LanguageManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -57,6 +58,10 @@ import kotlinx.coroutines.launch
 class CyberNeonBallManager @Inject constructor(
     @ApplicationContext private val appContext: Context,
     private val engine: BrowserEngine,
+    // i18n（#2-c P1-5）：非 Compose 场景按当前语言取词（appContext 只跟系统 locale，
+    // LanguageManager 维护 in-app 语言切换后的 resolvedContext —— 与 TerminalViewModel
+    // / ApexNotifications 等同款惯例）。
+    private val languageManager: LanguageManager,
 ) : BrowserEngine.BrowserUiCallback {
 
     enum class CyberState { RUNNING, NEED_HUMAN, ERROR, SUCCESS }
@@ -133,7 +138,9 @@ class CyberNeonBallManager @Inject constructor(
         mainScope.launch {
             engine.releaseBrowser()
             android.widget.Toast.makeText(
-                appContext, "已结束浏览器会话，悬浮球已收起", android.widget.Toast.LENGTH_SHORT
+                appContext,
+                languageManager.getString(R.string.browser_session_released),
+                android.widget.Toast.LENGTH_SHORT
             ).show()
         }
     }

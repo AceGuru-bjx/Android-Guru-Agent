@@ -141,6 +141,11 @@
     <string name="term_session_dead_local">The Android shell process has ended.\nRestart opens a fresh local shell.</string>
     <string name="term_session_restart">Restart session</string>
 
+    <!-- E2: active session close confirmation (accidental-tap guard, SessionStrip X) -->
+    <string name="term_close_confirm_title">Close this session?</string>
+    <string name="term_close_confirm_text">The session process will be terminated immediately — any task still running in it (builds / apt / training) is lost and cannot be recovered.</string>
+    <string name="term_close_confirm_ok">Close session</string>
+
     <!-- Color scheme picker (Termux-style themes) -->
     <string name="term_scheme_section">Color scheme</string>
     <string name="term_scheme_current">Current theme</string>

@@ -145,7 +145,13 @@ class MemoryGraphStoreImpl @Inject constructor(
     }
 
     override suspend fun searchNodesByText(query: String, limit: Int): List<SemanticNode> {
-        return db.nodeDao().searchByText(query, limit).map { it.toDomain() }
+        // LIKE 通配符转义（% _ \）——配合 NodeDao.searchByText 的
+        // ESCAPE '\' 子句，用户查询中的通配符按字面匹配而非模式解释。
+        val escaped = query
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        return db.nodeDao().searchByText(escaped, limit).map { it.toDomain() }
     }
 
     override suspend fun getNodesByVersion(version: String): List<SemanticNode> {
