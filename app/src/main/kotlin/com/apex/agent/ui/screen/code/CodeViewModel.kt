@@ -5,11 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.apex.agent.R
 import com.apex.agent.core.code.CodeAgentEngine
 import com.apex.agent.core.code.CodeEngineFacade
-import com.apex.agent.core.code.longtask.LongTaskCopyOptions
-import com.apex.agent.core.code.longtask.LongTaskDiff
 import com.apex.agent.core.code.longtask.LongTaskStatus
 import com.apex.agent.core.code.longtask.LongTaskStore
-import com.apex.agent.core.code.longtask.LongTaskTemplates
 import com.apex.agent.core.code.longtask.LongTaskTracker
 import com.apex.agent.core.code.longtask.TaskCopyEngine
 import com.apex.agent.core.code.standard.DualLogicCodeEngine
@@ -108,12 +105,21 @@ import java.util.concurrent.atomic.AtomicLong
  * - code_edit / code_write 成功后自动跟随被改文件（编辑器显示最新现场）；
  * - 面板数据直读工作区文件（EditorFileLoader，绕开工具输出的 8000 字符
  *   截断），行点击回填 `@file:line` 到输入草稿。
+ *
+ * ## 文件拆分（God-file 预算纪律）
+ *
+ * VM 行数守 1200 门禁（quality-gate check_file_size）：**只减不增**。
+ * 已拆出的本包内 internal 扩展文件（模式同 Agent 屏 AgentChat* 拆分，
+ * 调用点无感知，依赖成员开放 internal）：
+ * - `CodeLongTaskCenterOps.kt` — v1.2 长任务中心用户操作流（面板开关/
+ *   刷新、复制/重跑/续跑/删除/父对比/模板启动；run 生命周期钩子仍在
+ *   本文件的 runEngine 内）。
  */
 @HiltViewModel
 class CodeViewModel @Inject constructor(
     @Named("code") private val codeEngine: AgentEngine,
     private val workspaceManager: CodeWorkspaceManager,
-    private val codeTodoTool: CodeTodoTool,
+    internal val codeTodoTool: CodeTodoTool,
     private val codeSessionStore: CodeSessionStore,
     private val workspaceRoots: CodeWorkspaceRoots,
     private val userQuestionBridge: UserQuestionBridge,
@@ -123,9 +129,9 @@ class CodeViewModel @Inject constructor(
     // v1.2 长任务中心：追踪器（事件流聚合）+ 复制引擎 + 存储（列表面板直读）
     // + 档位效能统计（长任务记录 → 工作区×档位聚合，档位效能页签数据源）
     private val longTaskTracker: LongTaskTracker,
-    private val taskCopyEngine: TaskCopyEngine,
-    private val longTaskStore: LongTaskStore,
-    private val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
+    internal val taskCopyEngine: TaskCopyEngine,
+    internal val longTaskStore: LongTaskStore,
+    internal val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
     // AUTO 档自治选档器（发送前预检 + 运行中深水区升级观察）
     private val adaptiveSelector: CodeAdaptiveThinkingSelector,
     // #197 函数调用二级菜单候选工具（注册表快照；小圆环迁移至 Coding 屏）
@@ -141,7 +147,7 @@ class CodeViewModel @Inject constructor(
     private val languageManager: com.apex.agent.ui.language.LanguageManager
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(CodeUiState())
+    internal val _uiState = MutableStateFlow(CodeUiState())
     val uiState: StateFlow<CodeUiState> = _uiState.asStateFlow()
 
     /** 工具/权限门的主动提问（AgentQuestion 结构化选项；与 ask_user 的纯文本通道并存）。 */
@@ -165,7 +171,7 @@ class CodeViewModel @Inject constructor(
     private var renderJob: Job? = null
 
     /** 当前绑定的会话归属工作区（null = 尚未绑定，不落盘）。 */
-    private var boundWorkspaceId: String? = null
+    internal var boundWorkspaceId: String? = null
 
     // ═══ AUTO 档自治状态（coding 专属，引擎零参与）═══
 
@@ -639,177 +645,8 @@ class CodeViewModel @Inject constructor(
         appendSystemMessage("⚠️ ${decision.reason}")
     }
 
-    // ═══ 长任务中心（v1.2）═══
-
-    /** 打开长任务面板（异步加载当前工作区的长任务记录 + 档位效能统计）。 */
-    fun openLongTaskCenter() {
-        _uiState.update { it.copy(longTaskSheetVisible = true, longTaskLoading = true) }
-        refreshLongTasks()
-        refreshThinkingStats()
-    }
-
-    fun closeLongTaskCenter() {
-        _uiState.update { it.copy(longTaskSheetVisible = false) }
-    }
-
-    /** 刷新长任务列表（IO 读存储；面板可见或收尾入库后调用）。 */
-    private fun refreshLongTasks() {
-        val wsId = boundWorkspaceId
-        if (wsId == null) {
-            _uiState.update { it.copy(longTasks = emptyList(), longTaskLoading = false) }
-            return
-        }
-        viewModelScope.launch {
-            val records = withContext(Dispatchers.IO) {
-                runCatching { longTaskStore.list(wsId) }.getOrDefault(emptyList())
-            }
-            _uiState.update { it.copy(longTasks = records, longTaskLoading = false) }
-        }
-    }
-
-    /** 刷新档位效能统计（IO：首次访问会同步扫一次统计文件）。 */
-    private fun refreshThinkingStats() {
-        val wsId = boundWorkspaceId
-        if (wsId == null) {
-            _uiState.update { it.copy(thinkingStats = null) }
-            return
-        }
-        viewModelScope.launch {
-            val stats = withContext(Dispatchers.IO) {
-                runCatching { thinkingEvolutionTracker.statsFor(wsId) }.getOrNull()
-            }
-            _uiState.update { it.copy(thinkingStats = stats) }
-        }
-    }
-
-    /**
-     * 复制任务（顶级优化核心）：源记录 → 新副本（parentTaskId 链）→
-     * 可选立即重跑（buildRelaunchPrompt 组装上下文后 sendMessage）。
-     */
-    fun copyTask(id: String, options: LongTaskCopyOptions, relaunch: Boolean) {
-        if (_uiState.value.isRunning) {
-            _uiState.update { it.copy(error = "任务运行中，不能复制重跑") }
-            return
-        }
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { taskCopyEngine.copy(id, options) }
-            result.onSuccess { copy ->
-                refreshLongTasks()
-                if (relaunch) {
-                    val prompt = taskCopyEngine.buildRelaunchPrompt(copy, options)
-                    closeLongTaskCenter()
-                    sendMessage(prompt)
-                } else {
-                    appendSystemMessage("已创建任务副本「${copy.title}」（可从长任务面板重跑）")
-                }
-            }.onFailure { e ->
-                _uiState.update { it.copy(error = "复制任务失败：${e.message ?: "未知错误"}") }
-            }
-        }
-    }
-
-    /** 直接重跑一条历史记录（默认携带上下文/todos/文件清单）。 */
-    fun relaunchTask(id: String) {
-        if (_uiState.value.isRunning) {
-            _uiState.update { it.copy(error = "任务运行中，不能重跑") }
-            return
-        }
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            if (record == null) {
-                _uiState.update { it.copy(error = "任务记录不存在") }
-                return@launch
-            }
-            val prompt = taskCopyEngine.buildRelaunchPrompt(
-                record,
-                LongTaskCopyOptions(includeConversation = true, includeTodos = true, includeFilesList = true)
-            )
-            closeLongTaskCenter()
-            sendMessage(prompt)
-        }
-    }
-
-    /**
-     * 从检查点**续跑**（顶级优化：不从头重跑，接着干）。
-     *
-     * @param checkpointId 指定检查点；null = 最后一个检查点。记录无检查点
-     *   时自动回退到 relaunchTask 语义（无进度可续，只能重跑）。
-     */
-    fun resumeTask(id: String, checkpointId: String? = null) {
-        if (_uiState.value.isRunning) {
-            _uiState.update { it.copy(error = "任务运行中，不能续跑") }
-            return
-        }
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            if (record == null) {
-                _uiState.update { it.copy(error = "任务记录不存在") }
-                return@launch
-            }
-            val resumePrompt = taskCopyEngine.buildResumePrompt(record, checkpointId)
-            closeLongTaskCenter()
-            if (resumePrompt.isNotEmpty()) {
-                sendMessage(resumePrompt)
-            } else {
-                // 无检查点可续 → 回退重跑（并在对话里说明）
-                appendSystemMessage("该任务无检查点可续跑，已改为带上下文重跑")
-                relaunchTask(id)
-            }
-        }
-    }
-
-    /** 删除一条长任务记录。 */
-    fun deleteLongTask(id: String) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { runCatching { longTaskStore.delete(id) } }
-            refreshLongTasks()
-        }
-    }
-
-    /** 与父任务对比运行差异（复制链对比，结果以系统消息形式进对话）。 */
-    fun compareWithParent(id: String) {
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            val parentId = record?.parentTaskId
-            if (record == null || parentId == null) {
-                _uiState.update { it.copy(error = "无父任务可对比（非复制运行）") }
-                return@launch
-            }
-            val parent = withContext(Dispatchers.IO) { longTaskStore.get(parentId) }
-            if (parent == null) {
-                _uiState.update { it.copy(error = "父任务记录已删除") }
-                return@launch
-            }
-            val diff = LongTaskDiff.compare(parent, record)
-            appendSystemMessage(LongTaskDiff.renderText(diff, parent.title, record.title))
-        }
-    }
-
-    /** 从内置模板启动任务：应用推荐档位 + todo 骨架 + goal 模板发送。 */
-    fun startFromTemplate(key: String) {
-        val template = LongTaskTemplates.byKey(key) ?: return
-        val ws = _uiState.value.activeWorkspace
-        val record = LongTaskTemplates.instantiate(
-            template,
-            ws?.workspaceId ?: "",
-            ws?.name ?: ""
-        )
-        // 推荐档位落地（持久化 + 引擎三通道 + 原生 effort 同步）
-        CodeThinkingLevel.fromName(template.recommendedThinkingLevel)
-            ?.let { setThinkingLevel(it) }
-        // todo 骨架预置（pending 状态，模型后续可改写）
-        runCatching {
-            codeTodoTool.restore(
-                template.todoSkeleton.map { CodeTodoTool.Todo(content = it, status = "pending", priority = "medium") }
-            )
-        }.onFailure { AppLogger.instance.warn(LogCategory.UI, "LongTask", "模板 todo 预置失败：${it.message}") }
-        _uiState.update { it.copy(todos = codeTodoTool.snapshot()) }
-        closeLongTaskCenter()
-        sendMessage(record.goal)
-    }
-
     /** 追加一条系统消息（时间轴主通道 + 旧消息通道双写，仅 UI 展示）。 */
-    private fun appendSystemMessage(text: String) {
+    internal fun appendSystemMessage(text: String) {
         streamSession.injectSystem(text)
         _uiState.update {
             it.copy(messages = it.messages + CodeChatMessage(idGen.incrementAndGet(), CodeChatMessage.Role.SYSTEM, text))
