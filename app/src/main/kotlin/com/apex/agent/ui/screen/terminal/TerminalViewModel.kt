@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 /**
@@ -92,8 +93,11 @@ class TerminalViewModel @Inject constructor(
     private val _activeSessionId = MutableStateFlow<Long?>(null)
     val activeSessionId: StateFlow<Long?> = _activeSessionId.asStateFlow()
 
-    /** VM 自己创建的会话的 backend 记录（agent 创建的会话以 "agent" 展示）。 */
-    private val sessionBackends = LinkedHashMap<Long, Pair<String, String>>()
+    /** VM 自己创建的会话的 backend 记录（agent 创建的会话以 "agent" 展示）。
+     *  M2：ConcurrentHashMap —— `ensureDepInstallSession` 在 Dispatchers.IO 里写
+     *  （:sessionBackends[sid]），主线程 refreshSessionsInternal 同时读；
+     *  旧 LinkedHashMap 无 happens-before，存在陈旧读/扩容竞争隐患。 */
+    private val sessionBackends = ConcurrentHashMap<Long, Pair<String, String>>()
 
     /**
      * 各会话最近一次由 shell 设置的窗口标题（OSC 0/1/2 —— `PS1` 里的 `\[\e]0;…\a\]`、
@@ -102,8 +106,9 @@ class TerminalViewModel @Inject constructor(
      * Termux / JuiceSSH / ConnectBot 都把标题显示在会话标签上：跑 `ssh host` 或
      * `vim file` 时标签会跟着变，多会话下不用靠猜。此前 `SessionTab.title` 恒为
      * null —— VT 层早就解析出标题了，只是没人往 UI 上接。
+     * M2：与 sessionBackends 同因，IO 侧存在写路径 → ConcurrentHashMap。
      */
-    private val sessionTitles = LinkedHashMap<Long, String>()
+    private val sessionTitles = ConcurrentHashMap<Long, String>()
 
     /** 活跃会话的 styled 屏（颜色/光标/scrollback；null = 未启动）。 */
     private val _renderState = MutableStateFlow<TerminalRenderSnapshot?>(null)
@@ -887,7 +892,8 @@ class TerminalViewModel @Inject constructor(
     fun clearCommandHistory() = commandHistory.clear()
 
     // ═══ T87：扩展键（用户自定义宏行 —— Termux extra-keys 等价物）═══
-    private val _extraKeys = MutableStateFlow(loadExtraKeys())
+    // 持久化读写缝拆在 TerminalExtraKeysStore.kt（守 1200 行预算）。
+    private val _extraKeys = MutableStateFlow(loadExtraKeys(prefs))
 
     /** 扩展键（用户宏；空 = 不渲染扩展行）。 */
     val extraKeys: StateFlow<List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>> =
@@ -901,35 +907,21 @@ class TerminalViewModel @Inject constructor(
             listOf(_extraKeys.value), key
         ).flatten()
         _extraKeys.value = next
-        persistExtraKeys(next)
+        persistExtraKeys(prefs, next)
     }
 
     /** 移除指定标签的扩展键。 */
     fun removeExtraKey(label: String) {
         val next = _extraKeys.value.filterNot { it.label == label }
         _extraKeys.value = next
-        persistExtraKeys(next)
+        persistExtraKeys(prefs, next)
     }
 
     /** 重置为默认布局（设置抽屉「恢复默认」）。 */
     fun resetExtraKeys() {
         val next = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.DEFAULT_LAYOUT.flatten()
         _extraKeys.value = next
-        persistExtraKeys(next)
-    }
-
-    private fun loadExtraKeys(): List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey> {
-        // T89：新用户默认空布局（KeyToolbar 主行已覆盖 TAB/^L/粘贴 —— 双行键区
-        // 重复泛滥）。已存储布局的存量用户不受影响（parse 非空即用）。
-        val stored = prefs.getString("term_extra_keys", null)
-        return com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.parse(stored)
-            ?.flatten()
-            ?: com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.EMPTY_LAYOUT.flatten()
-    }
-
-    private fun persistExtraKeys(keys: List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>) {
-        val ser = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.serialize(listOf(keys))
-        prefs.edit().putString("term_extra_keys", ser).apply()
+        persistExtraKeys(prefs, next)
     }
 
     fun updateSettings(block: TerminalSettings.() -> TerminalSettings) {
@@ -1041,6 +1033,9 @@ class TerminalViewModel @Inject constructor(
     private val _install = MutableStateFlow(InstallState())
     val install: StateFlow<InstallState> = _install.asStateFlow()
 
+    /** M2：ensureDepInstallSession 在 IO 线程写、主线程读（sendInput 门禁）——
+     *  跨线程可见性用 @Volatile 保证（旧版普通 var 可能读到陈旧值）。 */
+    @Volatile
     private var depSessionId: Long? = null
 
     fun installDep(item: DepItem) {

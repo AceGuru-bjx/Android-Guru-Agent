@@ -127,7 +127,11 @@ fun TerminalScreen(
     val keepScreenOn = settings.keepScreenOn
     val view = LocalView.current
     DisposableEffect(keepScreenOn) {
-        val window = (view.context as? android.app.Activity)?.window
+        // L3：context 可能被 ContextThemeWrapper 包裹（旧版 as? Activity 直接
+        // 拿不到 window → 常亮静默失效）—— 沿 baseContext 链解包找 Activity。
+        val activity = generateSequence(view.context) { (it as? android.content.ContextWrapper)?.baseContext }
+            .filterIsInstance<android.app.Activity>().firstOrNull()
+        val window = activity?.window
         if (window != null) {
             if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -647,14 +651,16 @@ private fun SessionChip(
                 maxLines = 1
             )
         }
-        // 关闭钮：24dp 视觉 + padding 撑到 ≥32dp 触控（旧 18dp 触控区低于阈值）
+        // 关闭钮：32dp 触控区 + 图标 16dp（视觉同旧版）。M4：padding 在
+        // clickable **之后**只缩小图标绘制区、不扩大触控 —— 旧版 24dp 触控区
+        // 配「≥32dp」注释是错的，低于 48dp 无障碍建议线。
         Icon(
             Icons.Default.Close, stringResource(R.string.term_cd_close_session),
             Modifier
-                .size(24.dp)
+                .size(32.dp)
                 .clip(CircleShape)
                 .clickable(onClick = onClose)
-                .padding(4.dp),
+                .padding(8.dp),
             tint = ConsoleTheme.dim
         )
     }
@@ -691,30 +697,38 @@ private fun EnvironmentPanel(
     onNewLocal: () -> Unit,
     onOpenCenter: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    // M3：verticalScroll + Arrangement.Center 是 Compose 已知坑组合 —— 内容
+    // 超视口时 Arrangement 对齐失效/顶部被裁且滚不回去（横屏、小屏、大字号
+    // 下本面板内容 ≈450dp+ 必现）。改为外层 Box 居中 + 内层滚动列：
+    // 内容矮于视口 → 整体垂直居中；高于视口 → 从顶部开始完整滚动、绝不裁头。
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
     ) {
-        when (phase) {
-            UbuntuLifecycleCoordinator.Phase.FAILED -> EnvironmentFailureContent(
-                lastError = lastError,
-                onRetry = onRetry,
-                onOpenCenter = onOpenCenter
-            )
-            UbuntuLifecycleCoordinator.Phase.READY -> EnvironmentReadyEmptyContent(
-                onNewUbuntu = onNewUbuntu,
-                onNewLocal = onNewLocal
-            )
-            else -> EnvironmentPreparingContent(
-                phase = phase,
-                progress = progress,
-                onNewLocal = onNewLocal,
-                onOpenCenter = onOpenCenter
-            )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp, vertical = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            when (phase) {
+                UbuntuLifecycleCoordinator.Phase.FAILED -> EnvironmentFailureContent(
+                    lastError = lastError,
+                    onRetry = onRetry,
+                    onOpenCenter = onOpenCenter
+                )
+                UbuntuLifecycleCoordinator.Phase.READY -> EnvironmentReadyEmptyContent(
+                    onNewUbuntu = onNewUbuntu,
+                    onNewLocal = onNewLocal
+                )
+                else -> EnvironmentPreparingContent(
+                    phase = phase,
+                    progress = progress,
+                    onNewLocal = onNewLocal,
+                    onOpenCenter = onOpenCenter
+                )
+            }
         }
     }
 }

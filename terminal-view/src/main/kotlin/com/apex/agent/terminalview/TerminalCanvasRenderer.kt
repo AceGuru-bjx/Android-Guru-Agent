@@ -116,6 +116,11 @@ class TerminalCanvasRenderer {
         // fake 状态复位（run 绘制前重设，防上次残留进入探测）
         textPaint.isFakeBoldText = false
         textPaint.textSkewX = 0f
+        textPaint.textScaleX = 1f
+        // H1：字号/字型变了 → run 实测宽度全部失效。宽度缓存原本只按快照
+        // 代际清除（invalidateRunCacheIfNeeded），换字号后若无新输出会一直
+        // 拿旧字号的测量值算 textScaleX —— 这里同步清掉。
+        runWidthCache.clear()
         // 窄字符探测
         val probe = PROBE_CHARS
         val narrowAdvance = textPaint.measureText(probe) / probe.length
@@ -316,6 +321,11 @@ class TerminalCanvasRenderer {
         // T92：宽度缓存（同代 run 文本不变；paint 状态由 typeface/textSize/
         // fakeBold 三元组决定 —— 均随 frameId / run.flags 稳定）。
         val expected = run.colSpan * cellWidthPx
+        // H1：measureText 受 textScaleX 影响 —— 同一行前一个 run 的校正残值
+        // 会污染首次测量，并被宽度缓存冻结一整代（最终绘制宽 = expected /
+        // 残值）。测量前归零：缓存语义固定为「textScaleX=1 的自然宽度」，
+        // 与上面 KDoc 的三元组声明一致。
+        textPaint.textScaleX = 1f
         val measured = runWidthCache.getOrPut(run) { textPaint.measureText(run.text) }
         val scaleX = if (measured > 0.5f) expected / measured else 1f
         textPaint.textScaleX =

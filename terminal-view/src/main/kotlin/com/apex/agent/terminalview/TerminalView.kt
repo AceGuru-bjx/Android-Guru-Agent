@@ -19,7 +19,6 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
 import com.apex.agent.terminalemulator.KeyModifiers
-import com.apex.agent.terminalemulator.MouseTrackingMode
 import com.apex.agent.terminalemulator.RenderCell
 import com.apex.agent.terminalemulator.TerminalKey
 import com.apex.agent.terminalemulator.TerminalMouseEventType
@@ -582,6 +581,11 @@ class TerminalView @JvmOverloads constructor(
      *（vim/tmux 里滚轮翻它们的内部缓冲，而非本地 scrollback）。
      */
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        // M1：记录鼠标「指点位置」—— sendWheelEvents 用 lastTouch* 做 tmux 分屏
+        // 路由，旧版只在 onTouchEvent 更新：外接鼠标滚轮恒路由到上一次手指触点
+        // 或 (0,0)（分屏下必错 pane）。悬停/滚轮事件自带坐标，这里补上。
+        lastTouchX = event.x
+        lastTouchY = event.y
         if (event.actionMasked == MotionEvent.ACTION_SCROLL &&
             event.isFromSource(InputDevice.SOURCE_MOUSE)
         ) {
@@ -667,18 +671,32 @@ class TerminalView @JvmOverloads constructor(
             } else {
                 wheelAccumPx += deltaYPx
                 if (abs(wheelAccumPx) >= cellHeightPx) {
-                    sendWheelEvents(wheelAccumPx < 0f)
+                    // H2：正 delta（手指下拖 = 看更老内容）→ WHEEL_UP —— 与本地
+                    // 滚动（scrollBy(-rows) 看更老）和物理滚轮（vscroll>0 = UP）
+                    // 同向。旧版取 `accum < 0` 把方向发反了。
+                    sendWheelEvents(wheelAccumPx > 0f)
                     wheelAccumPx = 0f
                 }
             }
             return
         }
         // 备用屏无 scrollback：滚动手势 → 方向键（Termux 1007 altScroll 近似，
-        // 每标准 3 行一档 —— 用户在 less/vim 里滚即翻页）
+        // 每标准 3 行一档 —— 用户在 less/vim 里滚即翻页）。
+        // H3 修复：① 方向取反 —— 正 delta（手指下拖/滚轮上，等价「看更老」）
+        //    应发 UP，旧版发 DOWN，与本地滚动、物理滚轮方向相反；
+        // ② 余量累计满 3 行才发一键 —— 旧版 `+1` 下限让每个 MOVE 事件都发
+        //    ≥1 键，慢拖 60~120Hz 直接轰炸 PTY（本地路径 T92 已修累计，
+        //    此分支漏修）。
         if (snap != null && snap.alternateScreen && scrollModel.maxScrollUp == 0) {
-            val notches = abs(TerminalScrollModel.rowsForDelta(deltaYPx, cellHeightPx)) / 3 + 1
-            val key = if (deltaYPx < 0f) TerminalKey.UP else TerminalKey.DOWN
-            repeat(notches.coerceIn(1, 6)) { client?.onTerminalKey(key, 0) }
+            val total = deltaYPx + scrollRemainderPx
+            val rows = TerminalScrollModel.rowsForDelta(total, cellHeightPx)
+            val notches = (abs(rows) / 3).coerceAtMost(6)
+            val consumedRows = notches * 3 * (if (rows > 0) 1 else -1)
+            scrollRemainderPx = total - consumedRows * cellHeightPx
+            if (notches > 0) {
+                val key = if (rows > 0) TerminalKey.UP else TerminalKey.DOWN
+                repeat(notches) { client?.onTerminalKey(key, 0) }
+            }
             return
         }
         // T92：余量累加（Termux mScrollRemainder）—— 单帧 MOVE 增量几乎总小于
@@ -702,7 +720,9 @@ class TerminalView @JvmOverloads constructor(
             // 行数与速度成比例、限 ±半屏（避免一次甩动轰炸几百行滚轮事件）
             val rowsBySpeed = (abs(velocityYPx) / cellHeightPx * 0.25f).toInt()
             val rows = rowsBySpeed.coerceIn(1, snap.rows / 2).coerceAtLeast(1)
-            val up = velocityYPx < 0f
+            // H2：手指下甩（velocity > 0，本地滚动看更老）→ WHEEL_UP ——
+            // 旧版 `velocity < 0` 方向发反。
+            val up = velocityYPx > 0f
             repeat(rows) {
                 sendWheelEvents(up)
                 // 每行一次可短暂停顿 —— 直接连发，事件量 ≤ 半屏可控
@@ -965,6 +985,7 @@ class TerminalView @JvmOverloads constructor(
     }
 
     // ═════════════════════ 鼠标报告 ═════════════════════
+    // 编码出口缝拆在 TerminalMouseReport（守 1200 行预算）—— 这里只取快照/触点。
 
     private fun dispatchMouse(
         mergedRow: Int,
@@ -974,43 +995,14 @@ class TerminalView @JvmOverloads constructor(
         released: Boolean
     ) {
         val snap = snapshot ?: return
-        val mode = snap.mouseMode.tracking
-        if (mode == MouseTrackingMode.OFF) return
-        // 1-based 屏内坐标（旧渲染器 onMouse 同款）
-        val screenRow = mergedRow - snap.scrollback.size + 1
-        if (screenRow < 1) return
-        client?.onTerminalMouse(
-            col = (col + 1).coerceAtLeast(1),
-            row = screenRow,
-            type = type,
-            mods = 0,
-            mouseMode = mode,
-            released = released,
-            button = button
-        )
+        TerminalMouseReport.dispatch(snap, client, mergedRow, col, type, button, released)
     }
 
     private fun sendWheelEvents(up: Boolean) {
         val snap = snapshot ?: return
-        val mode = snap.mouseMode.tracking
-        if (mode == MouseTrackingMode.OFF) return
-        val type = if (up) TerminalMouseEventType.WHEEL_UP else TerminalMouseEventType.WHEEL_DOWN
-        // T92：滚轮报告位置取**最近触点/指点位置**（tmux 分屏下路由到正确的
-        // pane；旧行为恒报屏幕中心 —— 分屏下必错 pane）。
-        val at = cellAt(lastTouchX, lastTouchY)
-        val row = if (at != null) (at.first - snap.scrollback.size + 1).coerceAtLeast(1)
-        else (snap.rows / 2 + 1).coerceAtLeast(1)
-        val col = if (at != null) (at.second + 1).coerceAtLeast(1)
-        else (snap.cols / 2 + 1).coerceAtLeast(1)
-        client?.onTerminalMouse(
-            col = col.coerceIn(1, snap.cols),
-            row = row.coerceIn(1, snap.rows),
-            type = type,
-            mods = 0,
-            mouseMode = mode,
-            released = false,
-            button = 0
-        )
+        // 滚轮报告位置 = 最近触点/指点位置（tmux 分屏路由正确 pane；M1 已让
+        // 外接鼠标的悬停/滚轮坐标也写进 lastTouch*）。
+        TerminalMouseReport.wheel(snap, client, cellAt(lastTouchX, lastTouchY), up)
     }
 
     // ═════════════════════ 几何辅助 ═════════════════════
