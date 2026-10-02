@@ -444,6 +444,17 @@ jobs:
             -Pkotlin.incremental=false \
             --stacktrace
 
+      - name: Run platform:privilege unit tests (T92 #255 privilege-chain audit)
+        run: |
+          # T92 (#255 权限链审计): PrivilegeDetectorAuditTest 锁定逐命令
+          # privilege-chain 审计日志契约（恰好一条 / via=exit= 与返回值一致 /
+          # 多行折叠 / 截断上限）。Pure JVM — executeShell 走真实 sh -c，
+          # 无 su/shizuku 的 CI 环境稳定走 shell 通道。
+          ./gradlew :platform:privilege:testDebugUnitTest \
+            --no-daemon \
+            -Pkotlin.incremental=false \
+            --stacktrace
+
   build-apk:
     name: Build Debug APK
     runs-on: ubuntu-latest

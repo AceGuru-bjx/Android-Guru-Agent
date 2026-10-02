@@ -1,5 +1,7 @@
 package com.apex.agent.platform.privilege
 
+import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.platform.privilege.shizuku.ShizukuCommandExecutor
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -22,6 +24,11 @@ object PrivilegeDetector {
     @Volatile private var cachedLevel: PrivilegeLevel? = null
     @Volatile private var cachedAt: Long = 0L
     private const val CACHE_TTL_MS = 30_000L
+
+    /** T92（#255）审计日志来源标识与命令截断上限。 */
+    internal const val AUDIT_SOURCE = "PrivilegeDetector"
+    internal const val MAX_LOG_CMD_LEN = 120
+    private val whitespaceRun = Regex("\\s+")
 
     /**
      * 失效权限缓存。Shizuku binder 死亡 / 用户手动起停 Shizuku 时调用。
@@ -96,7 +103,7 @@ object PrivilegeDetector {
     }
 
     /**
-     * 执行Shell命令（自动选择最优权限通道）
+     * 执行Shell命令（自动选择最优权限通道，带审计遥测）
      *
      * 执行链：
      * 1. 有Root → su -c "cd <dir> && command"（dir 有值时）
@@ -104,10 +111,48 @@ object PrivilegeDetector {
      *    workDir 经 AIDL dir 参数原生传递）
      * 3. 都没有 → sh -c command（普通shell，能力有限）
      *
+     * T92（#255 权限链审计）：每次执行同步产出一条 privilege-chain 审计日志
+     * （via 通道 / exit 退出码 / 耗时 / 截断后的命令）—— 一条命令到底走了
+     * root、shizuku 还是普通 shell，日志中枢可查、可筛选、可回放。
+     *
      * @param workDir 工作目录（null = 各通道默认）。用于 shell_execute 的
      * 工作目录记忆 —— cd 状态由调用方（ToolModule 会话跟踪）解析并传入。
      */
     fun executeShell(command: String, timeoutMs: Long = 30000, workDir: String? = null): ShellExecResult {
+        val startedAt = System.currentTimeMillis()
+        val result = executeShellInternal(command, timeoutMs, workDir)
+        audit(result, System.currentTimeMillis() - startedAt, command)
+        return result
+    }
+
+    /**
+     * 审计日志出口（internal 供单测直接验证消息契约）。
+     *
+     * 日志永不阻断执行：runCatching 包裹，日志中枢异常时静默降级（与
+     * ProotCommandSpawner 的 TM6 提示同一纪律）。命令文本做两项整形：
+     * 折叠连续空白（多行命令压成单行）+ 截断到 [MAX_LOG_CMD_LEN]，
+     * 防止超长命令把 8MB 日志缓冲打爆。
+     */
+    internal fun audit(result: ShellExecResult, durationMs: Long, command: String) {
+        runCatching {
+            AppLogger.instance.info(
+                LogCategory.TOOL,
+                AUDIT_SOURCE,
+                "privilege-chain via=${result.via} exit=${result.exitCode} ${durationMs}ms" +
+                    " cmd=${command.logForm()}",
+                "privilege-chain", result.via
+            )
+        }
+    }
+
+    /** 命令的日志形态：折叠空白 + 截断（保留尾部省略号标记）。 */
+    private fun String.logForm(): String {
+        val collapsed = trim().replace(whitespaceRun, " ")
+        return if (collapsed.length <= MAX_LOG_CMD_LEN) collapsed
+        else collapsed.take(MAX_LOG_CMD_LEN) + "..."
+    }
+
+    private fun executeShellInternal(command: String, timeoutMs: Long, workDir: String?): ShellExecResult {
         // 优先级1: Root
         if (detectRoot()) {
             val suCommand = if (workDir != null) "cd $workDir && $command" else command
