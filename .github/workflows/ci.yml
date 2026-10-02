@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, 'feat/**']
+    # push 全量跑（main/feat/fix/refactor）—— 与 quality-gate.yml 的 push 白名单
+    # 对齐：每个 PR 分支 push 后 Checks 含 push+PR 双份完整检查，消除
+    # fix/** 分支只被 QG 覆盖、CI 仅靠 PR 事件的不对称。
+    branches: [main, 'feat/**', 'refactor/**', 'fix/**']
   pull_request:
     branches: [main, 'feat/**']
   workflow_dispatch: {}
