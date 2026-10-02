@@ -51,8 +51,10 @@ import java.nio.file.Files
  * 分配，argv 语义完全一致 —— PTY 侧（SIGWINCH/Ctrl-C/前台组）由真机
  * androidTest（UbuntuTerminalRuntimeInstrumentationTest）锁定。
  *
- * host proot 适配（仅测试内）：upstream 5.4 无 -E/-- → 与 T72 E2E 相同的
- * 语义等价适配；Termux 原始 argv 契约由 androidTest 锁定。
+ * T91（D5）：host proot 方言由生产 provider 的能力探针实测（见 hostDialect），
+ * argv 构造端按方言自适应 —— T88 时代的 adaptForUpstreamProot 手工过滤层
+ * 已删除（它与「把 -E 偷搬进宿主 env」同构：适配层改写生产 argv，
+ * CI 绿不等于设备绿）。
  */
 class UbuntuTerminalRuntimeWiringTest {
 
@@ -166,14 +168,21 @@ class UbuntuTerminalRuntimeWiringTest {
         }
     }
 
-    /** 全后端 runtime（需要 host proot 可用 —— W1/W2/W3 用）。 */
+    /** 全后端 runtime（需要 host proot 可用 —— W1/W2/W3/W5/W6 用）。 */
     private fun newRuntime(pty: FakeNativePty): TerminalRuntimeImpl {
         val bin = prootBinary
             ?: error("internal: newRuntime requires proot — callers must assumeTrue(prootBinary != null)")
+        // T91（D5）：方言由生产探针实测（与 T72 E2E 同源）—— host proot（Debian
+        // 5.4 / Ubuntu 5.1.0）如实返回 UPSTREAM；T73_PROOT_BIN 指向 Termux 补丁
+        // 版时返回 TERMUX_COMPAT，两种形状均可执行（上游形状是 Termux 子集）。
+        val dialect = hostDialect()
         val binaryProvider = object : PRootBinaryProvider {
             override suspend fun locate(): Result<AbsolutePath> = Result.success(AbsolutePath(bin.absolutePath))
             override suspend fun verify(binary: AbsolutePath): Result<PRootBinaryInfo> = Result.success(
-                PRootBinaryInfo(binary, PRootVersion(5, 4, 0), CpuArchitecture.X86_64, true)
+                PRootBinaryInfo(
+                    binary, PRootVersion(5, 4, 0), CpuArchitecture.X86_64, true,
+                    dialect = dialect
+                )
             )
         }
         val workspaces = LinuxWorkspaceManager(File(layout.baseDir.value, "workspaces"))
@@ -194,6 +203,22 @@ class UbuntuTerminalRuntimeWiringTest {
     /** 仅本地后端的 runtime（W4 用 —— 不依赖 host proot）。 */
     private fun newLocalRuntime(pty: FakeNativePty): TerminalRuntimeImpl =
         TerminalRuntimeImpl(native = pty, policy = TerminalPolicyImpl())
+
+    /**
+     * T91（D5）：host proot 方言实测 —— 生产 provider 的能力探针
+     * （exec `--kill-on-exit --version`，不 ptrace）直接判定。
+     */
+    private fun hostDialect(): com.apex.agent.platform.terminal.proot.PRootDialect {
+        val bin = prootBinary
+            ?: return com.apex.agent.platform.terminal.proot.PRootDialect.UPSTREAM
+        val env = com.apex.agent.platform.terminal.proot.PRootHostEnvironment(
+            nativeLibraryDir = bin.parentFile.absolutePath,
+            baseDir = File(System.getProperty("java.io.tmpdir"), "t91-wiring-dialect-base"),
+            cacheDir = File(System.getProperty("java.io.tmpdir"), "t91-wiring-dialect-cache")
+        )
+        return com.apex.agent.platform.terminal.proot.NativeLibraryPRootBinaryProvider(env)
+            .dialectFor(bin)
+    }
 
     @Test
     fun `W1 runtime reports linux-ubuntu READY via backends`() = runBlocking {
@@ -255,9 +280,9 @@ class UbuntuTerminalRuntimeWiringTest {
         File(layout.baseDir.value, "workspaces/default").apply { mkdirs() }
             .let { File(it, "marker.txt").writeText("bind-works") }
 
-        val adaptedArgv = adaptForUpstreamProot(argv)
+        // T91（D5）：argv 已按实测方言自适应，原样执行（适配层已删除）
         val exec = executorWith().execute(
-            PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
+            PRootCommand(AbsolutePath(argv[0]), argv.drop(1)),
             timeoutMs = 120_000
         )
         assertEquals("proot exit: ${exec.stderr}", 0, exec.exitCode)
@@ -307,9 +332,9 @@ class UbuntuTerminalRuntimeWiringTest {
         argv.removeAt(argv.size - 1)
         argv.addAll(listOf("-c", "cat /workspace/marker.txt"))
 
-        val adaptedArgv = adaptForUpstreamProot(argv)
+        // T91（D5）：argv 已按实测方言自适应，原样执行
         val exec = executorWith().execute(
-            PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
+            PRootCommand(AbsolutePath(argv[0]), argv.drop(1)),
             timeoutMs = 120_000
         )
         assertEquals("proot exit: ${exec.stderr}", 0, exec.exitCode)
@@ -333,9 +358,9 @@ class UbuntuTerminalRuntimeWiringTest {
             "echo persist-me > /root/PERSIST.txt && cat /root/PERSIST.txt && " +
                 "test -f /root/.bashrc && echo BASHRC-OK"))
 
-        val adaptedArgv = adaptForUpstreamProot(argv)
+        // T91（D5）：argv 已按实测方言自适应，原样执行
         val exec = executorWith().execute(
-            PRootCommand(AbsolutePath(adaptedArgv[0]), adaptedArgv.drop(1)),
+            PRootCommand(AbsolutePath(argv[0]), argv.drop(1)),
             timeoutMs = 120_000
         )
         assertEquals("proot exit: ${exec.stderr}", 0, exec.exitCode)
@@ -355,25 +380,11 @@ class UbuntuTerminalRuntimeWiringTest {
         val argv2 = pty2.argvOf(nid2).toMutableList()
         argv2.removeAt(argv2.size - 1)
         argv2.addAll(listOf("-c", "cat /root/PERSIST.txt"))
-        val a2 = adaptForUpstreamProot(argv2)
+        // T91（D5）：argv2 已按实测方言自适应，原样执行
         val exec2 = executorWith().execute(
-            PRootCommand(AbsolutePath(a2[0]), a2.drop(1)), timeoutMs = 120_000
+            PRootCommand(AbsolutePath(argv2[0]), argv2.drop(1)), timeoutMs = 120_000
         )
         assertTrue("second session sees home: '${exec2.stdout}'", exec2.stdout.contains("persist-me"))
-    }
-
-    // ─── upstream proot host adaptation（与 T72 E2E 同层）───
-
-    /**
-     * T88：设备 argv 与上游（Debian/CI）proot 的唯一差异只剩两个 proot 选项：
-     * `--`（上游自研 argv 解析器不识别，Termux 补丁才支持）与 `--kill-on-exit`
-     * （一次性 exec 不需要）。**guest env 不再适配** —— env trampoline
-     * （`/usr/bin/env -i K=V … cmd`）在上游 proot 上原样合法且语义一致，
-     * 测试由此真正执行生产 argv 形状，而不是把 -E 偷偷搬到宿主 env 里
-     * （旧适配层正是 CI 全绿而设备炸 -E 的共犯）。
-     */
-    private fun adaptForUpstreamProot(argv: List<String>): List<String> {
-        return argv.filter { it != "--" && it != "--kill-on-exit" }
     }
 
     private fun executorWith(): ProotExecutor {

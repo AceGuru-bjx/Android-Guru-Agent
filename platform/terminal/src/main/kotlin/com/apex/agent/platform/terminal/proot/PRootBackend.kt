@@ -26,11 +26,47 @@ import com.apex.agent.platform.terminal.workspace.WorkspacePath
  */
 
 // ─── Section 6/7: PRoot Binary Provider + Info ───
+
+/**
+ * T91（D5）：PRoot 方言 —— 二进制能力集合的机器可判抽象。
+ *
+ * 背景（「版本静默差异」根因档案）：仓库同时面对两类 proot：
+ *  - **捆绑 Termux 补丁版 5.1.107.92**（APK jniLibs，设备生产目标）：支持
+ *    `--kill-on-exit`（proot 退出时收编 guest 进程树）与 `--` 选项终结符
+ *    （两者都是 Termux 补丁，上游选项表没有）；
+ *  - **上游版**（Ubuntu 24.04 存档的 5.1.0 / Debian 5.4 —— CI E2E 与本地开发
+ *    的 host proot）：两者都不认，argv 原样 exec 直接报 unknown option。
+ *
+ * T88 时代测试里靠 `adaptForUpstreamProot` 手工过滤 —— 与 -E 事故同构的
+ * 「适配层遮蔽真实 argv」风险。T91 起由 [NativeLibraryPRootBinaryProvider]
+ * 的能力探针在 verify 时实测判定，argv 构造端（[PRootCommandBuilder]）
+ * 按方言自适应 —— **同一个 builder 对任何 proot 产出可执行 argv**，
+ * 测试不再需要（也不再可能）偷偷改写生产 argv。
+ */
+enum class PRootDialect {
+    /** Termux 补丁方言（捆绑 5.1.107.92）：`--kill-on-exit` 与 `--` 均可用。 */
+    TERMUX_COMPAT,
+
+    /** 上游方言（Ubuntu 5.1.0 / Debian 5.4+）：无上述 Termux 补丁选项。 */
+    UPSTREAM;
+
+    /** 是否支持 `--kill-on-exit`（proot 退出时杀光 guest 进程树）。 */
+    val supportsKillOnExit: Boolean get() = this == TERMUX_COMPAT
+
+    /** 是否支持 `--` 选项终结符（guest 命令与 proot 选项的分界）。 */
+    val supportsOptionSeparator: Boolean get() = this == TERMUX_COMPAT
+}
+
 data class PRootBinaryInfo(
     val path: AbsolutePath,
     val version: PRootVersion?,
     val architecture: CpuArchitecture,
-    val executable: Boolean
+    val executable: Boolean,
+    /**
+     * T91（D5）：argv 方言（能力探针实测判定；探针不可用时保守回落
+     * [PRootDialect.TERMUX_COMPAT] —— 捆绑二进制的设备行为不变）。
+     */
+    val dialect: PRootDialect = PRootDialect.TERMUX_COMPAT
 )
 
 data class PRootVersion(val major: Int?, val minor: Int?, val patch: Int?)
@@ -65,7 +101,14 @@ data class PRootCommand(
 )
 
 interface PRootCommandBuilder {
-    fun build(request: PRootLaunchRequest, prootBinary: AbsolutePath, rootfsPath: AbsolutePath, workspacePath: AbsolutePath): PRootCommand
+    fun build(
+        request: PRootLaunchRequest,
+        prootBinary: AbsolutePath,
+        rootfsPath: AbsolutePath,
+        workspacePath: AbsolutePath,
+        /** T91（D5）：目标 proot 方言（默认捆绑 Termux 版 —— 既有调用点行为不变）。 */
+        dialect: PRootDialect = PRootDialect.TERMUX_COMPAT
+    ): PRootCommand
 }
 
 class PRootCommandBuilderImpl : PRootCommandBuilder {
@@ -73,7 +116,8 @@ class PRootCommandBuilderImpl : PRootCommandBuilder {
         request: PRootLaunchRequest,
         prootBinary: AbsolutePath,
         rootfsPath: AbsolutePath,
-        workspacePath: AbsolutePath
+        workspacePath: AbsolutePath,
+        dialect: PRootDialect
     ): PRootCommand {
         val args = mutableListOf<String>()
         // Root
@@ -81,8 +125,11 @@ class PRootCommandBuilderImpl : PRootCommandBuilder {
         args.add(rootfsPath.value)
         // Fake root
         if (request.fakeRoot) args.add("-0")
-        // Kill on exit
-        if (request.killOnExit) args.add("--kill-on-exit")
+        // Kill on exit —— T91（D5）：仅当目标方言实测支持时才发。
+        // 上游 5.1.0/5.4 的选项表没有 `--kill-on-exit`（Termux 补丁），
+        // 盲发会直接 unknown option 拒启 —— 此前 CI 靠测试内适配层偷偷
+        // 过滤（-E 事故同构风险），现在由探针结果参与决策，根除静默差异。
+        if (request.killOnExit && dialect.supportsKillOnExit) args.add("--kill-on-exit")
         // Binds
         for (bind in request.binds) {
             // TM6: argument-injection guard — proot splits `-b host:guest[:options]`
@@ -118,7 +165,12 @@ class PRootCommandBuilderImpl : PRootCommandBuilder {
         //
         // TM6 历史注释存档：原 -E 守卫拒绝 value 中的 `\n`/NUL，语义由
         // PRootEnvTrampoline.guestPrefix 完整平移并加强（key 形态校验）。
-        args.add("--")
+        //
+        // T91（D5）：`--` 终结符仅 Termux 方言支持 —— 上游 argv 解析器不认识它
+        //（T88 实测：Debian 5.4 报 unknown option）。上游方言下省略：proot 的
+        // 选项解析遇首个非选项 token 即视为命令起点，`/usr/bin/env` 开头的
+        // trampoline 天然分界（上游 5.1.0/5.4 E2E 实测同形可用）。
+        if (dialect.supportsOptionSeparator) args.add("--")
         args.addAll(PRootEnvTrampoline.guestPrefix(request.environment))
         args.add(request.executable)
         args.addAll(request.arguments)
