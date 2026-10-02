@@ -27,11 +27,26 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- Onboarding v2 引导步骤 3「修改系统设置」：声明本身 normal 级，授权走
+         Settings.ACTION_MANAGE_WRITE_SETTINGS 跳本应用专属页 + Settings.System
+         .canWrite() 判态（特殊权限不可运行时弹窗）。 -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <!-- Onboarding v2 引导步骤 4「安装未知来源应用」：UpdateDownloader 的
+         FileProvider + ACTION_VIEW 安装流在 Android 8+ 需要本应用出现在
+         「未知来源」白名单（按应用逐一授权）；声明后引导页才能经
+         PackageManager.canRequestPackageInstalls() 判态并跳
+         ACTION_MANAGE_UNKNOWN_APP_SOURCES 引导页。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- #E-⑮：多级返回（收键盘 → 收菜单 → 退出）依赖 KeyEvent 派发路径
+         （TerminalView.onKeyPreIme）；预测性返回会绕过它直接预览“退出
+         app”。本 app 钉 targetSdk 28（侧载红线）本就不受 Android 16 默认
+         开启影响 —— 显式声明 false 是防未来 targetSdk 升级时的行为漂移
+         （届时应改为逐层 OnBackPressedCallback 适配后移除）。 -->
     <application
         android:name=".ApexApp"
         android:allowBackup="true"
@@ -42,6 +57,7 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/legacy_backup_rules"
+        android:enableOnBackInvokedCallback="false"
         tools:targetApi="36">
 
         <activity

@@ -18,6 +18,7 @@ import com.apex.agent.github.tools.*
 import com.apex.agent.platform.PrivilegeUiProvider
 import com.apex.agent.platform.privilege.PrivilegeDetector
 import com.apex.agent.platform.privilege.PrivilegeManager
+import com.apex.agent.platform.privilege.ShellExecResult
 import com.apex.agent.platform.csmem.tools.MemoryRecentEpisodesTool
 import com.apex.agent.platform.csmem.tools.MemorySearchNodesTool
 import com.apex.agent.platform.csmem.tools.MemoryRecallMacroTool
@@ -62,6 +63,7 @@ import com.apex.agent.core.engine.UserQuestionGateway
 import com.apex.agent.tools.AskUserChoiceTool
 import com.apex.agent.tools.AskUserTool
 import com.apex.agent.tools.RiskAwareToolGate
+import com.apex.agent.tools.ToolAuditLogger
 import com.apex.agent.permission.PermissionModeGate
 import com.apex.agent.permission.PermissionAwareToolGate
 import com.apex.agent.permission.PermissionSnapshot
@@ -227,6 +229,11 @@ val TERMINAL_TOOL_RUN_POLICIES: Map<String, ToolRunPolicy> = mapOf(
 @InstallIn(SingletonComponent::class)
 object ToolModule {
 
+    // T92（#255 权限链审计）：shellExecResult 的两个非执行器 via 语义标记 ——
+    // 前置门禁拒绝 / 执行器抛异常。formatShellResult 对它们直接透传既有文案。
+    private const val VIA_GATE_DENIED = "gate-denied"
+    private const val VIA_EXCEPTION = "exception"
+
     @Provides
     @Singleton
     fun provideToolHttpClient(): OkHttpClient = OkHttpClient.Builder()
@@ -288,9 +295,15 @@ object ToolModule {
 
     @Provides
     @Singleton
+    fun provideToolAuditLogger(@ApplicationContext context: Context): ToolAuditLogger =
+        ToolAuditLogger(context)
+
+    @Provides
+    @Singleton
     fun provideRiskAwareToolGate(
-        gateway: UserQuestionGateway
-    ): RiskAwareToolGate = RiskAwareToolGate(gateway)
+        gateway: UserQuestionGateway,
+        toolAuditLogger: ToolAuditLogger
+    ): RiskAwareToolGate = RiskAwareToolGate(gateway, toolAuditLogger)
 
     /**
      * v1.0 #155：opencode 式权限模式门——模式（BYPASS/DEFAULT/ACCEPT_EDITS/PLAN）
@@ -467,6 +480,7 @@ object ToolModule {
         githubApiService: GithubApiService,
         userQuestionGateway: UserQuestionGateway,
         commandPermissionGate: CommandPermissionGate,
+        toolAuditLogger: ToolAuditLogger,
         privilegeManager: PrivilegeManager,
         privilegeUiProvider: PrivilegeUiProvider,
         // Issue #165：钩子注册表（主执行器插槽 + SubagentStop 派发）
@@ -551,36 +565,90 @@ object ToolModule {
         // 命令以纯 cd <dir> 结尾且执行成功 → 记录新目录，后续命令以它为起始目录。
         val shellWorkDir = com.apex.agent.tools.ShellWorkDirTracker()
 
-        val shellExec: suspend (String) -> String = { cmd ->
+        // 门禁 + 执行的统一出口（T92 / #255 权限链审计）：返回带 via 通道真相的
+        // ShellExecResult。via 为 VIA_GATE_DENIED / VIA_EXCEPTION 时 output 已是
+        // 面向模型的最终错误文案（与旧版逐字节一致）。
+        val shellExecResult: suspend (String) -> ShellExecResult = { cmd ->
             if (!commandPermissionGate.ensureAllowed(cmd)) {
-                "Error: 用户拒绝执行命令。请不要重试相同命令，改用更安全或更低风险的方案，并告知用户原因。"
+                // #F-⑯：工具层审计（拒绝也留痕）；结构化结果见下方 T92 注释。
+                toolAuditLogger.log(ToolAuditLogger.Event(
+                    tool = "shell_execute", decision = "denied_by_user", command = cmd,
+                    detail = "CommandPermissionGate rejected"
+                ))
+                ShellExecResult(
+                    success = false,
+                    output = "Error: 用户拒绝执行命令。请不要重试相同命令，改用更安全或更低风险的方案，并告知用户原因。",
+                    exitCode = -1,
+                    via = VIA_GATE_DENIED
+                )
             } else {
+                val startedAt = System.currentTimeMillis()
                 try {
                     val result = PrivilegeDetector.executeShell(cmd, workDir = shellWorkDir.currentDir())
-                    if (result.success) {
-                        shellWorkDir.updateAfterSuccess(cmd)
-                        result.output.ifBlank { "(completed)" }
-                    } else {
-                        val lower = result.output.lowercase()
-                        if (lower.contains("permission denied") ||
-                            lower.contains("operation not permitted") ||
-                            lower.contains("access denied")
-                        ) {
-                            "Error: 权限不足，无法执行。当前权限通道：${result.via}。建议用户授予 Root 或 Shizuku，或改用应用沙箱内工具。"
-                        } else {
-                            "Error: 命令执行失败（exit=${result.exitCode}, via=${result.via}）：${result.output}"
-                        }
-                    }
+                    // #F-⑯：结构化审计 —— 命令走了哪个权限通道（root/shizuku/
+                    // shell）、耗时、结果，全部落盘可举证（工具层；平台层逐命令
+                    // 遥测见 PrivilegeDetector —— T92 / #255 双层互补）。
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "shell_execute", decision = "executed", command = cmd,
+                        tier = result.via, durationMs = System.currentTimeMillis() - startedAt,
+                        success = result.success, exitCode = result.exitCode
+                    ))
+                    result
                 } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    "Error: 命令执行异常：${e.message}"
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "shell_execute", decision = "failed", command = cmd,
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        detail = e::class.simpleName
+                    ))
+                    ShellExecResult(
+                        success = false,
+                        output = "Error: 命令执行异常：${e.message}",
+                        exitCode = -1,
+                        via = VIA_EXCEPTION
+                    )
                 }
             }
         }
 
+        // 面向模型的输出格式化（单源，两个消费方共用）：
+        // 设备工具通道保持与旧版逐字节一致；shell_execute 专属通道在成功输出
+        // 尾部附 [executed via: x]（T92 / #255 —— terminal.exec 恒有 channel
+        // 字段，shell_execute 此前仅失败时才带 via，成功时通道对模型不可见）。
+        fun formatShellResult(result: ShellExecResult, cmd: String, withVia: Boolean): String {
+            if (result.via == VIA_GATE_DENIED || result.via == VIA_EXCEPTION) {
+                return result.output
+            }
+            if (result.success) {
+                shellWorkDir.updateAfterSuccess(cmd)
+                val base = result.output.ifBlank { "(completed)" }
+                return if (withVia) "$base\n[executed via: ${result.via}]" else base
+            }
+            val lower = result.output.lowercase()
+            return if (lower.contains("permission denied") ||
+                lower.contains("operation not permitted") ||
+                lower.contains("access denied")
+            ) {
+                "Error: 权限不足，无法执行。当前权限通道：${result.via}。建议用户授予 Root 或 Shizuku，或改用应用沙箱内工具。"
+            } else {
+                "Error: 命令执行失败（exit=${result.exitCode}, via=${result.via}）：${result.output}"
+            }
+        }
+
+        // 设备类工具通道（AppList/DeviceInfo 等对输出做行级过滤/计数/拼接，
+        // 输出与旧版完全一致 —— 不受 via 标记污染）。
+        val shellExec: suspend (String) -> String = { cmd ->
+            formatShellResult(shellExecResult(cmd), cmd, withVia = false)
+        }
+
+        // shell_execute 专属通道：成功输出尾部附通道标记。
+        val shellExecAudited: suspend (String) -> String = { cmd ->
+            formatShellResult(shellExecResult(cmd), cmd, withVia = true)
+        }
+
         // ═══ 1. Shell (1) ═══
-        registry.register(SafeAgentTool(ShellExecuteTool(shellExec)))
+        registry.register(SafeAgentTool(ShellExecuteTool(shellExecAudited)))
 
         // ═══ 1b. terminal.exec —— 一次性结构化命令执行（stdout/stderr/exit_code/duration_ms/truncated）═══
         // 与 shell_execute 共享同一门禁（commandPermissionGate）与同一 cd 工作目录记忆
@@ -608,8 +676,19 @@ object ToolModule {
                 capabilities = capabilitySource::invoke
             )),
             approvalGate = { cmd ->
-                if (commandPermissionGate.ensureAllowed(cmd)) null
-                else "用户拒绝执行该命令。不要重试相同命令；改用更安全或更低风险的方案，并告知用户原因。"
+                if (commandPermissionGate.ensureAllowed(cmd)) {
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "terminal.exec", decision = "approved", command = cmd,
+                        detail = "CommandPermissionGate allowed"
+                    ))
+                    null
+                } else {
+                    toolAuditLogger.log(ToolAuditLogger.Event(
+                        tool = "terminal.exec", decision = "denied_by_user", command = cmd,
+                        detail = "CommandPermissionGate rejected"
+                    ))
+                    "用户拒绝执行该命令。不要重试相同命令；改用更安全或更低风险的方案，并告知用户原因。"
+                }
             },
             defaultCwd = { shellWorkDir.currentDir() },
             onCommandSucceeded = { cmd, _ -> shellWorkDir.updateAfterSuccess(cmd) }
@@ -701,7 +780,22 @@ object ToolModule {
         registry.register(SafeAgentTool(UiTapTool(shellExec, privilegeUiProvider)))
         registry.register(SafeAgentTool(UiSwipeTool(shellExec, privilegeUiProvider)))
         registry.register(SafeAgentTool(UiDumpTool(shellExec, privilegeUiProvider)))
-        registry.register(SafeAgentTool(ScreenshotTool(shellExec)))
+        // #240 收尾：通知栏 open/close 的 LLM 面（a11y GLOBAL_ACTION / cmd statusbar）
+        registry.register(SafeAgentTool(UiNotificationsTool(shellExec, privilegeUiProvider)))
+        // Issue #239：screenshot 工具接特权链（无障碍 API 30+ → root
+        // screencap+base64 回退）—— 旧行为恒走裸 shell，无障碍开启但无 root
+        // 的设备截图永远失败。适配 ScreenshotResult → 工具中立形状。
+        registry.register(SafeAgentTool(ScreenshotTool(
+            shellExec,
+            privilegedScreenshot = {
+                val r = privilegeManager.takeScreenshot()
+                if (r.success && r.imageBytes != null) {
+                    ScreenshotTool.PrivilegedScreenshot(r.imageBytes, null)
+                } else {
+                    ScreenshotTool.PrivilegedScreenshot(null, r.error ?: "privileged screenshot failed")
+                }
+            }
+        )))
         registry.register(SafeAgentTool(InputTextTool(shellExec)))
 
         // ═══ 8. 传感器 (2) ═══
@@ -1063,6 +1157,49 @@ object ToolModule {
         // deep_link/image_info/image_convert）。
         // 插件注册：PluginManager 加载插件后动态注册（plugin-web-automation → 15 个 browser_*，
         // REPLACE 覆盖内置注册；卸载时降级为 HostFallbackTool 宿主直调，不挖空）。
+    }
+
+    @Provides
+    @Singleton
+    @javax.inject.Named("standardEngineTools")
+    fun provideStandardEngineToolExecutor(
+        registry: ToolRegistry,
+        toolUsageTracker: ToolUsageTracker,
+        environmentState: ToolEnvironmentState,
+        traceRecorder: ToolTraceRecorder,
+        circuitBreaker: ToolCircuitBreaker,
+        hookRegistry: HookRegistry,
+        secretRedactor: SecretRedactor
+    ): ToolExecutor {
+        // Issue #230 收尾（防双弹窗）：StandardModeEngine 自带 opencode 式权限门
+        //（规则 → 会话记忆 → 模式兜底 → ASK 弹窗，见 executeOneToolCall）。
+        // #230 起 executeStream 也会咨询执行器门控 —— 标准线若共用主执行器
+        //（PermissionAwareToolGate 组合门），同一动作会被问两次。这里给
+        // 标准线装配**仅环境门**的 v3 执行器：限流/熔断/超时/重试/追踪/钩子/
+        // 脱敏全部保留，权限确认归引擎层独占。深潜线（CodeAgentEngine 包装
+        // ApexAgentEngine —— 无引擎级门）与 Agent 聊天线继续用主执行器。
+        return SecretRedactingExecutor(
+            delegate = ToolExecutorBuilder(registry)
+                .gate(ToolEnvironmentGate(environmentState))
+                .usageTracker(toolUsageTracker)
+                .policyResolver(DefaultToolRunPolicyResolver(TERMINAL_TOOL_RUN_POLICIES))
+                .rateLimiter(ToolRateLimiter())
+                .breaker(circuitBreaker)
+                .tracer(traceRecorder)
+                .apply {
+                    beforeToolHooks { toolId, args ->
+                        hookRegistry.dispatch(HookEvent.PreToolUse(toolId, args))
+                            .takeUnless { it.isNoOp }
+                    }
+                    afterToolHooks { toolId, args, result, isError, durationMs ->
+                        hookRegistry.dispatch(
+                            HookEvent.PostToolUse(toolId, args, result, isError, durationMs)
+                        )
+                    }
+                }
+                .build(),
+            redactor = secretRedactor
+        )
     }
 
     @Provides

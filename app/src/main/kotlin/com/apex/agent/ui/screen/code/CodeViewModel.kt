@@ -2,14 +2,15 @@ package com.apex.agent.ui.screen.code
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.apex.agent.R
 import com.apex.agent.core.code.CodeAgentEngine
-import com.apex.agent.core.code.longtask.LongTaskCopyOptions
-import com.apex.agent.core.code.longtask.LongTaskDiff
+import com.apex.agent.core.code.CodeEngineFacade
 import com.apex.agent.core.code.longtask.LongTaskStatus
 import com.apex.agent.core.code.longtask.LongTaskStore
-import com.apex.agent.core.code.longtask.LongTaskTemplates
 import com.apex.agent.core.code.longtask.LongTaskTracker
 import com.apex.agent.core.code.longtask.TaskCopyEngine
+import com.apex.agent.core.code.standard.DualLogicCodeEngine
+import com.apex.agent.core.code.standard.StandardLogicMode
 import com.apex.agent.core.code.stream.CodeStreamCheckpoint
 import com.apex.agent.core.code.stream.CodeStreamSession
 import com.apex.agent.core.code.stream.CodeStreamSnapshot
@@ -32,6 +33,7 @@ import com.apex.agent.core.logging.LogCategory
 import com.apex.agent.github.GithubTokenManager
 import com.apex.agent.platform.code.ws.CodeWorkspace
 import com.apex.agent.platform.code.ws.CodeWorkspaceManager
+import com.apex.agent.slash.SlashCommand
 import com.apex.agent.slash.SlashCommandParser
 import com.apex.agent.slash.SlashCommandRouter
 import com.apex.agent.slash.SlashRouteContext
@@ -103,6 +105,15 @@ import java.util.concurrent.atomic.AtomicLong
  * - code_edit / code_write 成功后自动跟随被改文件（编辑器显示最新现场）；
  * - 面板数据直读工作区文件（EditorFileLoader，绕开工具输出的 8000 字符
  *   截断），行点击回填 `@file:line` 到输入草稿。
+ *
+ * ## 文件拆分（God-file 预算纪律）
+ *
+ * VM 行数守 1200 门禁（quality-gate check_file_size）：**只减不增**。
+ * 已拆出的本包内 internal 扩展文件（模式同 Agent 屏 AgentChat* 拆分，
+ * 调用点无感知，依赖成员开放 internal）：
+ * - `CodeLongTaskCenterOps.kt` — v1.2 长任务中心用户操作流（面板开关/
+ *   刷新、复制/重跑/续跑/删除/父对比/模板启动；run 生命周期钩子仍在
+ *   本文件的 runEngine 内）。
  */
 @HiltViewModel
 class CodeViewModel @Inject constructor(
@@ -117,10 +128,13 @@ class CodeViewModel @Inject constructor(
     private val settingsRepository: com.apex.agent.ui.screen.settings.SettingsRepository,
     // v1.2 长任务中心：追踪器（事件流聚合）+ 复制引擎 + 存储（列表面板直读）
     // + 档位效能统计（长任务记录 → 工作区×档位聚合，档位效能页签数据源）
+    // 可见性：longTaskTracker 开放供 CodeEventReducer.kt（main 侧拆分）消费；
+    // taskCopyEngine / longTaskStore / thinkingEvolutionTracker 开放供
+    // CodeLongTaskCenterOps.kt（PR 侧拆分）消费——两个拆分文件并存所需。
     internal val longTaskTracker: LongTaskTracker,
-    private val taskCopyEngine: TaskCopyEngine,
-    private val longTaskStore: LongTaskStore,
-    private val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
+    internal val taskCopyEngine: TaskCopyEngine,
+    internal val longTaskStore: LongTaskStore,
+    internal val thinkingEvolutionTracker: CodeThinkingEvolutionTracker,
     // AUTO 档自治选档器（发送前预检 + 运行中深水区升级观察）
     private val adaptiveSelector: CodeAdaptiveThinkingSelector,
     // #197 函数调用二级菜单候选工具（注册表快照；小圆环迁移至 Coding 屏）
@@ -160,7 +174,7 @@ class CodeViewModel @Inject constructor(
     private var renderJob: Job? = null
 
     /** 当前绑定的会话归属工作区（null = 尚未绑定，不落盘）。 */
-    private var boundWorkspaceId: String? = null
+    internal var boundWorkspaceId: String? = null
 
     // ═══ AUTO 档自治状态（coding 专属，引擎零参与）═══
 
@@ -196,8 +210,12 @@ class CodeViewModel @Inject constructor(
      */
     private val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val codeEngineImpl: CodeAgentEngine?
-        get() = codeEngine as? CodeAgentEngine
+    private val codeEngineImpl: CodeEngineFacade?
+        get() = codeEngine as? CodeEngineFacade
+
+    /** 双思考逻辑路由门面（右上角切换入口；注入恒为 DualLogicCodeEngine）。 */
+    private val dualLogicEngine: DualLogicCodeEngine?
+        get() = codeEngine as? DualLogicCodeEngine
 
     init {
         // 工作区清单 + 激活恢复（manager init 已恢复 activeId）
@@ -215,6 +233,54 @@ class CodeViewModel @Inject constructor(
                 ?.let { runCatching { AgentMode.valueOf(it.uppercase()) }.getOrNull() }
         } ?: AgentMode.BUILD
         setMode(if (startupMode in CODING_SCREEN_MODES) startupMode else AgentMode.BUILD)
+        // v1.5 双思考逻辑：恢复持久化档位（空/未知 → 深潜，历史行为零变化）
+        restoreLogicMode()
+    }
+
+    // ═══ v1.5 思考逻辑（深潜 = 自研七档 / 标准 = 标准任务循环）═══
+
+    /**
+     * 切换思考逻辑（Coding 屏右上角选择器入口）：
+     * - 持久化（AgentSettings.codeThinkingLogic）；
+     * - 双引擎门面即时路由（下一轮 execute 走新引擎）；
+     * - 系统消息告知（两线会话现场各自独立保留——切换不清空现场，
+     *   切回来继续）；
+     * - 运行中拒绝切换（防丢现场），由 UI 弹提示。
+     *
+     * @return true = 切换成功；false = 正在运行（UI 提示稍后再切）
+     */
+    fun setLogicMode(mode: StandardLogicMode): Boolean {
+        if (_uiState.value.isRunning) return false
+        if (_uiState.value.logicMode == mode) return true
+        val switched = dualLogicEngine?.switchLogic(mode) ?: true
+        if (!switched) return false
+        settingsRepository.updateAgentSettings {
+            copy(codeThinkingLogic = mode.persistenceName)
+        }
+        _uiState.update { it.copy(logicMode = mode) }
+        appendSystemMessage(
+            if (mode == StandardLogicMode.STANDARD) {
+                languageManager.getString(R.string.code_logic_switched_standard)
+            } else {
+                languageManager.getString(R.string.code_logic_switched_deep_dive)
+            }
+        )
+        // 引擎侧同步当前模式/档位（新激活线接收与 UI 一致的 Build/Plan 与档位）
+        codeEngineImpl?.updateMode(_uiState.value.mode)
+        codeEngineImpl?.updateThinkingLevel(_uiState.value.thinkingLevel)
+        return true
+    }
+
+    /** 启动恢复：codeThinkingLogic 字符串 → 逻辑（空/未知 → 深潜兜底）。 */
+    private fun restoreLogicMode() {
+        val mode = StandardLogicMode.fromName(
+            settingsRepository.agentSettings.value.codeThinkingLogic
+        ) ?: StandardLogicMode.DEEP_DIVE
+        dualLogicEngine?.switchLogic(mode)
+        _uiState.update { it.copy(logicMode = mode) }
+        // 新激活线同步当前 Build/Plan 与档位（与 setLogicMode 运行时切换同口径）
+        codeEngineImpl?.updateMode(_uiState.value.mode)
+        codeEngineImpl?.updateThinkingLevel(_uiState.value.thinkingLevel)
     }
 
     // ═══ #197 执行模式（Build/Plan）═══
@@ -264,6 +330,14 @@ class CodeViewModel @Inject constructor(
             runEngine(command)
             return
         }
+        // ═══ v1.5 /logic:<mode> — 本地路由命令：切换双思考逻辑 ═══
+        // 与其他四类命令不同，这是纯 ViewModel 状态操作（持久化 + 门面路由
+        // + 会话现场保留），必须在此截获、不进通用路由（Agent 屏才会走到
+        // 路由的引导分支）。运行中拒绝切换与选择器入口同口径（防丢现场）。
+        if (parsed is SlashCommand.Logic) {
+            handleLogicCommand(parsed)
+            return
+        }
         val context = SlashRouteContext(
             githubConnected = githubTokenManager.isConnected(),
             githubUsername = githubTokenManager.getUsername(),
@@ -285,6 +359,33 @@ class CodeViewModel @Inject constructor(
         }
         if (route.agentPrompt.isNotBlank()) {
             runEngine(route.agentPrompt)
+        }
+    }
+
+    /**
+     * `/logic:<mode>` 执行体（v1.5 双引擎切换的命令通道，与右上角选择器
+     * 共用 [setLogicMode] 同一入口：持久化 + 门面路由 + 会话现场保留 +
+     * 系统消息回执）。
+     *
+     * - id 解析走 [StandardLogicMode.fromName] 容错别名（standard/std →
+     *   标准；deep_dive/deep/apex → 深潜）；
+     * - 未知 id → 引导消息（不进引擎、不改状态）；
+     * - 运行中拒绝切换 → 与选择器同口径提示（[R.string.code_logic_switch_blocked]）。
+     */
+    private fun handleLogicCommand(command: com.apex.agent.slash.SlashCommand.Logic) {
+        val mode = StandardLogicMode.fromName(command.id)
+        if (mode == null) {
+            appendSystemMessage(
+                languageManager.getString(R.string.code_logic_unknown_mode, command.id)
+            )
+            return
+        }
+        // setLogicMode 内部已发切换回执（code_logic_switched_*）与
+        // isRunning 拒绝分支（返回 false）；此处补齐命令通道的失败提示。
+        if (!setLogicMode(mode)) {
+            appendSystemMessage(
+                languageManager.getString(R.string.code_logic_switch_blocked)
+            )
         }
     }
 
@@ -569,6 +670,12 @@ class CodeViewModel @Inject constructor(
      * 引擎从不感知 AUTO——coding 自治语义。
      */
     private fun resolveRuntimeThinkingLevel(goal: String) {
+        // v1.5 标准线无 AUTO 预检机制（思考档位仅映射回合预算倍率）——
+        // 预检与决策回显只在深潜线进行，避免标准线出现无关的自适应消息。
+        if (_uiState.value.logicMode == StandardLogicMode.STANDARD) {
+            effectiveRunLevel = _uiState.value.thinkingLevel
+            return
+        }
         val selected = _uiState.value.thinkingLevel
         if (selected != CodeThinkingLevel.AUTO) {
             effectiveRunLevel = selected
@@ -599,6 +706,8 @@ class CodeViewModel @Inject constructor(
         runToolCalls++
         recentToolOutcomes.addLast(event.success)
         while (recentToolOutcomes.size > RECENT_OUTCOME_WINDOW) recentToolOutcomes.removeFirst()
+        // v1.5 标准线无深水区升级观察器（回合预算由画像×档位倍率自洽）
+        if (_uiState.value.logicMode == StandardLogicMode.STANDARD) return
         if (_uiState.value.thinkingLevel != CodeThinkingLevel.AUTO) return
         val decision = adaptiveSelector.escalateOnDeepWater(
             runToolCalls = runToolCalls,
@@ -610,177 +719,8 @@ class CodeViewModel @Inject constructor(
         appendSystemMessage("⚠️ ${decision.reason}")
     }
 
-    // ═══ 长任务中心（v1.2）═══
-
-    /** 打开长任务面板（异步加载当前工作区的长任务记录 + 档位效能统计）。 */
-    fun openLongTaskCenter() {
-        _uiState.update { it.copy(longTaskSheetVisible = true, longTaskLoading = true) }
-        refreshLongTasks()
-        refreshThinkingStats()
-    }
-
-    fun closeLongTaskCenter() {
-        _uiState.update { it.copy(longTaskSheetVisible = false) }
-    }
-
-    /** 刷新长任务列表（IO 读存储；面板可见或收尾入库后调用）。 */
-    private fun refreshLongTasks() {
-        val wsId = boundWorkspaceId
-        if (wsId == null) {
-            _uiState.update { it.copy(longTasks = emptyList(), longTaskLoading = false) }
-            return
-        }
-        viewModelScope.launch {
-            val records = withContext(Dispatchers.IO) {
-                runCatching { longTaskStore.list(wsId) }.getOrDefault(emptyList())
-            }
-            _uiState.update { it.copy(longTasks = records, longTaskLoading = false) }
-        }
-    }
-
-    /** 刷新档位效能统计（IO：首次访问会同步扫一次统计文件）。 */
-    private fun refreshThinkingStats() {
-        val wsId = boundWorkspaceId
-        if (wsId == null) {
-            _uiState.update { it.copy(thinkingStats = null) }
-            return
-        }
-        viewModelScope.launch {
-            val stats = withContext(Dispatchers.IO) {
-                runCatching { thinkingEvolutionTracker.statsFor(wsId) }.getOrNull()
-            }
-            _uiState.update { it.copy(thinkingStats = stats) }
-        }
-    }
-
-    /**
-     * 复制任务（顶级优化核心）：源记录 → 新副本（parentTaskId 链）→
-     * 可选立即重跑（buildRelaunchPrompt 组装上下文后 sendMessage）。
-     */
-    fun copyTask(id: String, options: LongTaskCopyOptions, relaunch: Boolean) {
-        if (_uiState.value.isRunning) {
-            showError("任务运行中，不能复制重跑")
-            return
-        }
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { taskCopyEngine.copy(id, options) }
-            result.onSuccess { copy ->
-                refreshLongTasks()
-                if (relaunch) {
-                    val prompt = taskCopyEngine.buildRelaunchPrompt(copy, options)
-                    closeLongTaskCenter()
-                    sendMessage(prompt)
-                } else {
-                    appendSystemMessage("已创建任务副本「${copy.title}」（可从长任务面板重跑）")
-                }
-            }.onFailure { e ->
-                showError("复制任务失败：${e.message ?: "未知错误"}")
-            }
-        }
-    }
-
-    /** 直接重跑一条历史记录（默认携带上下文/todos/文件清单）。 */
-    fun relaunchTask(id: String) {
-        if (_uiState.value.isRunning) {
-            showError("任务运行中，不能重跑")
-            return
-        }
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            if (record == null) {
-                showError("任务记录不存在")
-                return@launch
-            }
-            val prompt = taskCopyEngine.buildRelaunchPrompt(
-                record,
-                LongTaskCopyOptions(includeConversation = true, includeTodos = true, includeFilesList = true)
-            )
-            closeLongTaskCenter()
-            sendMessage(prompt)
-        }
-    }
-
-    /**
-     * 从检查点**续跑**（顶级优化：不从头重跑，接着干）。
-     *
-     * @param checkpointId 指定检查点；null = 最后一个检查点。记录无检查点
-     *   时自动回退到 relaunchTask 语义（无进度可续，只能重跑）。
-     */
-    fun resumeTask(id: String, checkpointId: String? = null) {
-        if (_uiState.value.isRunning) {
-            showError("任务运行中，不能续跑")
-            return
-        }
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            if (record == null) {
-                showError("任务记录不存在")
-                return@launch
-            }
-            val resumePrompt = taskCopyEngine.buildResumePrompt(record, checkpointId)
-            closeLongTaskCenter()
-            if (resumePrompt.isNotEmpty()) {
-                sendMessage(resumePrompt)
-            } else {
-                // 无检查点可续 → 回退重跑（并在对话里说明）
-                appendSystemMessage("该任务无检查点可续跑，已改为带上下文重跑")
-                relaunchTask(id)
-            }
-        }
-    }
-
-    /** 删除一条长任务记录。 */
-    fun deleteLongTask(id: String) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { runCatching { longTaskStore.delete(id) } }
-            refreshLongTasks()
-        }
-    }
-
-    /** 与父任务对比运行差异（复制链对比，结果以系统消息形式进对话）。 */
-    fun compareWithParent(id: String) {
-        viewModelScope.launch {
-            val record = withContext(Dispatchers.IO) { longTaskStore.get(id) }
-            val parentId = record?.parentTaskId
-            if (record == null || parentId == null) {
-                showError("无父任务可对比（非复制运行）")
-                return@launch
-            }
-            val parent = withContext(Dispatchers.IO) { longTaskStore.get(parentId) }
-            if (parent == null) {
-                showError("父任务记录已删除")
-                return@launch
-            }
-            val diff = LongTaskDiff.compare(parent, record)
-            appendSystemMessage(LongTaskDiff.renderText(diff, parent.title, record.title))
-        }
-    }
-
-    /** 从内置模板启动任务：应用推荐档位 + todo 骨架 + goal 模板发送。 */
-    fun startFromTemplate(key: String) {
-        val template = LongTaskTemplates.byKey(key) ?: return
-        val ws = _uiState.value.activeWorkspace
-        val record = LongTaskTemplates.instantiate(
-            template,
-            ws?.workspaceId ?: "",
-            ws?.name ?: ""
-        )
-        // 推荐档位落地（持久化 + 引擎三通道 + 原生 effort 同步）
-        CodeThinkingLevel.fromName(template.recommendedThinkingLevel)
-            ?.let { setThinkingLevel(it) }
-        // todo 骨架预置（pending 状态，模型后续可改写）
-        runCatching {
-            codeTodoTool.restore(
-                template.todoSkeleton.map { CodeTodoTool.Todo(content = it, status = "pending", priority = "medium") }
-            )
-        }.onFailure { AppLogger.instance.warn(LogCategory.UI, "LongTask", "模板 todo 预置失败：${it.message}") }
-        _uiState.update { it.copy(todos = codeTodoTool.snapshot()) }
-        closeLongTaskCenter()
-        sendMessage(record.goal)
-    }
-
     /** 追加一条系统消息（时间轴主通道 + 旧消息通道双写，仅 UI 展示）。 */
-    private fun appendSystemMessage(text: String) {
+    internal fun appendSystemMessage(text: String) {
         streamSession.injectSystem(text)
         _uiState.update {
             it.copy(messages = it.messages + CodeChatMessage(idGen.incrementAndGet(), CodeChatMessage.Role.SYSTEM, text))

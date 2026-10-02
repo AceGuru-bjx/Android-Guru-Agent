@@ -360,7 +360,12 @@ class TerminalViewModel @Inject constructor(
 
     fun closeSession(id: Long) {
         viewModelScope.launch {
-            terminalRuntime.close(id, force = true)
+            // T92：close 移入 IO —— native close 含 HUP→50ms→TERM→100ms→KILL→150ms
+            // 串行 sleep + 全局 session mutex，主线程执行会掉帧（create 同型问题已修，
+            // 此路径漏修）。
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                terminalRuntime.close(id, force = true)
+            }
             sessionBackends.remove(id)
             sessionTitles.remove(id)
             // 关闭的是当前会话时同步清交互行缓冲（语义同 selectSession 的清理）
@@ -443,7 +448,10 @@ class TerminalViewModel @Inject constructor(
             else -> BACKEND_LOCAL
         }
         viewModelScope.launch {
-            terminalRuntime.close(active, force = true)
+            // T92：close 移入 IO（同 closeSession —— 主线程串行 sleep 掉帧）。
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                terminalRuntime.close(active, force = true)
+            }
             sessionBackends.remove(active)
             sessionTitles.remove(active)
             if (_activeSessionId.value == active) pendingLine.setLength(0)
@@ -1019,12 +1027,18 @@ class TerminalViewModel @Inject constructor(
     fun installAll(onProgress: (Int, Int) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             _install.update { it.copy(runningId = "__all__", log = it.log + lang.getString(R.string.term_notice_install_all_start, _useMirror.value.toString())) }
-            depItems.forEachIndexed { index, item ->
-                onProgress(index, depItems.size)
-                val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
-                execAndAppend(item.id, cmd)
+            // T92：try/finally 兑底 —— 旧行为循环中任一异常（ensureReady 抛出等）
+            // 杀死协程后 runningId 永不复位 → 环境中心全部安装按钮灰死到 VM 销毁。
+            try {
+                depItems.forEachIndexed { index, item ->
+                    onProgress(index, depItems.size)
+                    val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
+                    execAndAppend(item.id, cmd)
+                }
+                _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_install_all_done)) }
+            } finally {
+                _install.update { it.copy(runningId = null) }
             }
-            _install.update { it.copy(runningId = null, log = it.log + lang.getString(R.string.term_notice_install_all_done)) }
         }
     }
 
@@ -1032,32 +1046,47 @@ class TerminalViewModel @Inject constructor(
         viewModelScope.launch {
             val items = depItems.filter { it.group == DepGroup.ANDROID }
             _install.update { it.copy(runningId = "__android__", log = it.log + lang.getString(R.string.term_notice_install_android_start, _useMirror.value.toString())) }
-            items.forEachIndexed { index, item ->
-                onProgress(index, items.size)
-                val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
-                execAndAppend(item.id, cmd)
+            try {
+                items.forEachIndexed { index, item ->
+                    onProgress(index, items.size)
+                    val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
+                    execAndAppend(item.id, cmd)
+                }
+                _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_install_android_done)) }
+            } finally {
+                _install.update { it.copy(runningId = null) }
             }
-            _install.update { it.copy(runningId = null, log = it.log + lang.getString(R.string.term_notice_install_android_done)) }
         }
     }
 
     private fun runCommand(id: String, cmd: String) {
         viewModelScope.launch {
             _install.update { it.copy(runningId = id, log = it.log + "\n▶ [$id] $cmd\n") }
-            execAndAppend(id, cmd)
-            _install.update { it.copy(runningId = null) }
+            try {
+                execAndAppend(id, cmd)
+            } finally {
+                _install.update { it.copy(runningId = null) }
+            }
         }
     }
 
     private suspend fun execAndAppend(id: String, cmd: String) {
-        val sid = ensureDepInstallSession() ?: run {
+        // T92：会话拉起（含 proot 探测/forkpty）全部在 IO 线程 —— 旧行为
+        // ensureDepInstallSession 在 withContext(IO) **之外**，主线程 fork +
+        // StrictMode 违例（createSessionInternal 已修同类问题，此路径漏修）。
+        val sid = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            ensureDepInstallSession()
+        } ?: run {
             _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_no_pty)) }
             return
         }
         val output = withContext(kotlinx.coroutines.Dispatchers.IO) {
             val runResult = terminalRuntime.run(sid, cmd, InputOwner.SYSTEM, background = false)
             val run = runResult.getOrElse { return@withContext lang.getString(R.string.term_notice_run_failed, it.message ?: "") }
-            val waitResult = terminalRuntime.wait(sid, com.apex.agent.platform.terminal.wait.WaitCondition.ProcessExited(jobId = run.jobId), 120_000)
+            // T92：300s + SIGTERM 温和终止 —— 旧行为 120s 后直接 SIGKILL：
+            // openjdk/SDK 类 apt 在慢网普遍 >120s，被硬杀留下半安装状态，日志
+            // 还误报「等待超时」（实际是被自己杀的）。与 Provisioner 300s 对齐。
+            val waitResult = terminalRuntime.wait(sid, com.apex.agent.platform.terminal.wait.WaitCondition.ProcessExited(jobId = run.jobId), 300_000)
             val wait = waitResult.getOrElse { return@withContext lang.getString(R.string.term_notice_wait_failed, it.message ?: "") }
             val exitCode = when (wait) {
                 is com.apex.agent.platform.terminal.wait.WaitResult.Matched -> {
@@ -1065,7 +1094,7 @@ class TerminalViewModel @Inject constructor(
                     if (ev is com.apex.agent.platform.terminal.events.TerminalEvent.ProcessExited) ev.exitCode ?: -1 else 0
                 }
                 is com.apex.agent.platform.terminal.wait.WaitResult.Timeout -> {
-                    terminalRuntime.signal(sid, com.apex.agent.platform.terminal.io.UnixSignal.SIGKILL, InputOwner.SYSTEM, run.jobId)
+                    terminalRuntime.signal(sid, com.apex.agent.platform.terminal.io.UnixSignal.SIGTERM, InputOwner.SYSTEM, run.jobId)
                     return@withContext lang.getString(R.string.term_notice_wait_timeout)
                 }
                 is com.apex.agent.platform.terminal.wait.WaitResult.SessionGone -> return@withContext lang.getString(R.string.term_notice_session_gone)
@@ -1079,14 +1108,27 @@ class TerminalViewModel @Inject constructor(
     }
 
     /**
+     * T92：实时存活探测（安装链专用）—— `_sessions` 来自 2s 轮询，可能滞后；
+     * 写入死 PTY 会让 job 挂到超时。安装前直查 runtime（快照 SESSIONS 模式，
+     * 低频调用成本可忽略）。
+     */
+    private suspend fun isSessionAliveRealtime(sid: Long): Boolean {
+        val snap = terminalRuntime.snapshot(TerminalRuntime.SnapshotMode.SESSIONS, sessionId = sid)
+            .getOrNull() ?: return false
+        return snap.sessions.any { it.session.id == sid && it.session.state in ALIVE_STATES }
+    }
+
+    /**
      * T82 断点修复：依赖安装的会话路由 —— DepCatalog 的 apt 命令必须跑在
      * linux-ubuntu 会话（Android shell 里只有 command not found）。Ubuntu
      * 拉起失败时诚实降级到 local session（输出真实报错，绝不伪造成功）。
+     * T92：depSessionId 存活校验改为**实时**（旧用 2s 轮询快照，会话死亡后
+     * 最长 2s 内误判存活 → 写死 PTY 假超时）。
      */
     private suspend fun ensureDepInstallSession(): Long? {
-        if (depSessionId != null &&
-            _sessions.value.any { it.id == depSessionId && it.isAlive }
-        ) return depSessionId
+        val cached = depSessionId
+        if (cached != null && isSessionAliveRealtime(cached)) return cached
+        if (cached != null) depSessionId = null  // 死亡 → 清缓存重建
         provisioner.ensureUbuntuSession()?.let {
             depSessionId = it
             return it

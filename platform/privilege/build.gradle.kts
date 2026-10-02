@@ -23,7 +23,11 @@ android {
 }
 
 dependencies {
-    implementation(project(":core:tool-registry"))
+    // T92 (#255) 权限链审计收敛：随 ShellStreamSource / ShizukuStreamAdapter /
+    // ProcessStreamFactory 死代码三件套移除，本模块不再引用 core:tool-registry
+    //（唯一消费方 ToolStreamEvent 已删）—— privilege 收紧为叶子模块：
+    // core:logging（审计遥测）+ Shizuku SDK + coroutines，无引擎/工具依赖。
+    implementation(project(":core:logging"))
     implementation(libs.core.ktx)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)

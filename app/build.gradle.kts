@@ -122,10 +122,16 @@ dependencies {
     // terminal-view 对 :terminal-emulator 同为 implementation（不传递），app 的
     // 显式 terminal-emulator 依赖在上方已具备 —— 两边模型单一事实源。
     implementation(project(":terminal-view"))
+    // #F-⑰：native VT 引擎黑匣子（VtFeedTrail）—— TerminalModule 在 runtime
+    // 构造点 install。platform:terminal 对 :terminal-native 是 implementation
+    // （不传递），app 需显式声明（与上方 terminal-emulator 同款先例）。
+    implementation(project(":terminal-native"))
     implementation(project(":platform:cs-mem"))
     // Coding 模式（与 Agent 模式同级别）：编码工具集 / 编码引擎 / 工作区管理
     implementation(project(":core:code-tools"))
     implementation(project(":core:code-engine"))
+    // 标准任务循环文本加速核（JNI；DI 把 NativeTextKernel 注入 StandardModeEngine）
+    implementation(project(":core:code-native"))
     implementation(project(":platform:code-workspace"))
     // 逆向 MCP Host（#173）：手机作为 MCP Server（streamable HTTP，纯 JVM）
     implementation(project(":platform:mcp-host"))

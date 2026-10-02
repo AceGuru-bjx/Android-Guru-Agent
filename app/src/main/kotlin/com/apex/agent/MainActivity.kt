@@ -23,9 +23,11 @@ import androidx.compose.ui.unit.Density
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.apex.agent.service.ApexCoreService
+import com.apex.agent.service.CoreServiceGate
 import com.apex.agent.share.SharedIntake
 import com.apex.agent.ui.ApexRoot
 import com.apex.agent.ui.language.LanguageManager
+import com.apex.agent.ui.screen.onboarding.OnboardingFlow
 import com.apex.agent.ui.screen.onboarding.OnboardingScreen
 import com.apex.agent.ui.screen.settings.SettingsRepository
 import com.apex.agent.ui.theme.AccentPalette
@@ -47,6 +49,11 @@ class MainActivity : ComponentActivity() {
     /** v1.4.4 #7：分享接收中转（ACTION_SEND → Agent 输入区）。 */
     @Inject
     lateinit var sharedIntake: SharedIntake
+
+    /** P0-1（#223/TerminalRuntime 生命周期接线）：Activity 是运行时的前台宿主
+     * ——isFinishing 且 Keep Alive 关闭时负责优雅收尾（详见 onDestroy）。 */
+    @Inject
+    lateinit var terminalRuntime: com.apex.agent.platform.terminal.runtime.TerminalRuntime
 
     /** attachBaseContext 时静态读出的已应用语言（system/zh/en）；供语言变化 recreate 判定。 */
     private var appliedLanguage: String? = null
@@ -74,8 +81,8 @@ class MainActivity : ComponentActivity() {
         // 二轮审计 A-6：companion 静态首启标记 —— 进程存活期只拉起一次，避免每次
         // 旋转重建都触发 onStartCommand 的系统噪音（通知/日志）。进程重启或服务被
         // 系统杀死后首次重建会再次拉起，语义不受影响。
-        if (!coreServiceStartedThisProcess) {
-            coreServiceStartedThisProcess = true
+        if (!CoreServiceGate.startedThisProcess) {
+            CoreServiceGate.markStarted()
             ContextCompat.startForegroundService(this, Intent(this, ApexCoreService::class.java))
         }
 
@@ -95,7 +102,15 @@ class MainActivity : ComponentActivity() {
         // keepAlive 默认开（前台服务常驻语义）；厂商 ROM 的电池优化会在后台杀
         // 服务导致长任务中断。Manifest 已声明 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，
         // 首启且未在白名单时发起系统豁免请求；用户拒绝过就不再骚扰（SP 记问）。
-        maybeRequestBatteryOptimizationExemption()
+        //
+        // Onboarding v2 门控：引导页第 3 页已含「忽略电池优化」步骤 ——
+        // 引导未完成（新装 + 升级后首启重看）时压制本一次性弹窗，避免
+        // 系统对话框叠在引导页上；完成引导但跳过该步骤的用户，由本
+        // 兜底在下次冷启动补问一次。
+        val s = settingsRepository.agentSettings.value
+        if (s.onboardingCompleted && s.onboardingVersion >= OnboardingFlow.CURRENT_VERSION) {
+            maybeRequestBatteryOptimizationExemption()
+        }
 
         // 语言切换：设置中心 language 与当前已应用语言不同 → recreate 重新走
         // attachBaseContext（新实例以新语言包裹，stringResource 即时取新资源）。
@@ -134,21 +149,80 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
                     ) {
-                        // 新手引导：首次启动（或升级后首次）先走四页 Onboarding，
-                        // 完成标记持久化在 SettingsRepository.onboardingCompleted。
-                        if (settings.onboardingCompleted) {
+                        // 新手引导：首次启动（或升级到新引导版本后的首启）先走
+                        // 五页 Onboarding；完成标记持久化在 AgentSettings
+                        // （onboardingCompleted + onboardingVersion 双字段 ——
+                        // 版本低于当前引导版的老用户重看一次，新权限步骤与
+                        // 工作区选择借引导页布道，与 v1 重看语义一致）。
+                        if (settings.onboardingCompleted &&
+                            settings.onboardingVersion >= OnboardingFlow.CURRENT_VERSION
+                        ) {
                             ApexRoot()
                         } else {
                             OnboardingScreen(
+                                workspaceScope = settings.workspaceScope,
+                                workspaceFolderName = settings.workspaceFolderName,
+                                onWorkspaceSelected = { scope, folderUri, folderName ->
+                                    settingsRepository.updateAgentSettings {
+                                        copy(
+                                            workspaceScope = scope,
+                                            workspaceFolderUri = folderUri,
+                                            workspaceFolderName = folderName
+                                        )
+                                    }
+                                },
                                 onFinished = {
                                     settingsRepository.updateAgentSettings {
-                                        copy(onboardingCompleted = true)
+                                        copy(
+                                            onboardingCompleted = true,
+                                            onboardingVersion = OnboardingFlow.CURRENT_VERSION
+                                        )
                                     }
                                 }
                             )
                         }
                     }
                 }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        // ═══ P0-1（#223）：TerminalRuntime 生命周期接线 ═══
+        // TerminalRuntime.shutdown()（cancel 全部 job → close 全部 session →
+        // nativeCloseAll 兜底 → 停 pump/协程域）此前在生产代码零调用 —— 用户
+        // 退出 app 后 fd/Job 只能等进程死亡由内核回收，会话元数据依赖 2s
+        // autosave 兜底（#223「崩溃恢复是空操作」的直接根因）。
+        // 分工：Keep Alive **关**时本 Activity 是运行时宿主 —— isFinishing 即
+        // 收尾；Keep Alive **开**时交由 ApexCoreService.onDestroy（服务在
+        // 后台被停时收尾）—— 避免双重宿主语义打架。
+        if (isFinishing && !CoreServiceGate.keepAliveEnabled(this)) {
+            CoreServiceGate.markStopped()
+            runCatching { stopService(Intent(this, ApexCoreService::class.java)) }
+            gracefulShutdownTerminalRuntime()
+        }
+        super.onDestroy()
+    }
+
+    /** 优雅收尾终端运行时：独立作用域 + 10s 有界等待（幂等 —— runtime 内部
+     * shutdownGate 保证重复调用直接返回首次结果）。失败仅记日志：收尾是
+     * 增益路径，不允许炸 UI 生命周期。 */
+    private fun gracefulShutdownTerminalRuntime() {
+        kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        ).launch {
+            runCatching {
+                kotlinx.coroutines.withTimeout(10_000L) { terminalRuntime.shutdown() }
+            }.onSuccess { result ->
+                result.getOrNull()?.let {
+                    android.util.Log.i(
+                        "MainActivity",
+                        "terminal runtime shutdown: sessionsClosed=${it.sessionsClosed}, " +
+                            "jobsCancelled=${it.jobsCancelled}, clean=${it.clean}"
+                    )
+                }
+            }.onFailure {
+                android.util.Log.w("MainActivity", "terminal runtime shutdown failed: ${it.message}")
             }
         }
     }
@@ -177,10 +251,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        /** 二轮审计 A-6：进程存活期的 ApexCoreService 首启标记（见 onCreate 注释）。 */
-        @Volatile
-        private var coreServiceStartedThisProcess = false
-
         /** v1.4.4 #4：电池优化引导一次性标记（拒绝过不再问）。 */
         private const val BATTERY_ASK_PREFS = "apex_one_shot_flags"
         private const val KEY_ASKED = "battery_optim_asked"

@@ -75,8 +75,10 @@ import java.io.IOException
  * 异常被捕获（存入 [lastAfterHookError] 供诊断），绝不吞掉/改写执行结果。
  *
  * **流式路径**：引擎生产路径全部走 [executeStream]，因此两插槽同样接入
- * 流式管线——PreToolUse 插在限流/熔断之后、首个事件发射之前（流式路径
- * v3 本就无 gate/schema 前置，此处即「进入工具执行前的最后一步」）；
+ * 流式管线——Issue #230 起 executeStream 与 execute() 共享同一
+ * [ToolExecutionPipeline.preCheck]（gate → PreToolUse → schema），流式路径
+ * 不再是门控盲区；PreToolUse 插在限流/熔断与 gate 放行之后、首个事件
+ * 发射之前；
  * PostToolUse 以终端事件（Complete/Error）为结果、以收流异常为错误路径。
  */
 class EnhancedToolExecutor(
@@ -256,20 +258,35 @@ class EnhancedToolExecutor(
             return@flow
         }
 
-        // Issue #165：PreToolUse（流式路径）—— 限流/熔断放行后、首个事件发射前
-        // 派发（见类 KDoc：流式路径无 gate/schema 前置，此处即执行前最后一步）。
-        var effectiveArguments = arguments
-        if (beforeToolHooks != null) {
-            when (val intervention = interveneBeforeExecution(toolId, arguments)) {
-                is ToolExecutionPipeline.HookIntervention.Blocked -> {
-                    emit(ToolStreamEvent.Error(intervention.message))
-                    return@flow
-                }
-                is ToolExecutionPipeline.HookIntervention.Replaced ->
-                    effectiveArguments = intervention.arguments
-                null -> Unit
+        // Issue #230（P1 security）：流式路径补齐 gate/schema 前置。
+        //
+        // 生产引擎全部走 executeStream（Agent 聊天主循环 / 任务编排 ToolCallRunner
+        // / MCP 流式消费），旧实现只有非流式 execute() 过 pipeline.preCheck——
+        // 门控链（PermissionAwareToolGate：权限模式 + RiskAwareToolGate 的
+        // write_file/edit_file MEDIUM 确认、HIGH 确认）在流式路径**从未被咨询**，
+        // Agent 静默覆写用户文件。此修复把流式路径对齐 [ToolExecutor] 契约
+        // （ToolRegistry KDoc：两入口共享 查找→门控→校验）与 v2
+        // DefaultToolExecutor.executeStream 的既有行为（preCheck 短路发 Error）。
+        //
+        // 顺序契约与 execute() 完全一致：gate → PreToolUse 钩子（gate 之后、
+        // schema 之前——钩子只看到权限体系确认过的调用）→ schema 校验；
+        // 拒绝以 gate 同款文案（Error: permission denied: …）短路，模型侧行为
+        // 与非流式路径逐字节一致（terminal、不重试）。
+        val pre = pipeline.preCheck(
+            toolId,
+            arguments,
+            afterGateHooks = if (beforeToolHooks != null) {
+                { _, args -> interveneBeforeExecution(toolId, args) }
+            } else {
+                null
             }
+        )
+        if (pre is ToolExecutionPipeline.PreCheck.Failed) {
+            recordSideChannelDenial(toolId, arguments, pre.message, errorSlugOf(pre.message) ?: "precheck")
+            emit(ToolStreamEvent.Error(pre.message))
+            return@flow
         }
+        var effectiveArguments = (pre as ToolExecutionPipeline.PreCheck.Ready).arguments
 
         // Capture the flow's emit as a plain suspend function so the
         // timeout wrapper can call it without extension-receiver tricks.

@@ -165,13 +165,22 @@ class DefaultPrivilegeManager @Inject constructor(
             }
         }
 
+    /**
+     * Shizuku 通道执行（T92 / #255 审计收敛）。
+     *
+     * 旧实现是 "Shizuku execution not yet implemented" 占位 stub —— 而真实
+     * 的 Shizuku 执行能力早已在 [ShizukuCommandExecutor]（IShizukuService
+     * .newProcess AIDL，uid=2000）落地，主链路（PrivilegeDetector /
+     * PrivilegedCommandSpawner）用的也是它。任何误入本方法的调用者都会拿到
+     * 假失败，与「权限链真实可用」的审计结论矛盾 —— 现改为直接委托同一
+     * 真实执行器，行为与主链路完全一致（超时强杀、诚实报错、绝不降级伪装）。
+     */
     private suspend fun executeViaShizuku(command: String, timeoutMs: Long): ShellResult {
-        // Shizuku执行逻辑
-        // 实际实现需要Shizuku UserService
+        val result = ShizukuCommandExecutor.execute(command, timeoutMs)
         return ShellResult(
-            success = false,
-            output = "Shizuku execution not yet implemented",
-            exitCode = -1,
+            success = result.success,
+            output = result.output,
+            exitCode = result.exitCode,
             executedVia = ExecutionVia.SHIZUKU
         )
     }
@@ -215,6 +224,13 @@ class DefaultPrivilegeManager @Inject constructor(
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
                 UiResult(true)
             }
+            // #240 收尾：收起通知栏 —— 无障碍无专用 GLOBAL_ACTION，BACK 的
+            // 系统语义就是收合 shade（状态栏展开时 BACK = collapse）。手势派发
+            // 在已展开时是同一效果；未展开时 BACK 退一层（与用户手动按返回一致）。
+            is UiAction.CloseNotifications -> {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                UiResult(true)
+            }
             is UiAction.Click -> {
                 // 使用手势API点击坐标
                 val path = android.graphics.Path().apply {
@@ -245,7 +261,14 @@ class DefaultPrivilegeManager @Inject constructor(
             is UiAction.Back -> "input keyevent 4"
             is UiAction.Home -> "input keyevent 3"
             is UiAction.Recents -> "input keyevent 187"
-            is UiAction.OpenNotifications -> "input keyevent 26"  // 不完全准确
+            // #240：旧映射 input keyevent 26 是电源键（熄屏/唤醒）—— 用户要求
+            // 「打开通知栏」却把屏幕关了。cmd statusbar expand-notifications 才是
+            // 正解（API 24+，等价 service call statusbar 1；无障碍通道走
+            // GLOBAL_ACTION_NOTIFICATIONS 不受影响）。
+            is UiAction.OpenNotifications -> "cmd statusbar expand-notifications"
+            // #240 收尾：收合通知栏（与 expand 对称；`input keyevent 4`（BACK）
+            // 也可达但语义间接 —— statusbar 直控不受当前焦点影响）。
+            is UiAction.CloseNotifications -> "cmd statusbar collapse"
             is UiAction.ClickNode -> return UiResult(false, "ClickNode requires accessibility")
         }
         val result = executeViaRoot(command, 5000)
@@ -314,11 +337,23 @@ class DefaultPrivilegeManager @Inject constructor(
     }
 
     override suspend fun takeScreenshot(): ScreenshotResult {
+        // #239：Android 11+ 无障碍截图（API 30）真实现 —— 旧实现此处是空壳
+        // `return ScreenshotResult(false, null)`，且因提前 return 连下面的 root
+        // screencap 回退都不可达（「开了无障碍 = 关了截图」）。现在无障碍路径
+        // 失败（低版本/回调拒绝/编码失败）时静默落回 root screencap 通道，
+        // 降级链真正闭合。
         val a11yService = ApexAccessibilityService.instance
         if (a11yService != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ 无障碍截图API
-            // 需要异步回调，这里简化
-            return ScreenshotResult(false, null)
+            val bitmap = runCatching { a11yService.takeScreenshotBitmap() }.getOrNull()
+            if (bitmap != null) {
+                val out = java.io.ByteArrayOutputStream()
+                val encoded = runCatching {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+                }.getOrDefault(false)
+                if (encoded) {
+                    return ScreenshotResult(true, out.toByteArray())
+                }
+            }
         }
 
         // P2 fix（审计 6-b）：PNG 二进制绝不经 String↔bytes 往返（任何 charset 解码都会

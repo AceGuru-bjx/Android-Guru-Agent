@@ -1,10 +1,14 @@
 package com.apex.agent.di
 
 import android.content.Context
+import com.apex.agent.codenative.NativeTextKernel
 import com.apex.agent.core.code.CodeAgentEngine
 import com.apex.agent.core.code.CodeContextProvider
 import com.apex.agent.core.code.CodeConversationMemory
 import com.apex.agent.core.code.RulesProvider
+import com.apex.agent.core.code.standard.DualLogicCodeEngine
+import com.apex.agent.core.code.standard.StandardModeEngine
+import com.apex.agent.core.code.standard.StandardTextKernel
 import com.apex.agent.core.codetools.CodeWorkspaceRoots
 import com.apex.agent.core.codetools.git.GitCommandRunner
 import com.apex.agent.core.codetools.tools.CodeTodoTool
@@ -147,10 +151,42 @@ object CodeModule {
     }
 
     /**
-     * Coding 引擎（@Named("code")）—— 独立 ApexAgentEngine 实例的薄包装。
+     * 标准线 per-workspace 对话记忆（v1.5 双思考逻辑）：与深潜线的
+     * code_memory 目录隔离——两条思考逻辑各自独立会话现场，切换互不污染，
+     * 切回时现场完整恢复。
+     */
+    @Provides
+    @Singleton
+    @Named("codeStandard")
+    fun provideStandardCodeConversationMemory(
+        @ApplicationContext context: Context
+    ): CodeConversationMemory {
+        return CodeConversationMemory(File(context.filesDir, "code_memory_standard"))
+    }
+
+    /**
+     * 文本加速核（C++17 JNI，token 估算 / 行级 diff / 模糊定位）：
+     * .so 缺失时 NativeTextKernel 内部自动回退纯 Kotlin 实现——这里恒可注入。
+     */
+    @Provides
+    @Singleton
+    fun provideStandardTextKernel(): StandardTextKernel = NativeTextKernel()
+
+    /**
+     * Coding 引擎（@Named("code")）—— v1.5 起为**双思考逻辑路由门面**：
      *
-     * 配置取向（与 Agent 默认差异）：BUILD 循环 + 更高迭代上限（编码任务链路长）+
-     * 更大工具输出配额（code_read 输出被 2000 字符默认值截断会毁掉编码循环）。
+     * ```
+     * DualLogicCodeEngine ──┬── CodeAgentEngine（深潜线：七档思考，v1.2 既有行为）
+     *                       └── StandardModeEngine（标准线：标准任务循环）
+     * ```
+     *
+     * 深潜线配置取向（与 Agent 默认差异）：BUILD 循环 + 更高迭代上限
+     * （编码任务链路长）+ 更大工具输出配额（code_read 输出被 2000 字符
+     * 默认值截断会毁掉编码循环）。标准线由 [StandardModeEngine] 自持
+     * 配置（画像回合预算 + 权限门 + 会话压缩 + 子代理派发）。
+     *
+     * CodeViewModel 只面向 [CodeEngineFacade] / AgentEngine 编程，
+     * 右上角「思考逻辑」切换经 DualLogicCodeEngine.switchLogic 路由。
      */
     @Provides
     @Singleton
@@ -173,7 +209,13 @@ object CodeModule {
         // 技能渐进披露：与 Agent 模式共享同一激活存储（skill_activate 工具
         // 写入的是全局单例；coding 引擎读同一份才能让装备即时生效——
         // 也避免 46 技能全量注入撞爆 coding 请求体积）。
-        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore
+        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore,
+        // v1.5 标准线：独立记忆通道 + C++ 文本加速核
+        @Named("codeStandard") standardMemory: CodeConversationMemory,
+        standardTextKernel: StandardTextKernel,
+        // #230 收尾：标准线专用执行器（仅环境门 —— StandardModeEngine 自带
+        // opencode 式权限门，共用主执行器的组合门会双弹窗）
+        @javax.inject.Named("standardEngineTools") standardToolExecutor: ToolExecutor
     ): AgentEngine {
         val codeConfig = AgentConfig(
             mode = AgentMode.BUILD,
@@ -187,33 +229,44 @@ object CodeModule {
             // （与 Agent 屏的聊天技能提示词层完全独立）
             skillScope = "coding"
         )
-        val inner = ApexAgentEngine(
-            llmClient = llmClient,
-            toolRegistry = toolRegistry,
-            toolExecutor = toolExecutor,
-            config = codeConfig,
-            memory = codeMemory,
-            contextCompressor = contextCompressor,
-            skillRegistry = skillRegistry,
-            privilegeInfoProvider = privilegeInfoProvider,
-            environmentInfoProvider = environmentInfoProvider,
-            memoryObserver = memoryObserver,
-            connectedServicesProvider = connectedServicesProvider,
-            modelRuntime = modelRuntime,
-            // 独立激活存储：tool_open 的会话激活不与 Agent 模式互相污染
-            toolActivation = ToolActivationStore(),
-            // Issue #165：coding 引擎同样接入生命周期钩子（会话/回合/压缩事件）
-            hookRunner = hookRunner,
-            // 技能激活共享（见参数 KDoc）：目录 + 已装备方法论注入。
-            skillActivation = skillActivation
-        )
-        return CodeAgentEngine(
-            delegate = inner,
+        val deepDive = CodeAgentEngine(
+            delegate = ApexAgentEngine(
+                llmClient = llmClient,
+                toolRegistry = toolRegistry,
+                toolExecutor = toolExecutor,
+                config = codeConfig,
+                memory = codeMemory,
+                contextCompressor = contextCompressor,
+                skillRegistry = skillRegistry,
+                privilegeInfoProvider = privilegeInfoProvider,
+                environmentInfoProvider = environmentInfoProvider,
+                memoryObserver = memoryObserver,
+                connectedServicesProvider = connectedServicesProvider,
+                modelRuntime = modelRuntime,
+                // 独立激活存储：tool_open 的会话激活不与 Agent 模式互相污染
+                toolActivation = ToolActivationStore(),
+                // Issue #165：coding 引擎同样接入生命周期钩子（会话/回合/压缩事件）
+                hookRunner = hookRunner,
+                // 技能激活共享（见参数 KDoc）：目录 + 已装备方法论注入。
+                skillActivation = skillActivation
+            ),
             codeMemory = codeMemory,
             contextProvider = codeContextProvider,
             // Issue #164：规则提供者（无状态可直 new）——refreshContext 时
             // 组装 Global/Project Rules 追加进 additionalSystemContext
             rulesProvider = RulesProvider()
         )
+        val standard = StandardModeEngine(
+            runtime = modelRuntime,
+            toolRegistry = toolRegistry,
+            // #230：标准线走引擎级权限门 + 仅环境门的执行器（防双弹窗）；
+            // 深潜线（delegate = ApexAgentEngine，无引擎级门）继续用主执行器。
+            toolExecutor = standardToolExecutor,
+            memory = standardMemory,
+            contextProvider = codeContextProvider,
+            rulesProvider = RulesProvider(),
+            textKernel = standardTextKernel
+        )
+        return DualLogicCodeEngine(deepDive = deepDive, standard = standard)
     }
 }

@@ -446,6 +446,13 @@ data class AgentSettings(
      */
     val forceDeepThinking: Boolean = false,
     /**
+     * v1.5 Coding 屏思考逻辑（双引擎路由）："" / "deep_dive" = 深潜
+     * （自研七档思考，v1.2 既有行为）；"standard" = 标准（业界标准 Agent
+     * 任务循环：画像/权限门/子代理/压缩）。Coding 屏右上角选择器写入，
+     * CodeViewModel init 恢复（DualLogicCodeEngine.switchLogic 运行时路由）。
+     */
+    val codeThinkingLogic: String = "",
+    /**
      * v1.2 Coding 模式思考档位（持久化，与聊天页 thinkingLevelOverride 互不
      * 干扰——两模式各自记忆）："" = 未设置（回退 STANDARD）；"auto" = AUTO
      * 自适应；其余 = ThinkingLevel 枚举名小写
@@ -535,6 +542,22 @@ data class AgentSettings(
     // 老版本升级用户也会看到一次（ignoreUnknownKeys 反序列化缺省 false），
     // 属预期行为 —— 引导页本身也承担新功能布道。
     val onboardingCompleted: Boolean = false,
+
+    // ── 新手引导 v2（权限全量引导 + 工作区选择）──
+    // 已完成的引导版本；低于引导页 OnboardingFlow.CURRENT_VERSION 时首启
+    // 重新展示（v2 语义：老用户升级后重看一次，获知新权限步骤与工作区
+    // 选择 —— onboardingCompleted 重看语义的版本化延续，字段缺省 0 对
+    // 存量 JSON 向后兼容）。
+    val onboardingVersion: Int = 0,
+    // 工作区范围（引导第 4 页选择）："all" = 操控所有公共存储（默认）；
+    // "folder" = 指定 SAF 文件夹。folderUri 是 takePersistableUriPermission
+    // 持久化授权后的 tree URI 字符串（chaos-crash-audit C-09：不持久化的
+    // content URI 重启即失效），folderName 仅显示用（从 documentId 解析）。
+    // 引擎侧接线（文件工具按此收敛沙箱）见 docs/onboarding-permissions.md
+    // 的 Phase 2 路线 —— 本 PR 先记录选择 + 就绪页回显。
+    val workspaceScope: String = "all",
+    val workspaceFolderUri: String = "",
+    val workspaceFolderName: String = "",
 
     // ═══ Agent 角色（人设层 · 运行时可热切换，无需重启）═══
     // agentRoles 只存自定义角色；内置全能角色运行时合成（AgentRole.ALL_ROUNDER，

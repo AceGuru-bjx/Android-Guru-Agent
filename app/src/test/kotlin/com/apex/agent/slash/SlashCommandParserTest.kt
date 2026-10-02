@@ -53,6 +53,50 @@ class SlashCommandParserTest {
         assertEquals("pdf_reader", (parsed as SlashCommand.Plugin).id)
     }
 
+    // ═══════════════════════════════════════════════════════
+    // /logic — v1.5 双思考逻辑切换（本地路由命令）
+    // ═════════════════════════════════════════════════════
+
+    @Test
+    fun `bare logic command parses to Logic with standard id`() {
+        val parsed = SlashCommandParser.parse("/logic:standard")
+
+        assertTrue(parsed is SlashCommand.Logic)
+        val logic = parsed as SlashCommand.Logic
+        assertEquals("standard", logic.id)
+        assertEquals(emptyMap<String, String>(), logic.args)
+        assertEquals("", logic.userExtra)
+    }
+
+    @Test
+    fun `logic command accepts deep_dive id`() {
+        val parsed = SlashCommandParser.parse("/logic:deep_dive")
+
+        assertTrue(parsed is SlashCommand.Logic)
+        assertEquals("deep_dive", (parsed as SlashCommand.Logic).id)
+    }
+
+    @Test
+    fun `logic command type is case-insensitive`() {
+        // 与其他命令同口径：type 侧统一 lowercase（id 侧保留原样由 fromName 容错）。
+        val parsed = SlashCommandParser.parse("/LOGIC:STANDARD")
+
+        assertTrue(parsed is SlashCommand.Logic)
+        assertEquals("STANDARD", (parsed as SlashCommand.Logic).id)
+    }
+
+    @Test
+    fun `logic command with trailing user text keeps id clean`() {
+        // 本地路由命令不吃参数——args/userExtra 仍按通用语法解析，但切换
+        // 语义只看 id；多余文本不应破坏命令形状。
+        val parsed = SlashCommandParser.parse("/logic:standard now please")
+
+        assertTrue(parsed is SlashCommand.Logic)
+        val logic = parsed as SlashCommand.Logic
+        assertEquals("standard", logic.id)
+        assertEquals("now please", logic.userExtra)
+    }
+
     // ═══════════════════════════════════════════════════════════
     // Args + positional user text
     // ═══════════════════════════════════════════════════════════
@@ -207,7 +251,7 @@ class SlashCommandParserTest {
         // Order matters for slash-menu rendering; assert it explicitly so a
         // future reorder is a conscious decision rather than an accident.
         assertEquals(
-            listOf("skill", "mcp", "connector", "plugin"),
+            listOf("skill", "mcp", "connector", "plugin", "logic"),
             SlashCommand.SUPPORTED_TYPES
         )
     }
