@@ -589,9 +589,15 @@ class ApexAgentEngine(
         } catch (e: Exception) {
             // #213：同上——原始 message 落日志，用户气泡给中文指引（未识别错误
             // 由 LlmErrorText 兜底：中文文案 + 截断的原始摘要）。
+            // ═══ recoverable 修复：未识别异常不再一律终结任务 ═══
+            // 旧实现 recoverable=false → UI 不渲染重试入口，任务直接死局；
+            // 逃逸到顶层的异常往往是一次性抖动（瞬时 IO/NPE 边角），用户
+            // 至少应能手动重试恢复（与“最大迭代超限”分支同款语义）。
+            // 自动重试交给流级 EngineResilienceGuard（白名单 + 预算内），
+            // 顶层只兜底“别把用户锁死”。
             AppLogger.instance.error(LogCategory.ENGINE, "ApexAgentEngine", "运行异常: ${e.message}", e)
             taskHadFailure = true
-            emit(AgentEvent.Error(LlmErrorText.userMessage(e), recoverable = false))
+            emit(AgentEvent.Error(LlmErrorText.userMessage(e), recoverable = true))
         } finally {
             isRunning = false
             // 隐式记忆采集（报告 P2）：任务结束，提交 episode。

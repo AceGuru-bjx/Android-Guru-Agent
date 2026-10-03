@@ -1,5 +1,7 @@
 package com.apex.agent.core.llm
 
+import com.apex.agent.core.logging.AppLogger
+import com.apex.agent.core.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -28,6 +30,9 @@ class StreamingOpenAiClient(
     private val config: LlmConfig,
     private val httpClient: OkHttpClient
 ) : LlmClient {
+
+    /** 解析失败限次计数（防整页 HTML 错误片段刷屏日志；实例可能被并发流共享 → 原子）。 */
+    private val parseFailuresLogged = java.util.concurrent.atomic.AtomicInteger()
 
     override suspend fun chat(
         messages: List<LlmMessage>,
@@ -704,6 +709,18 @@ class StreamingOpenAiClient(
                 isFinish = finishReason == "stop" || finishReason == "tool_calls"
             )
         } catch (e: Exception) {
+            // ═══ 可观测性修复：不再无声丢弃 ═══
+            // 服务端中途返回非 JSON 片段（网关 HTML 错误页 / 截断帧）时，旧实现
+            // 静默吞掉 → 用户只看到气泡停滞，无从诊断。限次记录（首 3 条 +
+            // 之后每 50 条一条）防整页失败时的日志洪峰；不影响热路径重试语义。
+            val failureNo = parseFailuresLogged.incrementAndGet()
+            if (failureNo <= 3 || failureNo % 50 == 0) {
+                AppLogger.instance.warn(
+                    LogCategory.LLM, "StreamingOpenAiClient",
+                    "SSE chunk parse failed (#$failureNo): " +
+                        "${e::class.simpleName}: ${e.message?.take(120)} — data head: ${data.take(80)}"
+                )
+            }
             null
         }
     }

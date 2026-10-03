@@ -11,6 +11,7 @@ import com.apex.agent.core.engine.orchestrator.FakeLlmClient
 import com.apex.agent.core.engine.orchestrator.FakeToolExecutor
 import com.apex.agent.core.engine.orchestrator.FakeToolRegistry
 import com.apex.agent.core.llm.ToolCall
+import com.apex.agent.core.llm.runtime.ModelRuntimeException
 import com.apex.agent.core.tools.ToolStreamEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -423,8 +424,15 @@ class TaskRuntimeTest {
         // LLM 恒抛错 → 引擎 emit Error(recoverable=false) → FAILED。
         // 3 个 Throw：初始执行 + 2 次重试各消耗一个（脚本耗尽会返回空响应→
         // recoverable=true→正常收尾→COMPLETED，覆盖不到 FAILED 语义）。
+        // 用 ModelRequestRejected（不可降级、不在瞬时白名单）保证
+        // recoverable=false：未识别异常自顶层 catch 改革后改为 recoverable=true
+        //（用户可手动重试），FAILED 语义改由明确的不可恢复错误类型覆盖。
         val llm = FakeLlmClient(
-            (1..3).map { FakeLlmClient.ScriptedResponse.Throw(RuntimeException("provider down")) }
+            (1..3).map {
+                FakeLlmClient.ScriptedResponse.Throw(
+                    ModelRuntimeException.ModelRequestRejected("provider down", "p1")
+                )
+            }
         )
         val engine = newEngine(llm, FakeToolExecutor())
         val rt = TaskRuntime(
@@ -465,7 +473,14 @@ class TaskRuntimeTest {
 
     @Test
     fun `abandoning failed task transitions to CANCELLED`() = runBlocking<Unit> {
-        val llm = FakeLlmClient(listOf(FakeLlmClient.ScriptedResponse.Throw(RuntimeException("fatal"))))
+        // 同上：不可恢复错误类型保证 FAILED（未识别异常已是 recoverable=true）。
+        val llm = FakeLlmClient(
+            listOf(
+                FakeLlmClient.ScriptedResponse.Throw(
+                    ModelRuntimeException.ModelRequestRejected("fatal", "p1")
+                )
+            )
+        )
         val engine = newEngine(llm, FakeToolExecutor())
         val rt = newRuntime(engine, CoroutineScope(SupervisorJob() + Dispatchers.IO))
 
