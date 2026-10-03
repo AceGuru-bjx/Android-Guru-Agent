@@ -912,14 +912,21 @@ class AgentChatViewModel @Inject constructor(
      * - 无条件复位 isLoading，清空 currentResponse/currentThinking 与进行中的工具卡片。
      */
     fun abort() {
-        // 取消前：先刷出未落盘的流式缓冲，拿到完整文本快照。
-        streamBuffers.flush()
-        val partialResponse = _uiState.value.currentResponse
-        val partialThinking = _uiState.value.currentThinking
-
+        // ═══ 快照竞态修复：先停收集器，再做最终 flush/快照 ═══
+        // 旧顺序（flush → 快照 → cancel）下，cancel 只是异步信号——取消传播
+        // 到 OkHttp readLine 需经 invokeOnCompletion{response.close()} 触发
+        // IOException → flow 终止；信号生效前网络新推的 token 仍会进入
+        // streamBuffers（33ms flush Job 独立运行）追加 currentResponse，而
+        // 快照已读走旧值 → 落盘的 isPartial 比用户屏幕最后一帧少一截。
+        // 先 cancel 收集器 → 缓冲不再有新数据 → flush 后读到的才是真正终态。
         currentJob?.cancel()
         // T76：取消走任务运行时（引擎 abort + CANCELLED 落盘，重启不复活）
         viewModelScope.launch { taskController.cancel() }
+
+        // 取消已生效：刷出未落盘的流式缓冲，拿到完整文本快照。
+        streamBuffers.flush()
+        val partialResponse = _uiState.value.currentResponse
+        val partialThinking = _uiState.value.currentThinking
 
         // 取消后：部分产物落盘 + 状态复位（部分思考附带实测秒数）。
         finishActiveBanner()
