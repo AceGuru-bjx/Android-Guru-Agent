@@ -48,8 +48,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -63,6 +61,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.apex.agent.ui.component.MarkdownText
+import com.apex.agent.ui.glass.GlassCard
+import com.apex.agent.ui.glass.GlassStyle
 import com.apex.agent.ui.component.MessageAttachmentList
 import com.apex.agent.ui.theme.LocalShowTimestamps
 import kotlinx.coroutines.delay
@@ -325,30 +325,16 @@ internal fun AgentBubble(
             .semantics { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.Start
     ) {
-        val outlineVariant = MaterialTheme.colorScheme.outlineVariant
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
+        // v5 流式玻璃（用户反馈「流式输出的液态/毛玻璃没做好」）：AI 回复气泡
+        // 从不透明 Surface 换成 GlassCard Frosted 档 —— 上下渐变薄霜 + 边缘光
+        // + 镜面斜扫，与输入栏/工具卡/计划卡同一套玻璃语言。Frosted（state=null）
+        // 无 backdrop 采样：气泡位于 hazeSource（消息列表）内部，Haze 1.4 不支持
+        // 嵌套采样，诚实降级（与展开态工具卡同档）。
+        GlassCard(
+            style = GlassStyle.Card,
             shape = RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp),
-            modifier = Modifier
-                .widthIn(max = 340.dp)
-                .drawBehind {
-                    // 精修：描边逐角匹配气泡 shape (4,18,18,18)（原统一 14dp 圆角，顶部小角处描边悬空）
-                    drawPath(
-                        path = Path().apply {
-                            addRoundRect(
-                                RoundRect(
-                                    left = 0f, top = 0f, right = size.width, bottom = size.height,
-                                    topLeftCornerRadius = CornerRadius(4.dp.toPx()),
-                                    topRightCornerRadius = CornerRadius(18.dp.toPx()),
-                                    bottomRightCornerRadius = CornerRadius(18.dp.toPx()),
-                                    bottomLeftCornerRadius = CornerRadius(18.dp.toPx())
-                                )
-                            )
-                        },
-                        color = outlineVariant,
-                        style = Stroke(width = 1.dp.toPx())
-                    )
-                }
+            accent = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.widthIn(max = 340.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 // 头像 + 角色标识 + 时间戳 + overflow 菜单入口（长按本行 = 非文本区域长按）
@@ -544,30 +530,13 @@ internal fun StreamingResponseBubble(
         label = "cursor-alpha"
     )
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-        val outlineVariant = MaterialTheme.colorScheme.outlineVariant
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
+        // v5 流式玻璃：与完成态 AgentBubble 同款 GlassCard Frosted —— 流式与
+        // 完成瞬间切换无容器跳变（同一 shape/同一玻璃档）。
+        GlassCard(
+            style = GlassStyle.Card,
             shape = RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp),
-            modifier = Modifier
-                .widthIn(max = 340.dp)
-                .drawBehind {
-                    // 精修：描边逐角匹配气泡 shape (4,18,18,18)（原统一 14dp 圆角，顶部小角处描边悬空）
-                    drawPath(
-                        path = Path().apply {
-                            addRoundRect(
-                                RoundRect(
-                                    left = 0f, top = 0f, right = size.width, bottom = size.height,
-                                    topLeftCornerRadius = CornerRadius(4.dp.toPx()),
-                                    topRightCornerRadius = CornerRadius(18.dp.toPx()),
-                                    bottomRightCornerRadius = CornerRadius(18.dp.toPx()),
-                                    bottomLeftCornerRadius = CornerRadius(18.dp.toPx())
-                                )
-                            )
-                        },
-                        color = outlineVariant,
-                        style = Stroke(width = 1.dp.toPx())
-                    )
-                }
+            accent = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.widthIn(max = 340.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Row(
@@ -699,19 +668,14 @@ internal fun ThinkingBubble(
         }.value
     } else 0L
 
-    val tertiaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f)
-    Surface(
-        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f),
+    // v5 流式玻璃：思考气泡同款 GlassCard Frosted（accent=tertiary 与既有
+    // 思考色系一致）；折叠/展开可点击收在内容层，涟漪经玻璃层裁剪不露角。
+    GlassCard(
+        style = GlassStyle.Card,
         shape = RoundedCornerShape(12.dp),
+        accent = MaterialTheme.colorScheme.tertiary,
         modifier = Modifier
             .fillMaxWidth()
-            .drawBehind {
-                drawRoundRect(
-                    color = tertiaryColor,
-                    style = Stroke(width = 1.dp.toPx()),
-                    cornerRadius = CornerRadius(12.dp.toPx())
-                )
-            }
             .clickable {
                 expanded = !expanded
             }

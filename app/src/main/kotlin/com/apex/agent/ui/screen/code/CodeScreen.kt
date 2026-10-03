@@ -48,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -55,6 +56,8 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,12 +73,12 @@ import com.apex.agent.ui.component.GithubTokenDialog
 import com.apex.agent.ui.component.MarkdownText
 import com.apex.agent.ui.component.SlashAutoCompleteHost
 import com.apex.agent.ui.component.SlashCommandButton
+import com.apex.agent.ui.component.SkillChipInputField
 import com.apex.agent.ui.component.SlashMenuProvider
 import com.apex.agent.ui.component.rememberSlashMenuProvider
 import com.apex.agent.ui.screen.agent.CODING_SCREEN_MODES
 import com.apex.agent.ui.screen.agent.AgentModeSelector
 import com.apex.agent.ui.screen.agent.PendingPipelineCommand
-import com.apex.agent.ui.screen.agent.PipelineCapsuleRow
 import com.apex.agent.ui.screen.agent.PlanConfirmationCard
 import com.apex.agent.ui.screen.agent.QuestionCard
 import com.apex.agent.ui.screen.agent.ToolRef
@@ -90,6 +93,9 @@ import com.apex.agent.ui.screen.code.longtask.CodeLongTaskSheet
 import com.apex.agent.ui.screen.code.stream.CodeStreamTimeline
 import com.apex.agent.ui.screen.code.stream.CodeTerminalPanel
 import com.apex.agent.ui.screen.code.stream.CodeToolDetailSheet
+import com.apex.agent.ui.glass.GlassCard
+import com.apex.agent.ui.glass.GlassStyle
+import dev.chrisbanes.haze.HazeState
 
 /**
  * # Code Screen — Coding 模式主屏（与 Agent 聊天屏同级别）
@@ -109,7 +115,7 @@ fun CodeScreen(
     // 期间停收集（StateFlow 无参重载语义与 collectAsState 一致，初始值取 value）。
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val pendingAgentQuestion by viewModel.pendingAgentQuestion.collectAsStateWithLifecycle()
-    val pendingCommand by viewModel.pendingCommand.collectAsStateWithLifecycle()
+    val pendingCommands by viewModel.pendingCommands.collectAsStateWithLifecycle()
     val llmConfigured by viewModel.llmConfigured.collectAsStateWithLifecycle()
 
     // ═══ #197 「小圆环」工具菜单状态（Coding 工位独占）═══
@@ -188,92 +194,111 @@ fun CodeScreen(
             )
         }
 
+        // ═══ v5 玻璃悬浮层重构（Agent 屏同款 overlay 模式）═══
+        // 时间轴 = 玻璃采样源（hazeSource）；底部栈（终端尾窗/提问卡/错误条/
+        // 模式行/输入栏）悬浮于时间轴之上 —— 输入栏 GlassCard(Floating) 从
+        // 时间轴获得真实 backdrop 采样（此前 Coding 屏零玻璃：死色输入条 +
+        // 流式结论裸铺在背景上）。lowerStackInsetPx 动态测量悬浮栈高度，
+        // 时间轴 contentPadding 补偿，最后一条不被遮挡。
+        val glassState = remember { HazeState() }
+        var lowerStackInsetPx by remember { mutableIntStateOf(0) }
+        val lowerStackInsetDp = with(LocalDensity.current) { lowerStackInsetPx.toDp() }
         Box(modifier = Modifier.weight(1f)) {
-            // 胶囊时间轴（渲染主通道）：Diff + 终端日志 + 结构化错误三件套
             CodeStreamTimeline(
                 snapshot = state.stream,
                 isStreaming = state.isRunning,
+                bottomInset = lowerStackInsetDp,
+                hazeState = glassState,
                 onToolClick = { call -> selectedToolCallId = call.id }
             )
-        }
 
-        // 终端面板（活跃 BASH 的脉冲尾窗；独立锚定与时间轴互不抢占）
-        if (state.stream.activeTerminalCallId != null || state.stream.terminalContent.isNotBlank()) {
-            CodeTerminalPanel(
-                content = state.stream.terminalContent,
-                activeCommand = state.stream.activeTerminalCallId,
-                collapsed = terminalCollapsed,
-                onToggleCollapse = { terminalCollapsed = !terminalCollapsed }
-            )
-        }
+            // ═══ 底部悬浮栈：悬浮于时间轴之上（backdrop 采样前提）═══
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .onSizeChanged { lowerStackInsetPx = it.height }
+            ) {
+                // 终端面板（活跃 BASH 的脉冲尾窗；独立锚定与时间轴互不抢占）
+                if (state.stream.activeTerminalCallId != null || state.stream.terminalContent.isNotBlank()) {
+                    CodeTerminalPanel(
+                        content = state.stream.terminalContent,
+                        activeCommand = state.stream.activeTerminalCallId,
+                        collapsed = terminalCollapsed,
+                        onToggleCollapse = { terminalCollapsed = !terminalCollapsed }
+                    )
+                }
 
-        // v1.0 #155：工具/权限门的结构化提问卡（与 ask_user 的纯文本对话框并存；
-        // 工具执行已挂起，用户必须作答才能继续）
-        pendingAgentQuestion?.let { question ->
-            QuestionCard(
-                question = question,
-                onAnswer = { optionIds, customText ->
-                    viewModel.answerAgentQuestion(optionIds, customText)
-                },
-                onCancel = viewModel::cancelAgentQuestion
-            )
-        }
+                // v1.0 #155：工具/权限门的结构化提问卡（与 ask_user 的纯文本对话框并存；
+                // 工具执行已挂起，用户必须作答才能继续）
+                pendingAgentQuestion?.let { question ->
+                    QuestionCard(
+                        question = question,
+                        onAnswer = { optionIds, customText ->
+                            viewModel.answerAgentQuestion(optionIds, customText)
+                        },
+                        onCancel = viewModel::cancelAgentQuestion
+                    )
+                }
 
-        state.error?.let { err ->
-            // #209：运行失败类错误（errorRetriable）提供一键重试；运行中不重复触发。
-            ErrorBar(
-                message = err,
-                onRetry = if (state.errorRetriable && !state.isRunning) viewModel::retryLastRun else null,
-                onDismiss = viewModel::dismissError
-            )
-        }
+                state.error?.let { err ->
+                    // #209：运行失败类错误（errorRetriable）提供一键重试；运行中不重复触发。
+                    ErrorBar(
+                        message = err,
+                        onRetry = if (state.errorRetriable && !state.isRunning) viewModel::retryLastRun else null,
+                        onDismiss = viewModel::dismissError
+                    )
+                }
 
-        // ═══ #197 模式 + 思考档位选择器行（Build/Plan 双档 + 七档思考）═══
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 2.dp)
-        ) {
-            AgentModeSelector(
-                current = state.mode,
-                onSelect = viewModel::setMode,
-                modes = CODING_SCREEN_MODES
-            )
-            CodeThinkingSelector(
-                current = state.thinkingLevel,
-                adaptiveDecision = state.adaptiveDecision,
-                onSelect = viewModel::setThinkingLevel,
-                onOpenGuide = { showThinkingGuide = true }
-            )
-        }
+                // ═══ #197 模式 + 思考档位选择器行（Build/Plan 双档 + 七档思考）═══
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp)
+                ) {
+                    AgentModeSelector(
+                        current = state.mode,
+                        onSelect = viewModel::setMode,
+                        modes = CODING_SCREEN_MODES
+                    )
+                    CodeThinkingSelector(
+                        current = state.thinkingLevel,
+                        adaptiveDecision = state.adaptiveDecision,
+                        onSelect = viewModel::setThinkingLevel,
+                        onOpenGuide = { showThinkingGuide = true }
+                    )
+                }
 
-        CodeInputBar(
-            draft = state.inputDraft,
-            onDraftChange = viewModel::updateInputDraft,
-            isRunning = state.isRunning,
-            llmConfigured = llmConfigured,
-            onSendBlocked = { showApiMissingNotice = true },
-            onSend = viewModel::sendMessage,
-            onAbort = viewModel::abort,
-            slashMenuProvider = slashMenuProvider,
-            onPendingCommand = { viewModel.setPendingCommand(it) },
-            pendingCommand = pendingCommand,
-            onRemovePendingCommand = viewModel::clearPendingCommand,
-            githubTokenManager = viewModel.githubTokenManager,
-            toolkit = toolkit,
-            toolkitState = ToolkitUiState(
-                webSearchEnabled = webSearchEnabled,
-                timeEnabled = timeEnabled,
-                selectedFunctionIds = selectedFunctionIds,
-                availableTools = availableTools,
-                outputFormat = outputFormat,
-                customSchema = customSchema,
-                rules = rules,
-                exposeAllTools = toolkit.exposeAllTools.collectAsStateWithLifecycle().value
-            )
-        )
+                CodeInputBar(
+                    draft = state.inputDraft,
+                    onDraftChange = viewModel::updateInputDraft,
+                    isRunning = state.isRunning,
+                    llmConfigured = llmConfigured,
+                    onSendBlocked = { showApiMissingNotice = true },
+                    onSend = viewModel::sendMessage,
+                    onAbort = viewModel::abort,
+                    slashMenuProvider = slashMenuProvider,
+                    onAddPendingCommand = { viewModel.addPendingCommand(it) },
+                    pendingCommands = pendingCommands,
+                    onChipsChange = { viewModel.setPendingCommands(it) },
+                    glassState = glassState,
+                    githubTokenManager = viewModel.githubTokenManager,
+                    toolkit = toolkit,
+                    toolkitState = ToolkitUiState(
+                        webSearchEnabled = webSearchEnabled,
+                        timeEnabled = timeEnabled,
+                        selectedFunctionIds = selectedFunctionIds,
+                        availableTools = availableTools,
+                        outputFormat = outputFormat,
+                        customSchema = customSchema,
+                        rules = rules,
+                        exposeAllTools = toolkit.exposeAllTools.collectAsStateWithLifecycle().value
+                    )
+                )
+            }
+        }
     }
 
         // ═══ #197 模型 API 未配置浮窗（同 Agent 屏，发送拦截时弹出）═══
@@ -401,7 +426,10 @@ private fun WorkspaceBar(
                 modifier = Modifier.size(18.dp)
             )
             Spacer(Modifier.width(8.dp))
-            Box {
+            // v5 防挤压（与 Agent 屏顶栏同修复）：工作区名 + 下拉占满前段后，
+            // 窄屏上尾部三件（逻辑选择器/长任务/新会话）被剩余空间压到近乎 0 宽。
+            // 前段收进 weight(1f) 横向滚动行，尾部按钮固定永远可见。
+            Box(modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -478,8 +506,6 @@ private fun WorkspaceBar(
                     )
                 }
             }
-
-            Spacer(Modifier.weight(1f))
 
             // v1.5 思考逻辑切换（右上角：深潜 = 自研七档 / 标准 = 标准任务循环）
             CodeLogicModeSelector(
@@ -614,26 +640,25 @@ private fun CodeInputBar(
     onSend: (String) -> Unit,
     onAbort: () -> Unit,
     slashMenuProvider: SlashMenuProvider,
-    onPendingCommand: (PendingPipelineCommand) -> Unit,
-    pendingCommand: PendingPipelineCommand?,
-    onRemovePendingCommand: () -> Unit,
+    onAddPendingCommand: (PendingPipelineCommand) -> Unit,
+    pendingCommands: List<PendingPipelineCommand>,
+    onChipsChange: (List<PendingPipelineCommand>) -> Unit,
+    glassState: HazeState,
     githubTokenManager: com.apex.agent.github.GithubTokenManager,
     toolkit: com.apex.agent.ui.screen.agent.toolkit.ChatToolkitStore,
     toolkitState: ToolkitUiState
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    // ═══ v5 玻璃输入栏（Agent 屏同款）：Floating 档 + 顶部双角圆角，悬浮栈
+    // 布局使本卡悬浮于时间轴之上 → glassState 采样获得真实 backdrop。═══
+    GlassCard(
+        state = glassState,
+        style = GlassStyle.Floating,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
-            // ═══ 流水线指令胶囊行（[/> skill: 名字 ×]；无挂起不占位）═══
-            // 紧凑规格（v2）：胶囊高度收敛到与工具栏按钮同量级，行下留 2dp
-            // 间距——旧版 48dp 关闭钮把胶囊撑到 54dp，视觉上“糊”在输入框上。
-            PipelineCapsuleRow(
-                pending = pendingCommand,
-                onRemove = onRemovePendingCommand,
-                modifier = Modifier.padding(bottom = 2.dp)
-            )
+            // ═══ v5：技能 chip 已内联进输入框（SkillChipInputField），独立的
+            // 胶囊行移除 —— 不再出现「胶囊行叠在输入框上方」的重叠观感。═══
 
             // ═══ 小圆环状态标签行（搜索/时间/函数/格式/规则芯片，可单独关闭）═══
             ToolkitChipsRow(
@@ -659,17 +684,31 @@ private fun CodeInputBar(
                     .horizontalScroll(rememberScrollState())
             ) {
                 // ═══ / 斜杠指令按钮（coding 域：开发技能 + coding 工位 MCP）═══
+                // v5 多选：流水线条目选中保持展开（继续多选）+ ✓ 勾选态；
+                // 再点一次已选条目 = 摘除。返回 false（普通指令）才收起。
                 SlashCommandButton(
                     slashMenuProvider = slashMenuProvider,
                     scope = "coding",
+                    isSelected = { item ->
+                        PendingPipelineCommand.fromCommand(item.command, item.label)
+                            ?.let { c -> pendingCommands.any { it.type == c.type && it.id == c.id } }
+                            ?: false
+                    },
                     onItemSelected = { item ->
                         val capsule = PendingPipelineCommand.fromCommand(item.command, item.label)
                         if (capsule != null) {
-                            onPendingCommand(capsule)
+                            val exists = pendingCommands.any { it.type == capsule.type && it.id == capsule.id }
+                            if (exists) {
+                                onChipsChange(pendingCommands.filterNot { it.type == capsule.type && it.id == capsule.id })
+                            } else {
+                                onAddPendingCommand(capsule)
+                            }
+                            true // 流水线条目：保持展开，继续多选
                         } else {
                             val merged = if (draft.isBlank()) item.command
                             else draft.trimEnd() + " " + item.command
                             onDraftChange(merged)
+                            false
                         }
                     }
                 )
@@ -705,21 +744,16 @@ private fun CodeInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Box(modifier = Modifier.weight(1f)) {
-                    OutlinedTextField(
+                    // ═══ v5 技能 chip 输入框（与 Agent 屏同款组件）═══
+                    SkillChipInputField(
                         value = draft,
                         onValueChange = onDraftChange,
-                        placeholder = {
-                            Text(
-                                stringResource(
-                                    if (llmConfigured) R.string.code_input_hint
-                                    else R.string.code_input_hint_no_api
-                                ),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 5,
-                        shape = RoundedCornerShape(20.dp)
+                        chips = pendingCommands,
+                        onChipsChange = onChipsChange,
+                        placeholder = stringResource(
+                            if (llmConfigured) R.string.code_input_hint
+                            else R.string.code_input_hint_no_api
+                        )
                     )
                     // / 实时联想（coding 域）
                     SlashAutoCompleteHost(
@@ -729,7 +763,7 @@ private fun CodeInputBar(
                         onItemSelected = { item ->
                             val capsule = PendingPipelineCommand.fromCommand(item.command, item.label)
                             if (capsule != null) {
-                                onPendingCommand(capsule)
+                                onAddPendingCommand(capsule)
                             } else {
                                 onDraftChange(item.command)
                             }
@@ -752,16 +786,16 @@ private fun CodeInputBar(
                                 onSendBlocked()
                                 return@IconButton
                             }
-                            if (draft.isNotBlank() || pendingCommand != null) {
+                            if (draft.isNotBlank() || pendingCommands.isNotEmpty()) {
                                 onSend(draft)
                             }
                         },
-                        enabled = draft.isNotBlank() || pendingCommand != null
+                        enabled = draft.isNotBlank() || pendingCommands.isNotEmpty()
                     ) {
                         Icon(
                             Icons.AutoMirrored.Filled.Send,
                             contentDescription = stringResource(R.string.code_send),
-                            tint = if (draft.isNotBlank() || pendingCommand != null) MaterialTheme.colorScheme.primary
+                            tint = if (draft.isNotBlank() || pendingCommands.isNotEmpty()) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

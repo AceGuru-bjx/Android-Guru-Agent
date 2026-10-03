@@ -72,13 +72,16 @@
 | Drawer 导航项 ×9 | Backdrop | 抽屉氛围背景（渐变 + 双光晕 + 细网格） |
 | 聊天悬浮输入栏 | Backdrop | 消息 LazyColumn |
 | 回到底部 FAB | Backdrop | 消息 LazyColumn |
+| Agent 流式/完成态/思考气泡（v5） | Frosted | ——（源内嵌套不可用，与展开态工具卡同档；流式与完成态同 shape 同档，切换无容器跳变） |
+| Coding 屏悬浮栈（v5：输入栏/模式行/错误条） | Backdrop | CodeStreamTimeline（时间轴为 haze 源，底部栈悬浮其上） |
+| Coding 流式结论/思考卡（v5） | Frosted | ——（源内嵌套不可用，与 Agent 屏气泡同一套玻璃语言） |
 | 顶栏菜单钮 | Frosted | ——（顶栏无重叠内容，诚实降级） |
 | 工具卡 / 运行中工具卡 | Frosted | ——（源内嵌套不可用） |
 | Plan / Spec / 确认卡 | Frosted | ——（同上） |
 | 任务状态卡 | Frosted | ——（直排区无重叠） |
 | 玻璃实验室验证屏 | Backdrop | 验证区 Canvas（网格 + 文字 + 漂移光斑） |
 
-**明确不玻璃化**：终端渲染区（TerminalRenderer 保持纯色 + 高对比 + 低延迟）、页面背景、聊天气泡正文、ContextMeterBar。
+**明确不玻璃化**：终端渲染区（TerminalRenderer 保持纯色 + 高对比 + 低延迟）、页面背景、气泡/卡片内的正文排版（Markdown 文本永远普通绘制——玻璃只作用于容器层）、ContextMeterBar。
 
 ## 5. 性能设计
 
@@ -124,3 +127,8 @@
 | `ui/screen/glass/GlassLabScreen.kt` | 验证屏 |
 | `ui/ApexDrawerContent.kt` | 抽屉迁移：氛围背景源 + GlassNavigationItem |
 | `ui/screen/agent/AgentChatScreen.kt` | 聊天迁移：haze 源 + 悬浮玻璃输入栏 + FAB |
+| `ui/screen/agent/AgentChatMessages.kt` | v5 流式玻璃气泡（Agent/Streaming/Thinking 三气泡） |
+| `ui/screen/code/CodeScreen.kt` | v5 Coding 玻璃悬浮层：时间轴 haze 源 + 悬浮栈 + Floating 输入栏 |
+| `ui/screen/code/stream/CodeStreamCards.kt` | v5 Coding 流式结论/思考卡玻璃化 |
+
+> v5 变更详情（流式玻璃 + 技能 chip 输入框 + 按钮防挤压 + 函数调用文案纠偏）见 [chat-input-v5-glass-chips.md](chat-input-v5-glass-chips.md)。

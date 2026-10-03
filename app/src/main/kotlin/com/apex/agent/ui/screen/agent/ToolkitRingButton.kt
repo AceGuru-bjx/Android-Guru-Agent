@@ -209,6 +209,15 @@ fun ToolkitRingButton(
                                 onCheckedChange = onToggleExposeAllTools
                             )
                         }
+                        // v5 强制调用区块标签：与顶部语义提示呼应，明确勾选 =
+                        // 强制（tool_choice），而非「不勾就不能用」（全部默认开启）。
+                        Text(
+                            text = stringResource(R.string.chat_function_force_section),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
                         // #206 三级分组：域（#206 工具域）→ 类别 → 工具 —— 18 个
                         // 细分类一屏放不下且认知负担大；先按 7 域聚合，域内再按
                         // 类别分节。高风险工具带 ⚠ 徽标保持不变。

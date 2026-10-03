@@ -302,18 +302,32 @@ class CodeViewModel @Inject constructor(
         codeEngineImpl?.submitPlanConfirmation(confirmed, enabledSteps, order)
     }
 
-    // ═══ #197 斜杠指令管线（Coding 工位：coding 域技能/MCP）═══
+    // ═══ #197 斜杠指令管线（Coding 工位：coding 域技能/MCP）；v5 多选 chip ═══
 
-    /** 挂起中的流水线指令胶囊（[/> skill: 名字]；发送时拼回斜杠命令）。 */
-    private val _pendingCommand = MutableStateFlow<PendingPipelineCommand?>(null)
-    val pendingCommand: StateFlow<PendingPipelineCommand?> = _pendingCommand.asStateFlow()
+    /**
+     * 当前挂在输入框内的技能 chip 列表（顺序 = 追加顺序；type:id 去重）。
+     * 发送时：单枚拼回 `/type:id` 走既有斜杠路由；多枚逐个路由后合并为
+     * 一轮引擎执行（见 [sendMessage] / [handleMultiChipPipeline]）。
+     */
+    private val _pendingCommands = MutableStateFlow<List<PendingPipelineCommand>>(emptyList())
+    val pendingCommands: StateFlow<List<PendingPipelineCommand>> = _pendingCommands.asStateFlow()
 
-    fun setPendingCommand(command: PendingPipelineCommand) {
-        _pendingCommand.value = command
+    /** 追加一枚技能 chip（斜杠菜单/实时联想选中项；重复选择不重复挂载）。 */
+    fun addPendingCommand(command: PendingPipelineCommand) {
+        val key = command.type + ":" + command.id
+        _pendingCommands.value =
+            if (_pendingCommands.value.any { (it.type + ":" + it.id) == key }) _pendingCommands.value
+            else _pendingCommands.value + command
     }
 
-    fun clearPendingCommand() {
-        _pendingCommand.value = null
+    /** 整体同步 chip 集合（输入框内退格/点击删除 → 回报新集合；幂等）。 */
+    fun setPendingCommands(commands: List<PendingPipelineCommand>) {
+        _pendingCommands.value = commands.distinctBy { it.type + ":" + it.id }
+    }
+
+    /** 清空全部 chip。 */
+    fun clearPendingCommands() {
+        _pendingCommands.value = emptyList()
     }
 
     /** /mcp:github 未连接信号（UI 收集后打开 GithubTokenDialog）。 */
@@ -360,6 +374,54 @@ class CodeViewModel @Inject constructor(
         if (route.agentPrompt.isNotBlank()) {
             runEngine(route.agentPrompt)
         }
+    }
+
+    /**
+     * v5 多 chip 流水线：输入框内 ≥2 枚技能 chip 时的发送执行体。
+     *
+     * 与 Agent 屏 [com.apex.agent.ui.screen.agent.AgentChatViewModel] 的同名
+     * 方法同构：逐 chip 解析路由（系统消息逐条入轴、MCP/连接态门控拦截不
+     * 阻断其余 chip），有效 agentPrompt 合并 + 用户附加文本 → **单轮**
+     * runEngine。displayGoal 用 chip 标签组合（无附加文本时用户气泡可读）。
+     */
+    private fun handleMultiChipPipeline(chips: List<PendingPipelineCommand>, userText: String) {
+        val context = SlashRouteContext(
+            githubConnected = githubTokenManager.isConnected(),
+            githubUsername = githubTokenManager.getUsername(),
+            mcpConnected = mcpManager.getConnectedServers().toSet()
+        )
+        val prompts = mutableListOf<String>()
+        chips.forEach { chip ->
+            val parsed = SlashCommandParser.parse(chip.toCommandToken()) ?: return@forEach
+            val route = SlashCommandRouter.route(parsed, context)
+            _uiState.update { state ->
+                state.copy(
+                    messages = state.messages + CodeChatMessage(
+                        id = idGen.incrementAndGet(),
+                        CodeChatMessage.Role.SYSTEM,
+                        route.systemMessage
+                    )
+                )
+            }
+            if (route.requestGithubConnect) {
+                _requestGithubConnect.tryEmit(Unit)
+                return@forEach
+            }
+            if (route.agentPrompt.isNotBlank()) prompts += route.agentPrompt
+        }
+        if (prompts.isEmpty()) return
+
+        val combined = buildString {
+            prompts.forEachIndexed { index, prompt ->
+                if (index > 0) append("\n\n")
+                append(prompt)
+            }
+            if (userText.isNotBlank()) {
+                append("\n\n用户附加要求: ").append(userText)
+            }
+        }
+        val displayGoal = userText.ifBlank { chips.joinToString(" + ") { it.label } }
+        runEngine(combined, displayGoal = displayGoal)
     }
 
     /**
@@ -411,17 +473,25 @@ class CodeViewModel @Inject constructor(
 
     fun sendMessage(text: String) {
         val trimmed = text.trim()
-        val hasPendingCapsule = _pendingCommand.value != null
-        if ((trimmed.isEmpty() && !hasPendingCapsule) || _uiState.value.isRunning) return
+        val pendingCmds = _pendingCommands.value
+        if ((trimmed.isEmpty() && pendingCmds.isEmpty()) || _uiState.value.isRunning) return
 
-        // ═══ #197 斜杠管线：胶囊拼回命令；/ 开头文本走路由 ═══
+        // ═══ v5 多 chip：≥2 枚时逐个路由合并为一轮引擎执行 ═══
+        if (pendingCmds.size >= 2) {
+            _pendingCommands.value = emptyList()
+            _uiState.update { it.copy(inputDraft = "") }
+            handleMultiChipPipeline(pendingCmds, trimmed)
+            return
+        }
+
+        // ═══ #197 斜杠管线：单枚胶囊拼回命令；/ 开头文本走路由 ═══
         // 摘胶囊 + 清草稿（斜杠/普通发送共用收尾），再分派。
-        val pendingCmd = _pendingCommand.value
+        val pendingCmd = pendingCmds.firstOrNull()
         val effectiveText = if (pendingCmd != null) {
             if (trimmed.isEmpty()) pendingCmd.toCommandToken()
             else pendingCmd.toCommandToken() + " " + trimmed
         } else trimmed
-        _pendingCommand.value = null
+        _pendingCommands.value = emptyList()
         if (effectiveText.startsWith("/")) {
             _uiState.update { it.copy(inputDraft = "") }
             handleSlashCommand(effectiveText)
