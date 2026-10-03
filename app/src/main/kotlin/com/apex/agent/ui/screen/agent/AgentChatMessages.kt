@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
@@ -54,9 +55,12 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.apex.agent.ui.component.MarkdownText
 import com.apex.agent.ui.component.MessageAttachmentList
@@ -460,6 +464,71 @@ internal fun AgentBubble(
     }
 }
 
+/**
+ * 流式渲染辅助（[StreamingResponseBubble] 专用）：尾部未闭合媒体语法检测 +
+ * 行内 code/bold 轻量样式。均为单遍 O(n) 纯函数，随 33ms 节流 flush 重算
+ * （避免 MarkdownText 的全量重解析 —— 见 StreamingResponseBubble 性能注释）。
+ */
+private object StreamingRenderSupport {
+
+    /**
+     * 尾部未闭合媒体语法的字符长度（0 = 无）。
+     * 与 MediaMarkdown 的产物对齐：
+     * - 图片 `![image](url)`：最后一个 "![" 起的尾部没有 "…(…" 闭合形态
+     *   （无 "](" 或其后无 ")"）→ 从该处起全部视为在途媒体语法；
+     * - 视频 `<video src="url"></video>`：最后一个 "<video" 起的尾部
+     *   无开标签 ">" 或无 "</video>"。
+     */
+    fun incompleteMediaTailLength(text: String): Int {
+        val img = text.lastIndexOf("![")
+        if (img >= 0) {
+            val tail = text.substring(img)
+            val mid = tail.indexOf("](")
+            if (mid < 0 || tail.indexOf(')', mid + 2) < 0) return tail.length
+        }
+        val vid = text.lastIndexOf("<video")
+        if (vid >= 0) {
+            val tail = text.substring(vid)
+            val tagEnd = tail.indexOf('>')
+            if (tagEnd < 0 || tail.indexOf("</video>", tagEnd + 1) < 0) return tail.length
+        }
+        return 0
+    }
+
+    /**
+     * 行内样式轻量解析：闭合的 `code` / **bold** 对在流式期间就按最终形态渲染
+     * （等宽/加粗 + 标记剥离），减轻完成瞬间切 MarkdownText 的样式跳变幅度。
+     * 刻意单遍、无嵌套、不碰段落级语法（列表/标题/代码块仍以原文展示）——
+     * 越接近全量 Markdown 解析就越接近被避开的性能陷阱。未闭合的尾部标记
+     * 原样保留（闭合后才样式化，天然免跳变）。
+     */
+    fun styleInline(text: String, codeStyle: SpanStyle): AnnotatedString = buildAnnotatedString {
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '`') {
+                val close = text.indexOf('`', i + 1)
+                if (close > i) {
+                    if (close > i + 1) withStyle(codeStyle) { append(text, i + 1, close) }
+                    i = close + 1
+                    continue
+                }
+            } else if (c == '*' && i + 1 < text.length && text[i + 1] == '*') {
+                val close = text.indexOf("**", i + 2)
+                if (close > i + 1) {
+                    if (close > i + 2) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                        append(text, i + 2, close)
+                    }
+                    i = close + 2
+                    continue
+                }
+            }
+            append(c)
+            i++
+        }
+    }
+}
+
 @Composable
 internal fun StreamingResponseBubble(
     text: String,
@@ -537,14 +606,56 @@ internal fun StreamingResponseBubble(
                 // 完成态由 AgentMessageBubble 的 MarkdownText 接管最终渲染 ——
                 // 本气泡只在流式期间存在，无需自带完成分支。
                 // 样式对齐 MarkdownText 段落排版（bodyMedium + onSurface），
-                // 完成瞬间气泡替换不产生字号/行高跳变。媒体语法（![]()/!<video>）
-                // 流式期间以原始文本展示，完成态恢复为图片/视频卡。
+                // 完成瞬间气泡替换不产生字号/行高跳变。
+                // ═══ 两项减轻完成瞬间跳变的流式期补偿 ═══
+                // ① 媒体语法尾部：URL 是逐字符流出的，未闭合的 `![image](http…`
+                // 原样展示既是视觉噪音（长串裸 URL）又在完成切 MarkdownImage
+                //（heightIn(min=96.dp)）时产生布局跳变 —— 尾部未闭合段截掉，
+                // 改渲染迷你占位 chip（媒体接收完成前维持稳定高度）。
+                // ② 行内 code/bold：闭合对按最终形态样式化（标记剥离 +
+                // 等宽/加粗），与完成态 MarkdownText 的行内样式对齐。═══
+                val codeStyle = SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                )
+                val pendingMediaTail = remember(text) {
+                    StreamingRenderSupport.incompleteMediaTailLength(text)
+                }
+                val displayText = remember(text, codeStyle) {
+                    val shown = if (pendingMediaTail > 0) text.dropLast(pendingMediaTail) else text
+                    StreamingRenderSupport.styleInline(shown, codeStyle)
+                }
                 SelectionContainer {
                     Text(
-                        text = text,
+                        text = displayText,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
+                }
+                if (pendingMediaTail > 0) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
                 Text(
                     text = "▍",
@@ -665,7 +776,14 @@ internal fun ThinkingBubble(
                 text = text,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f),
-                maxLines = if (expanded) Int.MAX_VALUE else 5,
+                // 流式思考中（未展开）默认单行：思考链是上下文不是主角，头部行
+                //（THINK 徽标 + 实时秒数）已提供“正在思考”的全部关键信息；
+                // 点击气泡展开全文（expanded 持久，不随文本更新重置）。
+                maxLines = when {
+                    expanded -> Int.MAX_VALUE
+                    finished -> 5
+                    else -> 1
+                },
                 overflow = TextOverflow.Ellipsis
             )
         }
