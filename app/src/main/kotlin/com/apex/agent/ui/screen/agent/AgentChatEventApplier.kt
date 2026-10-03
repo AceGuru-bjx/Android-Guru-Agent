@@ -47,8 +47,14 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
             } else 0L
             thinkingStartElapsed = 0
             _uiState.update { state ->
+                // ═══ 一致性修复：落盘文本用 UI 侧已渲染的快照（flush 后的
+                // currentThinking），不再信任引擎侧 fullThought —— 引擎
+                // reasoningBuilder 与 UI streamBuffers 是两条独立累积链路，
+                // 双方漂移时完成瞬间思考内容会跳变；“看到什么落什么”。
+                // 快照为空且引擎侧有文本时回退 fullThought（防御非流式路径）。═══
+                val finalThought = state.currentThinking.ifBlank { event.fullThought }
                 state.copy(
-                    messages = state.messages + AgentUiMessage.ThinkingMessage(event.fullThought, durationMs),
+                    messages = state.messages + AgentUiMessage.ThinkingMessage(finalThought, durationMs),
                     currentThinking = "",
                     currentThinkingStartElapsed = 0
                 )
@@ -159,6 +165,23 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
         is AgentEvent.ToolCallStart -> {
             // 流式回复/思考暂停：先刷出缓冲，保证已有文本先于工具卡落盘。
             streamBuffers.flush()
+            // ═══ 多轮 BUILD 文本丢失/时序错位修复 ═══
+            // 本轮已流出的叙述文本（“我需要查看文件…”）在工具开跑前先落为
+            // 独立 Agent 消息并清空 currentResponse —— 旧实现只 flush 不落盘，
+            // 中间轮文本一直悬在 currentResponse 里与后续轮拼接，
+            // ResponseComplete（fullText 只含最后一轮）落盘时中间轮被整体丢弃，
+            // 且先发的文本视觉上“掉”到后完成的工具卡下方。现在每轮各成
+            // 一条消息，时间线与真实发生顺序一致；ResponseComplete 只负责
+            // 最后一轮的收尾（见该分支注释）。连续多个工具调用时仅首个
+            // ToolCallStart 会见到非空文本，后续落盘为空自然跳过。
+            _uiState.value.currentResponse.takeIf { it.isNotBlank() }?.let { turnText ->
+                _uiState.update { state ->
+                    state.copy(
+                        messages = state.messages + AgentUiMessage.Agent(turnText),
+                        currentResponse = ""
+                    )
+                }
+            }
             // 重置缓冲区 + 节流状态，记录当前活跃工具 callId 用于 chunk 路由。
             activeToolCallId = event.callId
             toolOutputBuffer.clear()
@@ -340,8 +363,16 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
             // 最终 flush：把仍在缓冲中的回复文本刷入 UI 后再落为完整消息。
             streamBuffers.flush()
             _uiState.update { state ->
+                // ═══ 一致性修复：落盘文本用 UI 侧已渲染的快照（flush 后的
+                // currentResponse），不再信任引擎侧 fullText —— 引擎
+                // contentBuilder 与 UI streamBuffers 是两条独立累积链路
+                //（引用块拼接/媒体注入/多轮循环都可能漂移），完成瞬间气泡
+                // 内容会跳变（看到 100 字落盘 95/105 字）。“看到什么落什么”。
+                // 快照为空且引擎侧有文本时回退 fullText：反思修正轮空产出时
+                // 引擎返回未变更草稿——该文本可能从未流经 UI，避免落盘空消息。═══
+                val finalText = state.currentResponse.ifBlank { event.fullText }
                 state.copy(
-                    messages = state.messages + AgentUiMessage.Agent(event.fullText),
+                    messages = state.messages + AgentUiMessage.Agent(finalText),
                     currentResponse = "",
                     isLoading = false
                 )
@@ -461,10 +492,22 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
         is AgentEvent.Aborted -> {
             finishActiveBanner()
             thinkingStartElapsed = 0
+            // ═══ 残留清理修复：cancelTask()（任务状态卡取消，不取消 UI 收集器）
+            // 路径下引擎的 Aborted 会真正送达这里 —— 旧分支只复位 isLoading，
+            // 未清 currentResponse，中止后半截流式气泡会一直挂在时间线底部。═══
+            // 在途部分回复落为 isPartial（与 Error 分支/abort() 同款语义：
+            // 已流出的内容不该无声消失），再清空两个流式槽。
+            streamBuffers.flush()
             _uiState.update { state ->
+                val partial = state.currentResponse
                 state.copy(
-                    messages = state.messages + AgentUiMessage.System(str(R.string.chat_aborted)),
+                    messages = state.messages +
+                        (if (partial.isNotBlank())
+                            listOf(AgentUiMessage.Agent(text = partial, isPartial = true))
+                        else emptyList()) +
+                        AgentUiMessage.System(str(R.string.chat_aborted)),
                     isLoading = false,
+                    currentResponse = "",
                     currentThinking = "",
                     currentThinkingStartElapsed = 0,
                     currentStepIndex = -1

@@ -226,15 +226,20 @@ fun AgentChatScreen(
     // key 只含"列表结构变化"（总项数 / 加载态），不含 currentResponse 文本——
     // 否则每 token 重启动画导致抖动。
     // 流式期间用即时 scrollToItem（跟手、无动画叠加）；非流式收尾保留动画。
+    // ═══ 滚动定位修复：scrollToItem(index) 默认把 item **顶部**对齐视口顶部
+    //（LazyListState 语义）——流式气泡高度超过视口时，auto-follow 每次都把
+    // 气泡顶部拽回视口顶，光标（最新输出）持续在视口外生长，用户看到的
+    // 是回复开头静止不动。传 scrollOffset = Int.MAX_VALUE 会被 LazyListState
+    // clamp 到最大合法滚动值 —— 等效"滚到最后一项底部"，光标始终可见。═══
     LaunchedEffect(
         totalListItems,
         uiState.isLoading
     ) {
         if (totalListItems > 0 && (isAtBottom || !userScrolledUp)) {
             if (uiState.isLoading) {
-                listState.scrollToItem(totalListItems - 1)
+                listState.scrollToItem(totalListItems - 1, scrollOffset = Int.MAX_VALUE)
             } else {
-                listState.animateScrollToItem(totalListItems - 1)
+                listState.animateScrollToItem(totalListItems - 1, scrollOffset = Int.MAX_VALUE)
             }
             userScrolledUp = false
         }
@@ -244,10 +249,11 @@ fun AgentChatScreen(
     // 主 auto-scroll 的键只含"列表结构变化"（totalListItems/isLoading），流式期间
     // 气泡数固定、totalListItems 不变 → 长回复把"底部"推出视口无人跟随。
     // 以（回复+思考）字符数 / 200 作节流档位（键不含文本本身 → 不会每 token
-    // 重启 effect）；档位推进且用户在底部附近 / 未进入阅读模式时即时跟随末项。
+    // 重启 effect）；档位推进且用户在底部附近 / 未进入阅读模式时即时跟随末项
+    // 底部（同上：scrollOffset 修复光标定位）。
     LaunchedEffect((uiState.currentResponse.length + uiState.currentThinking.length) / 200) {
         if (uiState.isLoading && totalListItems > 0 && (isAtBottom || !userScrolledUp)) {
-            listState.scrollToItem(totalListItems - 1)
+            listState.scrollToItem(totalListItems - 1, scrollOffset = Int.MAX_VALUE)
         }
     }
 
@@ -372,7 +378,7 @@ fun AgentChatScreen(
                 .fillMaxSize()
                 .hazeSource(glassState)
                 .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             contentPadding = PaddingValues(top = 12.dp, bottom = 12.dp + composerInsetDp)
         ) {
             // ═══ UX-3：未配置 API 引导卡（空会话 + 未配置模型时置顶显示；
@@ -496,7 +502,11 @@ fun AgentChatScreen(
                             userScrolledUp = false
                             scrollScope.launch {
                                 if (totalListItems > 0) {
-                                    listState.animateScrollToItem(totalListItems - 1)
+                                    // scrollOffset 同款修复：对齐末项底部而非顶部。
+                                    listState.animateScrollToItem(
+                                        totalListItems - 1,
+                                        scrollOffset = Int.MAX_VALUE
+                                    )
                                 }
                             }
                         },

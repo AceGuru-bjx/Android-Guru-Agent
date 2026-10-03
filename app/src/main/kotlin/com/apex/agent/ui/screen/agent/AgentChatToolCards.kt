@@ -73,8 +73,6 @@ import com.apex.agent.R
 import com.apex.agent.ui.glass.GlassToolCard
 import com.apex.agent.ui.glass.GlassToolStatus
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
-import java.util.Date
 
 /**
  * 工具来源分类的视觉规格：图标 + 标签 + 主题色。
@@ -719,8 +717,13 @@ internal fun WebSearchResultsCard(results: List<WebSearchItem>, query: String?) 
 /**
  * 工具执行过程的垂直时间线（与 harness 的"挂起→完成"两态卡片形成差异）。
  *
- * 渲染带时间戳的步骤流：左轴圆点（按阶段着色）+ 竖向连线 + 右侧（时间戳 + 阶段标签 + 等宽原始输出）。
+ * 左轴圆点（按阶段着色）+ 竖向连线 + 右侧等宽正文。
  * 运行卡与完成卡共用此组件。
+ *
+ * 视觉压缩：单条 step 从 ~30-40dp 收敛到 ~20dp —— 去掉时间戳列与阶段标签
+ *（对用户几乎零信息量，阶段语义由圆点着色承载），文本降 labelSmall 且
+ * 限 2 行省略（DONE/ERROR 收尾步内嵌的 4000 字符尾窗摘要不再无限撑高
+ * 时间线，展开态运行卡总高度同步从 320dp+ 收敛，正文气泡重新成为主角）。
  *
  * @param steps       步骤序列（[ToolStep]）。
  * @param accent      主色（取 [ToolKind] 对应色），用于 START/COMPLETE 圆点。
@@ -737,15 +740,17 @@ internal fun ToolStepTimeline(
 ) {
     if (steps.isEmpty()) return
     val listState = rememberLazyListState()
-    val dateFmt = remember { SimpleDateFormat("HH:mm:ss", java.util.Locale.US) }
 
     // 运行态：有新步骤（或"活输出"步骤被原地替换）时自动滚到底部。
     // key 用最后一步的 seq 而非 steps.size——步骤被 200 条 cap 截断后 size 恒定，
     // 原地替换时 size 也不变，size 无法感知更新；seq 单调递增即可。
-    // 流式期间用即时 scrollToItem，避免动画叠加抖动。
+    // 流式期间用即时 scrollToItem；scrollOffset=MAX_VALUE 对齐末步底部
+    //（活输出步高度增长时光标保持可见，与主列表同款定位修复）。
     if (autoScroll) {
         LaunchedEffect(steps.lastOrNull()?.seq) {
-            if (steps.isNotEmpty()) listState.scrollToItem(steps.lastIndex)
+            if (steps.isNotEmpty()) {
+                listState.scrollToItem(steps.lastIndex, scrollOffset = Int.MAX_VALUE)
+            }
         }
     }
 
@@ -765,66 +770,46 @@ internal fun ToolStepTimeline(
                 StepPhase.COMPLETE -> Color(0xFF22C55E)
                 StepPhase.ERROR -> MaterialTheme.colorScheme.error
             }
-            val phaseLabel = when (step.phase) {
-                StepPhase.START -> "START"
-                StepPhase.OUTPUT -> "OUTPUT"
-                StepPhase.PROGRESS -> if (step.percent != null)
-                    "PROGRESS ${(step.percent * 100).toInt()}%" else "PROGRESS"
-                StepPhase.COMPLETE -> "DONE"
-                StepPhase.ERROR -> "ERROR"
-            }
-            Row(modifier = Modifier.fillMaxWidth()) {
-                // ═══ 左轴：圆点 + 竖向连线 ═══
+            Row(
+                verticalAlignment = Alignment.Top,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 20.dp)
+            ) {
+                // ═══ 左轴：6dp 圆点 + 1dp 连线（列宽 10dp）═══
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.width(14.dp)
+                    modifier = Modifier.width(10.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
+                            .size(6.dp)
                             .background(dotColor, CircleShape)
                     )
                     if (index < steps.lastIndex) {
                         Box(
                             modifier = Modifier
-                                .width(1.5.dp)
+                                .width(1.dp)
                                 .weight(1f)
                                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         )
                     }
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                // ═══ 右栏：时间戳 + 阶段标签 + 文本 ═══
-                Column(modifier = Modifier.weight(1f).padding(bottom = 8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = dateFmt.format(Date(step.timestamp)),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
-                        Text(
-                            text = phaseLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Medium,
-                            color = dotColor
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = step.text,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = if (step.phase == StepPhase.ERROR)
-                            MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                    )
-                }
+                Spacer(modifier = Modifier.width(6.dp))
+                // ═══ 右栏：仅等宽正文（阶段语义由圆点着色承载）═══
+                Text(
+                    text = step.text,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (step.phase == StepPhase.ERROR)
+                        MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(bottom = 4.dp)
+                )
             }
         }
     }
@@ -970,7 +955,8 @@ fun RunningToolCallCard(toolCall: AgentToolCallUi) {
                 )
             }
 
-            // ═══ 工具执行过程时间线（流式，自动滚到底部）═══
+            // ═══ 工具执行过程时间线（流式，自动滚到底部；240→160dp：
+            // 单步压缩后同屏可见更多步骤，展开态运行卡不再占满小屏视口）═══
             if (toolCall.steps.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -979,7 +965,7 @@ fun RunningToolCallCard(toolCall: AgentToolCallUi) {
                     steps = toolCall.steps,
                     accent = accent,
                     autoScroll = true,
-                    maxHeight = 240.dp
+                    maxHeight = 160.dp
                 )
             } else if (toolCall.output.isNotEmpty()) {
                 // 兜底：无步骤但已有输出（理论上 START 步始终存在，此处为安全占位）。

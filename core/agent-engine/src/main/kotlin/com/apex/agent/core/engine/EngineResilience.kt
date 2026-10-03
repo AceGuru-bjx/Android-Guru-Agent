@@ -94,8 +94,12 @@ class EngineResilienceGuard(
                 is ModelRuntimeException.ModelUnavailable -> true
                 is ModelRuntimeException.ModelRateLimited -> true
                 is ModelRuntimeException.ModelTimeout -> true
-                // 鉴权失败重试无意义（Key 本身无效）；请求级 400 换时间重发
-                // 仍是同一请求体；配置错误须用户修改设置 —— 均不自动重试。
+                // ═══ 白名单扩展：响应无效（空响应/流中途解析失败）往往只是
+                // 网关抖动 —— 换次重试就能过，旧实现直接不重试 → 弱网下
+                // “动不动就停”。鉴权失败重试无意义（Key 本身无效）；请求级
+                // 400 换时间重发仍是同一请求体；配置错误须用户修改设置 ——
+                // 均不自动重试。═══
+                is ModelRuntimeException.ModelResponseInvalid -> true
                 else -> false
             }
         }
@@ -196,16 +200,17 @@ class EngineResilienceGuard(
  * 测试可用零退避/零预算实例关停）。
  */
 data class EngineResiliencePolicy(
-    /** 任务内 LLM 瞬时错误自动重试上限。 */
-    val maxLlmRetries: Int = 3,
-    /** 任务内空响应自动重试上限。 */
-    val maxEmptyResponseRetries: Int = 2,
+    /** 任务内 LLM 瞬时错误自动重试上限（3→5：弱网下 3 次 ≈ 8.4s 总窗口
+     *  稍差即耗尽，任务被一次性抖动终结）。 */
+    val maxLlmRetries: Int = 5,
+    /** 任务内空响应自动重试上限（2→3：空响应与瞬时错误同源，预算同步放宽）。 */
+    val maxEmptyResponseRetries: Int = 3,
     /** 首次退避延迟。 */
     val initialBackoffMs: Long = 1_200L,
     /** 退避增长因子。 */
     val backoffMultiplier: Double = 2.0,
-    /** 单次退避上限。 */
-    val maxBackoffMs: Long = 10_000L,
+    /** 单次退避上限（10s→30s：容忍网关更长的恢复窗口）。 */
+    val maxBackoffMs: Long = 30_000L,
     /** 退避抖动比例（±25% 防同步重试风暴）。 */
     val jitterRatio: Double = 0.25,
     /** 工具调用重试策略（复用 orchestrator RetryPolicy 语义与默认值）。 */

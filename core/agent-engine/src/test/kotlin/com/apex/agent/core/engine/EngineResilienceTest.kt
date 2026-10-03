@@ -54,7 +54,14 @@ class EngineResilienceTest {
 
     @Test
     fun `llm retry budget exhausts after max retries`() {
-        val g = guard() // FAST: maxLlmRetries = 3
+        // 显式预算（不再依赖 DEFAULT 默认值 —— 默认预算已随弱网韧性调整过，
+        // 测试断言与生产默认解耦）：3 次重试后第 4 次失败必须 Stop。
+        val g = guard(
+            EngineResiliencePolicy(
+                maxLlmRetries = 3,
+                initialBackoffMs = 0, maxBackoffMs = 0, jitterRatio = 0.0
+            )
+        )
         var last: EngineResilienceGuard.LlmRetryDecision? = null
         repeat(4) {
             last = g.onLlmFailure(ModelRuntimeException.ModelTimeout("timeout", "p1"))
@@ -63,8 +70,23 @@ class EngineResilienceTest {
     }
 
     @Test
-    fun `guard reset restores budgets for a new task`() {
+    fun `response invalid is retried as transient`() {
+        // 白名单扩展：空响应/解析失败（网关抖动）值得一次自动重试。
         val g = guard()
+        val decision = g.onLlmFailure(
+            ModelRuntimeException.ModelResponseInvalid("empty response", profileId = "p1")
+        )
+        assertTrue(decision is EngineResilienceGuard.LlmRetryDecision.Retry)
+    }
+
+    @Test
+    fun `guard reset restores budgets for a new task`() {
+        val g = guard(
+            EngineResiliencePolicy(
+                maxLlmRetries = 3,
+                initialBackoffMs = 0, maxBackoffMs = 0, jitterRatio = 0.0
+            )
+        )
         // 用尽 LLM 预算
         repeat(4) { g.onLlmFailure(ModelRuntimeException.ModelTimeout("timeout", "p1")) }
         assertTrue(
@@ -82,7 +104,13 @@ class EngineResilienceTest {
 
     @Test
     fun `empty response retries until budget then returns null`() {
-        val g = guard() // FAST: maxEmptyResponseRetries = 2
+        // 显式预算（与生产默认解耦，见上）：2 次重试后第 3 次返回 null。
+        val g = guard(
+            EngineResiliencePolicy(
+                maxEmptyResponseRetries = 2,
+                initialBackoffMs = 0, maxBackoffMs = 0, jitterRatio = 0.0
+            )
+        )
         assertNotNull(g.onEmptyResponse())
         assertNotNull(g.onEmptyResponse())
         assertNull(g.onEmptyResponse())
