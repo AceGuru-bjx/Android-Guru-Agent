@@ -44,11 +44,18 @@ internal object ConsoleTheme {
     /** 警示（amber —— App dark secondary）。 */
     val amber = Color(0xFFFFB454)
 
+    /** 警示弱底（P1-4：FALLBACK 类 notice 的底色 —— 降级提示非错误但值得警示）。 */
+    val warnSoft = Color(0xFF33270F)
+
     /** 危险（magenta —— App dark tertiary）。 */
     val danger = Color(0xFFFF6B9D)
 
     /** 危险弱底。 */
     val dangerSoft = Color(0xFF38182A)
+
+    /** 浮层底（P2-1：上下文菜单/跳底浮标等 TerminalViewHost 内 Popup ——
+     * 旧值散落在文件私部 PopupChrome，与 ConsoleTheme 脱钩改主题要两处同步）。 */
+    val popover = Color(0xE60F1613)
 }
 
 /**

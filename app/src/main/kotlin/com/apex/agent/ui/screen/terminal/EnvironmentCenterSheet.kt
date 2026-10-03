@@ -89,9 +89,9 @@ internal fun EnvironmentCenterSheet(
     onCreateUbuntuSession: () -> Unit,
     useMirror: Boolean,
     onToggleMirror: (Boolean) -> Unit,
-    depItems: List<TerminalViewModel.DepItem>,
-    install: TerminalViewModel.InstallState,
-    onInstallDep: (TerminalViewModel.DepItem) -> Unit,
+    depItems: List<TerminalDepCenter.DepItem>,
+    install: TerminalDepCenter.InstallState,
+    onInstallDep: (TerminalDepCenter.DepItem) -> Unit,
     onInstallAll: () -> Unit,
     onInstallAndroid: () -> Unit
 ) {
@@ -499,7 +499,7 @@ internal fun ToggleRow(label: String, checked: Boolean, onToggle: (Boolean) -> U
 }
 
 @Composable
-internal fun DepRow(item: TerminalViewModel.DepItem, busy: Boolean, installing: Boolean, onInstall: () -> Unit) {
+internal fun DepRow(item: TerminalDepCenter.DepItem, busy: Boolean, installing: Boolean, onInstall: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHighest).padding(horizontal = 10.dp, vertical = 6.dp),
@@ -508,9 +508,9 @@ internal fun DepRow(item: TerminalViewModel.DepItem, busy: Boolean, installing: 
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(
-                if (item.group == TerminalViewModel.DepGroup.ANDROID) Icons.Default.Android else Icons.Default.CheckCircle,
+                if (item.group == TerminalDepCenter.DepGroup.ANDROID) Icons.Default.Android else Icons.Default.CheckCircle,
                 null, Modifier.size(16.dp),
-                tint = if (item.group == TerminalViewModel.DepGroup.ANDROID) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                tint = if (item.group == TerminalDepCenter.DepGroup.ANDROID) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
             )
             Text(item.name, style = MaterialTheme.typography.bodyMedium)
         }

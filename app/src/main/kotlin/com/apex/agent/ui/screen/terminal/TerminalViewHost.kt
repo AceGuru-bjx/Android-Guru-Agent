@@ -58,7 +58,7 @@ import com.apex.agent.terminalview.TerminalViewSettings
 import com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysBar
 import com.apex.agent.ui.screen.terminal.scheme.TerminalColorScheme
 import com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeRegistry
-import kotlinx.coroutines.delay
+import android.view.ViewTreeObserver
 import kotlin.math.roundToInt
 
 /**
@@ -144,9 +144,35 @@ fun TerminalViewHost(
     //（TerminalScreen 只在有会话时组合它），组合即拉；快照到达后再补一次
     //（首帧后窗口焦点已稳定，IME 响应率更高）。仅一次语义，不与用户主动
     // 收起键盘打架。
-    LaunchedEffect(Unit) {
-        delay(120)   // 等 View attach + 焦点稳定
-        viewState.value?.requestFocusAndShowKeyboard()
+    //
+    // P2-5：挂载即拉改为**窗口焦点回调驱动** —— 旧版 `delay(120)` 等 View
+    // attach + 焦点稳定是经验值，不同 IME（Gboard/搜狗/微软）attach 速度差异
+    // 很大，低端机或冷启动时可能不够；现在由 ViewTreeObserver 的
+    // OnWindowFocusChangeListener + post 保证时序交给系统：首帧窗口获得焦点
+    //（IME attach 完成后必有一次回调）后拉起。恢复场景（挂载时窗口已聚焦，
+    // 回调不会再来的场景）用 hasWindowFocus() 直查兑底。
+    DisposableEffect(Unit) {
+        // viewState 在 AndroidView factory（组合期）写入，本 effect 在组合完成后
+        // 执行 —— view 必已就绪；未 attach 时 viewTreeObserver 是游离 observer，
+        // attach 时框架自动合并（listeners 生效）。
+        val view = viewState.value
+        var boosted = false
+        val focusListener: ViewTreeObserver.OnWindowFocusChangeListener? = view?.let { v ->
+            ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+                if (hasFocus && !boosted) {
+                    boosted = true
+                    v.post { v.requestFocusAndShowKeyboard() }
+                }
+            }
+        }
+        focusListener?.let { view?.viewTreeObserver?.addOnWindowFocusChangeListener(it) }
+        if (view != null && view.hasWindowFocus() && !boosted) {
+            boosted = true
+            view.post { view.requestFocusAndShowKeyboard() }
+        }
+        onDispose {
+            focusListener?.let { view?.viewTreeObserver?.removeOnWindowFocusChangeListener(it) }
+        }
     }
     var keyboardBoosted by remember { mutableStateOf(false) }
     LaunchedEffect(render != null) {
@@ -238,7 +264,7 @@ fun TerminalViewHost(
                 ) {
                     Column(
                         modifier = Modifier
-                            .background(PopupChrome.bg, RoundedCornerShape(10.dp))
+                            .background(ConsoleTheme.popover, RoundedCornerShape(10.dp))
                             .padding(vertical = 4.dp)
                     ) {
                         for (item in request.items) {
@@ -276,7 +302,7 @@ fun TerminalViewHost(
 
         // ── 特殊键工具栏（触屏必备；横向滚动；可在终端设置中隐藏换显示区）──
         if (settings.showKeybar) {
-            KeyToolbar(
+            TerminalKeyToolbar(
                 ctrlActive = client.ctrlLatched.value,
                 onCtrlToggle = { client.ctrlLatched.value = !client.ctrlLatched.value },
                 shiftActive = client.shiftLatched.value,
@@ -540,7 +566,13 @@ private fun vibrateOnce(context: Context) {
 
 // ═══════════════════════ 浮标 / 菜单文案 ═══════════════════════
 
-/** 「跳到最新」浮标（脱离吸底时出现；点击回到底部）。 */
+/**
+ * 「跳到最新」浮标（脱离吸底时出现；点击回到底部）。
+ *
+ * 浮层 chrome 恒深色 mint 控制台底。P2-1：色值锚进 [ConsoleTheme.popover]
+ * 单一来源 —— 旧私有 PopupChrome（0xE6263041 是旧主题蓝灰残留，T89 清理时
+ * 改的）与 ConsoleTheme 脱钩，改主题要两处同步；上下文菜单同源。
+ */
 @Composable
 private fun JumpToLatestPill(
     accent: Color,
@@ -549,7 +581,7 @@ private fun JumpToLatestPill(
 ) {
     Row(
         modifier = modifier
-            .background(PopupChrome.bg, RoundedCornerShape(14.dp))
+            .background(ConsoleTheme.popover, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -562,13 +594,9 @@ private fun JumpToLatestPill(
     }
 }
 
-/** 浮层 chrome（上下文菜单/跳底浮标）：恒深色 mint 控制台底 —— 旧值
- * 0xE6263041 是旧主题蓝灰残留，与 ConsoleTheme 色系冲突（T89 清理）。 */
-private object PopupChrome {
-    val bg = Color(0xE60F1613)
-}
-
-/** 菜单项 id → 本地化文案（未知名回落 View 默认英文 label）。 */
+/** 菜单项 id → 本地化文案。P2-4：未登记 id 走 `term_menu_unknown` 资源钩子
+ *  （View 层新增菜单项时 app 侧回落原文，但翻译侧能看到需补词条 —— 旧版
+ *  `else -> item.label` 静默漏英文，中文用户重理新功能时看到英文）。 */
 @Composable
 private fun localizedMenuLabel(item: TerminalContextMenuItem): String = when (item.id) {
     TerminalContextMenuItem.ID_COPY -> stringResource(R.string.term_copy)
@@ -577,5 +605,5 @@ private fun localizedMenuLabel(item: TerminalContextMenuItem): String = when (it
     TerminalContextMenuItem.ID_CLEAR_SELECTION -> stringResource(R.string.term_clear_selection)
     TerminalContextMenuItem.ID_OPEN_LINK -> stringResource(R.string.term_open_link)
     TerminalContextMenuItem.ID_COPY_LINK -> stringResource(R.string.term_copy_link)
-    else -> item.label
+    else -> stringResource(R.string.term_menu_unknown, item.label)
 }

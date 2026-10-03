@@ -49,9 +49,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * 触控目标 36dp 高（Material 无障碍阈值）；锁存键高亮为 mint 实底深字，
  * SHIFT/ALT 一次性（随下一个特殊键发出即释放）。
+ *
+ * P2-2：函数与文件统一命名 TerminalKeyToolbar（旧版文件叫
+ * TerminalKeyToolbar.kt、函数却叫 KeyToolbar —— 前缀不一致重构时容易看漏）。
  */
 @Composable
-internal fun KeyToolbar(
+internal fun TerminalKeyToolbar(
     ctrlActive: Boolean,
     onCtrlToggle: () -> Unit,
     shiftActive: Boolean,
@@ -164,7 +167,7 @@ private fun ToolbarKey(
             .background(
                 when {
                     highlighted -> KeybarChrome.keyHi
-                    emphasized -> Color(0xFF223729)
+                    emphasized -> KeybarChrome.keyEmph
                     else -> KeybarChrome.key
                 }
             )
@@ -179,7 +182,7 @@ private fun ToolbarKey(
             label,
             fontSize = 13.sp,
             fontFamily = FontFamily.Monospace,
-            color = if (highlighted) Color(0xFF06120D) else KeybarChrome.keyText
+            color = if (highlighted) KeybarChrome.keyTextHi else KeybarChrome.keyText
         )
     }
 }
@@ -221,10 +224,16 @@ private fun Modifier.keyRepeatModifier(label: String, onClick: () -> Unit): Modi
 private const val REPEAT_INITIAL_DELAY_MS = 400L
 private const val REPEAT_PERIOD_MS = 60L
 
-/** 键栏 chrome 调色（终端内容色由 TerminalColorScheme 提供；键栏自身恒深色）。 */
+/** 键栏 chrome 调色（终端内容色由 TerminalColorScheme 提供；键栏自身恒深色）。
+ *
+ * P2-1：与 ConsoleTheme 同值的色锄到单一来源（bg=bar、keyHi=accent、
+ * keyTextHi=TerminalConsoleTheme onPrimary）—— 旧版三处色源各自硬编码，
+ * 改主题要记得同步；键帽/键面文字等键栏特有色保留在此（单一职责归宿）。 */
 internal object KeybarChrome {
-    val bg = Color(0xFF111815)
+    val bg = ConsoleTheme.bar
     val key = Color(0xFF1A2420)
-    val keyHi = Color(0xFF4EE9B0)
+    val keyHi = ConsoleTheme.accent
+    val keyEmph = Color(0xFF223729)
     val keyText = Color(0xFFE8F2ED)
+    val keyTextHi = Color(0xFF06120D)
 }

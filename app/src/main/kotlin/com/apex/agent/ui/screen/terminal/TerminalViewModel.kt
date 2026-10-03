@@ -22,35 +22,45 @@ import com.apex.agent.terminalemulator.encodeFocusEvent
 import com.apex.agent.ui.language.LanguageManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.sample
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 /**
  * 交互式终端 ViewModel（P83 — Terminal 产品化）。
  *
- * 在保留原有三块职责（设置 / 黑白名单 / 依赖安装中心）之上，补齐交互终端控制面：
- *  - **多会话**：列表 + 活跃会话切换；create（Android shell / Ubuntu）/ close。
- *  - **实时屏幕**：styledScreenFlow（颜色 grid 渲染数据，sample 33ms 防洪泛）+
- *    semanticStateFlow（状态/前台 job/prompt 检测）。
- *  - **输入**：文本（IME RAW 写入）、模式感知特殊键（DECCKM 箭头 / bracketed paste）。
- *  - **Resize**：渲染区尺寸 → PTY rows/cols（SIGWINCH）。
- *  - **Ubuntu 生命周期**：安装横幅状态 + ensureReady 入口。
+ * ## P0-1（结构治理）：职责拆分
+ *
+ * 本类此前把多会话生命周期、styled/semantic 收集、输入行缓冲、设置持久化、
+ * 黑白名单、扩展键、Ubuntu 生命周期联动、依赖安装路由、剪贴板通知 9 类职责
+ * 挤在 1193 行里（文件里甚至自注「VM 行数预算纪律」）。现拆为五个协作组件，
+ * VM 只保留**编排与会话生命周期决策**：
+ *
+ *  - [SessionRegistry]：多会话元数据簿（tabs / 活跃 id / backend / title /
+ *    存活修剪 —— P1-1 合并双表）；
+ *  - [TerminalRenderOrchestrator]：活跃会话的 styled/semantic/OSC52 收集
+ *    路由 + 会话快照缓存（P0-2 切换不闪空屏）；
+ *  - [LineMirror]：交互行镜像（黑白名单提交时刻检查的输入侧契约 —— P1-2
+ *    把「什么操作会破坏镜像」收口到一处）；
+ *  - [TerminalSettingsStore]：终端设置 / 扩展键持久化；
+ *  - [CommandPolicyStore]：命令黑白名单持久化 + 门禁判定。
+ *
+ * 保留在 VM 的职责：多会话 create/close/restart 决策、输入的模式感知编码
+ * （DECCKM 箭头 / bracketed paste / xterm 修饰协议）、Ubuntu 生命周期联动、
+ * 依赖安装路由（[EnvironmentProvisioner]）、通知 —— P1-4 类型化为
+ * [TerminalNotice]，VM 在发出时刻决定语义，UI 不再做关键词嗅探。
  *
  * 数据流（Spec §41 事件驱动，非轮询）：
  *   PTY → PtyOutputPump → VT(TerminalCore) → ObservationEngine.styledState →
- *   (sample 33ms) → _renderState → Compose grid。
+ *   (sample 33ms) → renderState → Compose grid。
  *
  * Spec ref: ATR 2.0 Final Spec §41 / §43 + P83 Terminal Finalization。
  */
@@ -64,79 +74,102 @@ class TerminalViewModel @Inject constructor(
     private val lang: LanguageManager
 ) : ViewModel() {
 
+    // ═══════════════ P0-1：协作组件（构造顺序敏感：prefs/registry 先于各 store）═══════════════
+
     private val prefs = context.getSharedPreferences("apex_terminal", Context.MODE_PRIVATE)
 
-    /** 环境依赖安装器（ATR 2.0 — 用新 Runtime API，非旧 TerminalManager）。 */
-    private val provisioner = EnvironmentProvisioner(terminalRuntime, ubuntuLifecycle)
+    /** 多会话元数据簿（tabs/活跃 id/backend/title —— UI 唯一数据源）。 */
+    internal val registry = SessionRegistry(terminalRuntime)
 
-    /** T82: Ubuntu 生命周期状态（安装/引导进度，UI 可订阅）。 */
+    /** 活跃会话渲染收集路由 + 会话快照缓存。 */
+    internal val renderOrchestrator = TerminalRenderOrchestrator(terminalRuntime)
+
+    /** 交互行镜像（黑白名单提交时刻检查；失效语义见 [LineMirror]）。 */
+    private val lineMirror = LineMirror()
+
+    /** 终端设置 / 扩展键持久化。 */
+    private val settingsStore = TerminalSettingsStore(prefs)
+
+    /** 命令黑白名单持久化 + 门禁判定。 */
+    private val policyStore = CommandPolicyStore(prefs)
+
+    /** 环境依赖安装中心（内嵌 ATR 2.0 [EnvironmentProvisioner] —— 用新 Runtime API，非旧 TerminalManager）。 */
+    internal val depCenter = TerminalDepCenter(
+        scope = viewModelScope,
+        prefs = prefs,
+        runtime = terminalRuntime,
+        provisioner = EnvironmentProvisioner(terminalRuntime, ubuntuLifecycle),
+        registry = registry,
+        lang = lang,
+        onSessionsChanged = ::refreshSessions
+    )
+
+    /** T87：命令历史（提交时刻记录；设置抽屉可查看/清空）。 */
+    private val commandHistory =
+        com.apex.agent.ui.screen.terminal.history.TerminalCommandHistory(context)
+
+    // T82: Ubuntu 生命周期状态（安装/引导进度，UI 可订阅）。
     val ubuntuLifecycleState: StateFlow<UbuntuLifecycleCoordinator.LifecycleState> =
         ubuntuLifecycle.stateFlow
 
-    // ═══════════════════════ 交互终端：会话管理 ═══════════════════════
+    // ═══════════════ 会话状态流（委托 registry / orchestrator）═══════════════
 
-    /** 顶部 tab 的会话视图模型。backend 由创建方记录（runtime 快照不含该信息）。 */
-    data class SessionTab(
-        val id: Long,
-        val backendId: String,
-        val runtimeType: String,
-        val state: String,
-        val isAlive: Boolean,
-        val title: String?
-    ) {
-        val isUbuntu: Boolean get() = backendId == "linux-ubuntu"
-    }
+    /** 顶部 tab 的会话列表。 */
+    val sessions: StateFlow<List<SessionTab>> = registry.sessionTabs
 
-    private val _sessions = MutableStateFlow<List<SessionTab>>(emptyList())
-    val sessions: StateFlow<List<SessionTab>> = _sessions.asStateFlow()
-
-    private val _activeSessionId = MutableStateFlow<Long?>(null)
-    val activeSessionId: StateFlow<Long?> = _activeSessionId.asStateFlow()
-
-    /** VM 自己创建的会话的 backend 记录（agent 创建的会话以 "agent" 展示）。
-     *  M2：ConcurrentHashMap —— `ensureDepInstallSession` 在 Dispatchers.IO 里写
-     *  （:sessionBackends[sid]），主线程 refreshSessionsInternal 同时读；
-     *  旧 LinkedHashMap 无 happens-before，存在陈旧读/扩容竞争隐患。 */
-    private val sessionBackends = ConcurrentHashMap<Long, Pair<String, String>>()
-
-    /**
-     * 各会话最近一次由 shell 设置的窗口标题（OSC 0/1/2 —— `PS1` 里的 `\[\e]0;…\a\]`、
-     * vim/tmux 也会设）。
-     *
-     * Termux / JuiceSSH / ConnectBot 都把标题显示在会话标签上：跑 `ssh host` 或
-     * `vim file` 时标签会跟着变，多会话下不用靠猜。此前 `SessionTab.title` 恒为
-     * null —— VT 层早就解析出标题了，只是没人往 UI 上接。
-     * M2：与 sessionBackends 同因，IO 侧存在写路径 → ConcurrentHashMap。
-     */
-    private val sessionTitles = ConcurrentHashMap<Long, String>()
+    /** 活跃会话 id。 */
+    val activeSessionId: StateFlow<Long?> = registry.activeSessionId
 
     /** 活跃会话的 styled 屏（颜色/光标/scrollback；null = 未启动）。 */
-    private val _renderState = MutableStateFlow<TerminalRenderSnapshot?>(null)
-    val renderState: StateFlow<TerminalRenderSnapshot?> = _renderState.asStateFlow()
+    val renderState: StateFlow<TerminalRenderSnapshot?> = renderOrchestrator.renderState
 
     /** 活跃会话的语义状态（会话状态 / 前台 job / prompt）。 */
-    private val _semanticState = MutableStateFlow<TerminalSemanticState?>(null)
-    val semanticState: StateFlow<TerminalSemanticState?> = _semanticState.asStateFlow()
+    val semanticState: StateFlow<TerminalSemanticState?> = renderOrchestrator.semanticState
 
-    /** 终端操作反馈（toast 级消息，渲染在状态条）。 */
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice.asStateFlow()
+    /** 活跃会话最新快照的便捷读（模式感知编码读 DECCKM / bracketed paste 等标志）。 */
+    private val renderSnapshot: TerminalRenderSnapshot?
+        get() = renderOrchestrator.renderState.value
+
+    // ═══════════════ 通知（P1-4 类型化）═══════════════
+
+    /**
+     * 终端操作反馈（toast 级消息，渲染在状态条）。
+     *
+     * P1-4：旧版是裸 `String?`，UI 侧靠 `contains("失败")/contains("error")`
+     * 关键词嗅探决定红/绿配色 —— 文案一改错误样式就静默丢失，中英混合判断
+     * 不可靠。现在 VM 在**发出时刻**决定 [Kind]，UI 只读 kind 选色。
+     */
+    data class TerminalNotice(
+        val text: String,
+        val kind: Kind
+    ) {
+        enum class Kind { INFO, ERROR, FALLBACK }
+    }
+
+    private val _notice = MutableStateFlow<TerminalNotice?>(null)
+    val notice: StateFlow<TerminalNotice?> = _notice.asStateFlow()
 
     fun consumeNotice() { _notice.value = null }
 
-    private var renderJob: Job? = null
-    private var semanticJob: Job? = null
-    private var clipboardJob: Job? = null
-    private var pollJob: Job? = null
-    private var creating = false
+    private fun notifyInfo(resId: Int, vararg args: Any) {
+        _notice.value = TerminalNotice(lang.getString(resId, *args), TerminalNotice.Kind.INFO)
+    }
 
-    /**
-     * 交互行缓冲（黑白名单交互拦截用）：镜像 shell readline 当前行文本。
-     * 仅跟踪「纯字符输入 + 回退删除」两种确定性变更；特殊键（方向/历史召回/
-     * Ctrl 组合）使行状态不可知时清空缓冲，下次回车不检查（宁可漏检不误拦）。
-     * 拦截 = 不写入回车，命令停留在 readline 未提交状态。
-     */
-    private val pendingLine = StringBuilder()
+    private fun notifyError(resId: Int, vararg args: Any) {
+        _notice.value = TerminalNotice(lang.getString(resId, *args), TerminalNotice.Kind.ERROR)
+    }
+
+    /** 降级类（Ubuntu 失败 → 自动切 Android Shell：非错误但值得警示）。 */
+    private fun notifyFallback(resId: Int, vararg args: Any) {
+        _notice.value = TerminalNotice(lang.getString(resId, *args), TerminalNotice.Kind.FALLBACK)
+    }
+
+    /** 非 stringResource 来源的反馈（UbuntuLifecycleCoordinator 直出消息）。 */
+    private fun notifyRaw(text: String, kind: TerminalNotice.Kind) {
+        if (text.isNotBlank()) _notice.value = TerminalNotice(text, kind)
+    }
+
+    // ═══════════════ 交互终端：会话管理 ═══════════════════════
 
     /**
      * T85: Ubuntu 优先默认会话策略的挂起标记 —— 等待环境 READY 期间用户未手工
@@ -149,6 +182,9 @@ class TerminalViewModel @Inject constructor(
     /** 会话创建互斥（UI 手动新建 / READY 自动拉起 / 依赖安装降级共享）。 */
     private val createMutex = Mutex()
 
+    private var pollJob: kotlinx.coroutines.Job? = null
+    private var creating = false
+
     init {
         // Crash recovery (Spec §39): restore persisted sessions on startup.
         viewModelScope.launch {
@@ -157,7 +193,7 @@ class TerminalViewModel @Inject constructor(
                 Log.i("TerminalVM", "Recovered ${recovered.size} sessions from persistence")
             }
             refreshSessionsInternal()
-            if (_sessions.value.none { it.isAlive }) {
+            if (registry.sessionTabs.value.none { it.isAlive }) {
                 // T85: Ubuntu 优先 —— 有完整 Linux 环境绝不默认降级到 Android toybox。
                 // - READY → 直接建 Ubuntu 会话（bash / gcc / python3 真实可用）；
                 // - 未 READY → 挂起等待（ApexApp 启动时已自动预备；这里 join 单飞
@@ -172,24 +208,24 @@ class TerminalViewModel @Inject constructor(
                     // join 自动预备（幂等单飞）。★ 降级兜底（输入失灵根因）：
                     // ensureReady 失败/超时且用户未手工建过会话时，自动拉起
                     // LOCAL 会话，不再停在空屏等用户。
-                    val r = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val r = withContext(Dispatchers.IO) {
                         runCatching { ubuntuLifecycle.ensureReady() }.getOrNull()
                     }
                     // 仅「明确失败」才降级：InProgress（超时续跑）是环境面板的
                     // 正常进行态（进度可见 + 「先用 Android Shell」按钮可达）。
                     val failed = r == null || r is UbuntuLifecycleCoordinator.EnsureResult.Failed
                     if (failed && autoUbuntuSessionPending &&
-                        _sessions.value.none { it.isAlive }
+                        registry.sessionTabs.value.none { it.isAlive }
                     ) {
                         autoUbuntuSessionPending = false
                         val reason = (r as? UbuntuLifecycleCoordinator.EnsureResult.Failed)
                             ?.message?.take(80)
-                        _notice.value = lang.getString(R.string.term_notice_fallback_session, reason ?: "…")
+                        notifyFallback(R.string.term_notice_fallback_session, reason ?: "…")
                         createMutex.withLock { createSessionInternal(backendId = BACKEND_LOCAL) }
                     }
                 }
             } else {
-                _sessions.value.firstOrNull { it.isAlive }?.let { selectSession(it.id) }
+                registry.sessionTabs.value.firstOrNull { it.isAlive }?.let { selectSession(it.id) }
             }
             startSessionPolling()
         }
@@ -200,7 +236,7 @@ class TerminalViewModel @Inject constructor(
             ubuntuLifecycle.stateFlow.collect { st ->
                 if (st.phase == UbuntuLifecycleCoordinator.Phase.READY &&
                     autoUbuntuSessionPending &&
-                    _sessions.value.none { it.isAlive }
+                    registry.sessionTabs.value.none { it.isAlive }
                 ) {
                     autoUbuntuSessionPending = false
                     createMutex.withLock { createSessionInternal(backendId = BACKEND_UBUNTU) }
@@ -209,34 +245,19 @@ class TerminalViewModel @Inject constructor(
         }
     }
 
-    /** 从 runtime 拉取会话列表（状态/存活 + VM 记录的 backend 标签）。 */
+    /** 从 runtime 拉取会话列表（状态/存活 + registry 记录的 backend 标签）。 */
     fun refreshSessions() {
         viewModelScope.launch { refreshSessionsInternal() }
     }
 
     private suspend fun refreshSessionsInternal() {
-        val snap = terminalRuntime.snapshot(TerminalRuntime.SnapshotMode.SESSIONS)
-            .getOrNull() ?: return
-        val alive = snap.sessions.map { s ->
-            val backend = sessionBackends[s.session.id]
-                ?: ("agent" to if (s.session.shell.contains("bash", true) || s.session.shell.contains("proot", true))
-                    "LINUX" else "ANDROID_LOCAL")
-            SessionTab(
-                id = s.session.id,
-                backendId = backend.first,
-                runtimeType = backend.second,
-                state = s.session.state.name,
-                isAlive = s.session.state in ALIVE_STATES,
-                title = sessionTitles[s.session.id]
-            )
+        when (val handoff = registry.refresh()) {
+            SessionRegistry.Handoff.Keep -> Unit
+            is SessionRegistry.Handoff.Select -> activateSession(handoff.id)
+            SessionRegistry.Handoff.Cleared -> activateSession(null)
         }
-        _sessions.value = alive
-        // 活跃会话消失（被 Agent close）→ 切到剩余首个，没有则置空（渲染占位）
-        val active = _activeSessionId.value
-        if (active != null && alive.none { it.id == active }) {
-            val next = alive.firstOrNull { it.isAlive }
-            if (next != null) selectSession(next.id) else _activeSessionId.value = null
-        }
+        // P1-1/P0-2：会话消失时同步修剪快照缓存（防内存累积）。
+        renderOrchestrator.pruneTo(registry.liveIds())
     }
 
     private fun startSessionPolling() {
@@ -256,52 +277,32 @@ class TerminalViewModel @Inject constructor(
         }
     }
 
-    /** 轻量状态刷新（会话状态标签），tab 徽章用。 */
+    /** 切换活跃会话（用户点击 tab / 活跃会话消失后的自动接管）。 */
     fun selectSession(id: Long) {
-        if (_activeSessionId.value == id) return
-        _activeSessionId.value = id
-        // P2（跨会话残留）：交互行缓冲随会话切换清空 —— A 会话敲到一半的命令
-        // 残留在 pendingLine 里，切到 B 后按空回车会拿旧命令做黑白名单检查，
-        // 命中则空回车被拦截并弹指向旧命令的「已拦截」提示。
-        pendingLine.setLength(0)
-        observeActiveSession()
+        if (registry.select(id)) activateSession(id)
     }
 
-    /** 切换 styled/semantic 收集者到当前活跃会话（事件驱动 + sample 防洪泛）。 */
-    private fun observeActiveSession() {
-        val sid = _activeSessionId.value ?: run {
-            renderJob?.cancel(); semanticJob?.cancel(); clipboardJob?.cancel()
-            _renderState.value = null; _semanticState.value = null
-            return
-        }
-        renderJob?.cancel()
-        semanticJob?.cancel()
-        clipboardJob?.cancel()
-        _renderState.value = null
-        _semanticState.value = null
-        renderJob = viewModelScope.launch {
-            // styled 投影只在有收集者时计算（ObservationEngine 背压契约）；
-            // 33ms sample 把 feed 洪泛（cat 大文件 / gradle 日志）折叠到 ~30fps。
-            terminalRuntime.styledScreenFlow(sid)?.sample(33)?.collect { snap ->
-                _renderState.value = snap
-                // 标题变了才回写并刷新 tab（避免每帧触发一次列表重组）
-                val t = snap?.title?.trim().takeUnless { it.isNullOrEmpty() }
-                if (t != null && t != sessionTitles[sid]) {
-                    sessionTitles[sid] = t
-                    refreshSessionsInternal()
-                }
-            }
-        }
-        semanticJob = viewModelScope.launch {
-            terminalRuntime.semanticStateFlow(sid)?.collect { state ->
-                _semanticState.value = state
-            }
-        }
-        // OSC 52 剪贴板（vim/tmux 远程复制）：feed 后 drain 上抛，仅订阅活跃会话（后台引擎侧排队）。
-        clipboardJob = viewModelScope.launch {
-            terminalRuntime.clipboardRequestsFlow(sid)
-                ?.collect { text -> applyOsc52Clipboard(text) }
-        }
+    /**
+     * 会话激活的统一接线：行镜像失效（跨会话残留治理）+ 渲染收集器切换。
+     *
+     * P0-2：[TerminalRenderOrchestrator] 内部用快照缓存播种 —— 切换帧直接
+     * 显示上一已知内容，消灭旧版「切会话闪一帧『终端未启动』占位」。
+     */
+    private fun activateSession(id: Long?) {
+        // P2（跨会话残留）：交互行缓冲随会话切换失效 —— A 会话敲到一半的命令
+        // 残留在镜像里，切到 B 后按空回车会拿旧命令做黑白名单检查，命中则空
+        // 回车被拦截并弹指向旧命令的「已拦截」提示。
+        lineMirror.reset()
+        renderOrchestrator.observe(
+            viewModelScope, id,
+            onSessionTitle = ::onSessionTitle,
+            onOsc52Clipboard = ::applyOsc52Clipboard
+        )
+    }
+
+    /** 渲染快照携带的 OSC 0/1/2 标题 → registry（变化才刷新 tab 列表）。 */
+    private fun onSessionTitle(sid: Long, title: String) {
+        if (registry.recordTitle(sid, title)) refreshSessions()
     }
 
     /** OSC 52 落地：护栏 —— 超长（>1MB）丢弃留痕；写失败静默降级。 */
@@ -360,11 +361,11 @@ class TerminalViewModel @Inject constructor(
             // T84：withContext(IO) —— ensureReady 链含 capability 探测（阻塞
             // proot exec），provisioner/bootstrap 已内嵌 IO，此处兜住协调器自身
             // 的 probeFn/repairFn 端口（Main.immediate 调用曾直接吃满主线程）。
-            val r = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val r = withContext(Dispatchers.IO) {
                 ubuntuLifecycle.ensureReady()
             }
             if (r is UbuntuLifecycleCoordinator.EnsureResult.Failed) {
-                _notice.value = lang.getString(R.string.term_notice_ubuntu_unavailable, r.message.take(120))
+                notifyError(R.string.term_notice_ubuntu_unavailable, r.message.take(120))
                 return
             }
         }
@@ -376,14 +377,14 @@ class TerminalViewModel @Inject constructor(
         // T87：LOCAL 会话注入 mksh profile（可写 HOME + $ENV rc + TERM）——
         // Shell 模式补 user@host:cwd 提示符、历史记录、cmds/help 命令发现。
         val localEnv = if (backendId == BACKEND_LOCAL) ensureLocalShellProfile() else emptyMap()
-        val created = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val created = withContext(Dispatchers.IO) {
             terminalRuntime.create(backendId = backendId, env = localEnv)
         }
         val result = created.getOrElse { e ->
-            _notice.value = lang.getString(R.string.term_notice_create_failed, e.message?.take(120) ?: "")
+            notifyError(R.string.term_notice_create_failed, e.message?.take(120) ?: "")
             return
         }
-        sessionBackends[result.sessionId] = result.backendId to result.runtimeType
+        registry.recordBackend(result.sessionId, result.backendId, result.runtimeType)
         refreshSessionsInternal()
         selectSession(result.sessionId)
     }
@@ -393,55 +394,54 @@ class TerminalViewModel @Inject constructor(
             // T92：close 移入 IO —— native close 含 HUP→50ms→TERM→100ms→KILL→150ms
             // 串行 sleep + 全局 session mutex，主线程执行会掉帧（create 同型问题已修，
             // 此路径漏修）。
-            withContext(kotlinx.coroutines.Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 terminalRuntime.close(id, force = true)
             }
-            sessionBackends.remove(id)
-            sessionTitles.remove(id)
+            // P1-1：registry/快照缓存统一驱逐（替代旧 sessionBackends +
+            // sessionTitles 两处 remove；快照缓存防止已关会话的最后一帧复播）。
+            registry.evict(id)
+            renderOrchestrator.evict(id)
             // 关闭的是当前会话时同步清交互行缓冲（语义同 selectSession 的清理）
-            if (_activeSessionId.value == id) {
-                pendingLine.setLength(0)
+            if (registry.activeSessionId.value == id) {
+                lineMirror.reset()
             }
             refreshSessionsInternal()
-            if (_activeSessionId.value == id) {
-                _sessions.value.firstOrNull { it.isAlive }?.let { selectSession(it.id) }
+            // close 异步生效的竞态兜底（快照里会话还在）：显式切走
+            if (registry.activeSessionId.value == id) {
+                registry.sessionTabs.value.firstOrNull { it.isAlive }?.let { selectSession(it.id) }
             }
         }
     }
 
     // ═══════════════════════ 交互终端：输入 / resize ═══════════════════════
 
-    /** 写入用户文本（IME 提交 / 硬件键盘字符），RAW 直通 PTY。
+    /**
+     * 写入用户文本（IME 提交 / 硬件键盘字符），RAW 直通 PTY。
      *
      * 回车（IME 以 \r 文本下发，:terminal-view 已把 \n 归一为 \r）视为行提交：
      * 命中黑白名单 → 拦截整个写入（含回车），命令不执行。
+     * 行镜像语义（P1-2）：[LineMirror.feedForSubmit] 无换行即镜像追加；含换行
+     * 返回候选命令交门禁检查 —— 拦截时镜像原状保留，放行时 [LineMirror.commitSubmit]。
      */
     fun sendInput(text: String) {
         // 旧实现是无提示的 `?: return`：会话没了的情况下用户敲半天没反应还以为键盘坏了，
         // 状态条也不给任何线索。这里给出明确反馈。
-        val sid = _activeSessionId.value
+        val sid = registry.activeSessionId.value
         if (sid == null) {
-            _notice.value = lang.getString(R.string.term_notice_no_session_input)
+            notifyInfo(R.string.term_notice_no_session_input)
             return
         }
         if (text.isEmpty()) return
 
-        val newlineIdx = text.indexOfFirst { it == '\r' || it == '\n' }
-        if (newlineIdx >= 0) {
-            val before = text.substring(0, newlineIdx)
-            val candidate = (pendingLine.toString() + before).trim()
-            if (candidate.isNotBlank() && !isCommandAllowed(candidate)) {
-                _notice.value = lang.getString(R.string.term_notice_blocked, candidate.take(40))
-                return // 不写入（含回车）—— readline 行保持未提交；缓冲保留继续同步追加
+        val candidate = lineMirror.feedForSubmit(text)
+        if (candidate != null) {
+            if (candidate.isNotBlank() && !policyStore.isCommandAllowed(candidate)) {
+                notifyError(R.string.term_notice_blocked, candidate.take(40))
+                return // 不写入（含回车）—— readline 行保持未提交；镜像保留继续同步追加
             }
             // T87：提交时刻记入历史（通过门禁的命令才有资格入史）
             if (candidate.isNotBlank()) commandHistory.record(candidate)
-            // 放行：行缓冲重置，回车后的剩余字符属于下一行缓冲
-            pendingLine.setLength(0)
-            val rest = text.substring(newlineIdx + 1)
-            if (rest.isNotEmpty()) pendingLine.append(rest)
-        } else {
-            pendingLine.append(text)
+            lineMirror.commitSubmit(text)
         }
 
         viewModelScope.launch {
@@ -454,10 +454,10 @@ class TerminalViewModel @Inject constructor(
                     val msg = e.message ?: ""
                     val dead = msg.contains("WriteFailed") || msg.contains("SessionNotFound") ||
                         msg.contains("SessionClosed") || msg.contains("session closed")
-                    _notice.value = if (dead) {
-                        lang.getString(R.string.term_notice_session_dead)
+                    if (dead) {
+                        notifyError(R.string.term_notice_session_dead)
                     } else {
-                        lang.getString(R.string.term_notice_input_failed, msg.take(80))
+                        notifyError(R.string.term_notice_input_failed, msg.take(80))
                     }
                 }
         }
@@ -470,8 +470,8 @@ class TerminalViewModel @Inject constructor(
      * "agent"）按 runtimeType 映射回真实 backendId（LINUX → Ubuntu，否则 LOCAL）。
      */
     fun restartActiveSession() {
-        val active = _activeSessionId.value ?: return
-        val tab = _sessions.value.firstOrNull { it.id == active } ?: return
+        val active = registry.activeSessionId.value ?: return
+        val tab = registry.sessionTabs.value.firstOrNull { it.id == active } ?: return
         val backend = when {
             tab.backendId == BACKEND_UBUNTU || tab.backendId == BACKEND_LOCAL -> tab.backendId
             tab.runtimeType == "LINUX" -> BACKEND_UBUNTU
@@ -479,12 +479,12 @@ class TerminalViewModel @Inject constructor(
         }
         viewModelScope.launch {
             // T92：close 移入 IO（同 closeSession —— 主线程串行 sleep 掉帧）。
-            withContext(kotlinx.coroutines.Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 terminalRuntime.close(active, force = true)
             }
-            sessionBackends.remove(active)
-            sessionTitles.remove(active)
-            if (_activeSessionId.value == active) pendingLine.setLength(0)
+            registry.evict(active)
+            renderOrchestrator.evict(active)
+            if (registry.activeSessionId.value == active) lineMirror.reset()
             refreshSessionsInternal()
             createMutex.withLock { createSessionInternal(backend) }
         }
@@ -494,8 +494,8 @@ class TerminalViewModel @Inject constructor(
      * 发送特殊键：箭头按 DECCKM 编码（ESC O x / ESC [ x），其余经 TerminalKey
      *（InputManager 映射，模式无关）。粘贴按 bracketed-paste 包裹。
      *
-     * ENTER = 行提交（黑白名单检查，拦截则不写入）；BACKSPACE = 行缓冲退格；
-     * 其余特殊键（方向/历史/TAB…）行状态不可知 → 清空行缓冲（下次回车不检查）。
+     * ENTER = 行提交（黑白名单检查，拦截则不写入）；BACKSPACE = 行镜像退格；
+     * 其余特殊键（方向/历史/TAB…）行状态不可知 → 行镜像失效（下次回车不检查）。
      *
      * T88（3）：[mods] 为 xterm 修饰位掩码（KeyEventMapping.MOD_* / emulator
      * KeyModifiers 同值）——非零时走 [encodeKeyWithMods] 完整修饰协议
@@ -503,21 +503,21 @@ class TerminalViewModel @Inject constructor(
      * 保证既有单参调用方/函数引用完全兼容）。
      */
     fun sendKey(key: TerminalKey, mods: Int = 0) {
-        val sid = _activeSessionId.value ?: return
+        val sid = registry.activeSessionId.value ?: return
         viewModelScope.launch {
             when (key) {
                 TerminalKey.ENTER -> {
-                    val candidate = pendingLine.toString().trim()
-                    if (candidate.isNotBlank() && !isCommandAllowed(candidate)) {
-                        _notice.value = lang.getString(R.string.term_notice_blocked, candidate.take(40))
+                    val candidate = lineMirror.toString().trim()
+                    if (candidate.isNotBlank() && !policyStore.isCommandAllowed(candidate)) {
+                        notifyError(R.string.term_notice_blocked, candidate.take(40))
                         return@launch
                     }
                     // T87：提交时刻记入历史
                     if (candidate.isNotBlank()) commandHistory.record(candidate)
-                    pendingLine.setLength(0)
+                    lineMirror.reset()
                 }
-                TerminalKey.BACKSPACE -> if (pendingLine.isNotEmpty()) pendingLine.setLength(pendingLine.length - 1)
-                else -> pendingLine.setLength(0)
+                TerminalKey.BACKSPACE -> lineMirror.backspace()
+                else -> lineMirror.reset()
             }
             if (mods != 0) {
                 val bytes = encodeKeyWithMods(key, mods)
@@ -533,7 +533,7 @@ class TerminalViewModel @Inject constructor(
                 key == TerminalKey.ARROW_LEFT || key == TerminalKey.ARROW_RIGHT
             ) {
                 val bytes = KeySequenceEncoder.encodeKey(
-                    key, _renderState.value?.applicationCursor ?: false
+                    key, renderSnapshot?.applicationCursor ?: false
                 )
                 terminalRuntime.write(
                     sid, InputOwner.USER, TerminalRuntime.WriteKind.RAW,
@@ -576,8 +576,8 @@ class TerminalViewModel @Inject constructor(
         }
         if (keyCode == 0) return null
         val modes = KeyEventMapping.KeyModes(
-            applicationCursor = _renderState.value?.applicationCursor ?: false,
-            applicationKeypad = _renderState.value?.applicationKeypad ?: false,
+            applicationCursor = renderSnapshot?.applicationCursor ?: false,
+            applicationKeypad = renderSnapshot?.applicationKeypad ?: false,
             numLock = true
         )
         return KeyEventMapping.encode(keyCode, mods, modes)
@@ -585,12 +585,12 @@ class TerminalViewModel @Inject constructor(
 
     /** Ctrl+字母（工具栏 CTRL 锁存 / 硬件 Ctrl 组合）。
      *
-     * Ctrl+C / Ctrl+U 等会终止/清除 readline 当前行 → 行缓冲同步清空。
+     * Ctrl+C / Ctrl+U 等会终止/清除 readline 当前行 → 行镜像失效。
      */
     fun sendControlChar(ch: Char) {
-        val sid = _activeSessionId.value ?: return
+        val sid = registry.activeSessionId.value ?: return
         val bytes = KeySequenceEncoder.controlByte(ch) ?: return
-        pendingLine.setLength(0)
+        lineMirror.reset()
         viewModelScope.launch {
             terminalRuntime.write(
                 sid, InputOwner.USER, TerminalRuntime.WriteKind.RAW,
@@ -602,20 +602,20 @@ class TerminalViewModel @Inject constructor(
     /** 粘贴（bracketed-paste 感知）。
      *
      * 首行命令命中黑白名单 → 拦截整次粘贴（bracketed-paste OFF 时粘贴即执行，
-     * 必须拦在写入前）；首行检查放行后行缓冲清空（多行粘贴行状态不可知）。
+     * 必须拦在写入前）；首行检查放行后行镜像失效（多行粘贴行状态不可知）。
      */
     fun pasteText(text: String) {
-        val sid = _activeSessionId.value ?: return
+        val sid = registry.activeSessionId.value ?: return
         if (text.isEmpty()) return
         val firstLine = text.lineSequence().firstOrNull()?.trim() ?: ""
-        if (firstLine.isNotBlank() && !isCommandAllowed(firstLine)) {
-            _notice.value = lang.getString(R.string.term_notice_paste_blocked, firstLine.take(40))
+        if (firstLine.isNotBlank() && !policyStore.isCommandAllowed(firstLine)) {
+            notifyError(R.string.term_notice_paste_blocked, firstLine.take(40))
             return
         }
-        pendingLine.setLength(0)
+        lineMirror.reset()
         viewModelScope.launch {
             val bytes = KeySequenceEncoder.encodePaste(
-                text, _renderState.value?.bracketedPaste ?: false
+                text, renderSnapshot?.bracketedPaste ?: false
             )
             // P1（CJK 乱码）：bytes 直通 —— 旧实现把 UTF-8 字节经 ISO-8859-1 转
             // String 再按 UTF-8 重编码（Runtime 侧 InputManager 按 UTF-8 写 PTY），
@@ -631,7 +631,7 @@ class TerminalViewModel @Inject constructor(
 
     /** 视图尺寸变化 → PTY resize（SIGWINCH + VT 同步）。 */
     fun resizeTerminal(rows: Int, cols: Int) {
-        val sid = _activeSessionId.value ?: return
+        val sid = registry.activeSessionId.value ?: return
         if (rows < 2 || cols < 4) return
         viewModelScope.launch {
             terminalRuntime.resize(sid, rows, cols)
@@ -647,28 +647,27 @@ class TerminalViewModel @Inject constructor(
      * F1-F12、小键盘（DECKPAM 感知）、Shift+Tab、Alt+字符（meta 化）。
      * 无映射（返回 null）时 UI 放行给 IME/系统。
      *
-     * 行缓冲语义与 [sendKey] 一致：ENTER=提交检查、BACKSPACE=退格、其余清空。
+     * 行镜像语义与 [sendKey] 一致：ENTER=提交检查、DEL=退格、其余失效。
      */
     fun sendHardwareKey(keyCode: Int, mods: Int, unicodeChar: Int = 0) {
-        val sid = _activeSessionId.value ?: return
-        val render = _renderState.value
+        val sid = registry.activeSessionId.value ?: return
         val modes = KeyEventMapping.KeyModes(
-            applicationCursor = render?.applicationCursor ?: false,
-            applicationKeypad = render?.applicationKeypad ?: false,
+            applicationCursor = renderSnapshot?.applicationCursor ?: false,
+            applicationKeypad = renderSnapshot?.applicationKeypad ?: false,
             numLock = true
         )
         val bytes = KeyEventMapping.encode(keyCode, mods, modes, unicodeChar) ?: return
         when (keyCode) {
             KeyEventMapping.KEYCODE_ENTER -> {
-                val candidate = pendingLine.toString().trim()
-                if (candidate.isNotBlank() && !isCommandAllowed(candidate)) {
-                    _notice.value = lang.getString(R.string.term_notice_blocked, candidate.take(40))
+                val candidate = lineMirror.toString().trim()
+                if (candidate.isNotBlank() && !policyStore.isCommandAllowed(candidate)) {
+                    notifyError(R.string.term_notice_blocked, candidate.take(40))
                     return
                 }
-                pendingLine.setLength(0)
+                lineMirror.reset()
             }
-            KeyEventMapping.KEYCODE_DEL -> if (pendingLine.isNotEmpty()) pendingLine.setLength(pendingLine.length - 1)
-            else -> pendingLine.setLength(0)
+            KeyEventMapping.KEYCODE_DEL -> lineMirror.backspace()
+            else -> lineMirror.reset()
         }
         viewModelScope.launch {
             terminalRuntime.write(
@@ -685,8 +684,8 @@ class TerminalViewModel @Inject constructor(
      * 坐标 1-based（xterm 习惯）；未开启跟踪时编码器返回 null → 静默忽略。
      */
     fun sendMouseEvent(type: TerminalMouseEventType, button: Int, mods: Int, col: Int, row: Int) {
-        val sid = _activeSessionId.value ?: return
-        val mode = _renderState.value?.mouseMode ?: return
+        val sid = registry.activeSessionId.value ?: return
+        val mode = renderSnapshot?.mouseMode ?: return
         val bytes = MouseEncoder.encode(type, button, mods, col, row, mode) ?: return
         viewModelScope.launch {
             terminalRuntime.write(
@@ -703,8 +702,8 @@ class TerminalViewModel @Inject constructor(
      * @return true = 已编码进 PTY（UI 不要再滚视口）
      */
     fun sendWheel(up: Boolean): Boolean {
-        val sid = _activeSessionId.value ?: return false
-        val render = _renderState.value ?: return false
+        val sid = registry.activeSessionId.value ?: return false
+        val render = renderSnapshot ?: return false
         val bytes = when {
             render.mouseMode.enabled -> MouseEncoder.encode(
                 if (up) TerminalMouseEventType.WHEEL_UP else TerminalMouseEventType.WHEEL_DOWN,
@@ -727,8 +726,8 @@ class TerminalViewModel @Inject constructor(
      * vim FocusGained/FocusLost、tmux focus-events 依赖此序列。
      */
     fun notifyTerminalFocus(gained: Boolean) {
-        val sid = _activeSessionId.value ?: return
-        val mode = _renderState.value?.focusMode ?: return
+        val sid = registry.activeSessionId.value ?: return
+        val mode = renderSnapshot?.focusMode ?: return
         val bytes = encodeFocusEvent(gained, mode) ?: return
         viewModelScope.launch {
             terminalRuntime.write(
@@ -744,9 +743,9 @@ class TerminalViewModel @Inject constructor(
     fun installUbuntu() {
         viewModelScope.launch {
             // T84：IO —— 完整 rootfs（~300MB+ 档，解压分钟级）绝不能压 Main。
-            val r = withContext(kotlinx.coroutines.Dispatchers.IO) { ubuntuLifecycle.ensureReady() }
+            val r = withContext(Dispatchers.IO) { ubuntuLifecycle.ensureReady() }
             if (r is UbuntuLifecycleCoordinator.EnsureResult.Failed) {
-                _notice.value = lang.getString(R.string.term_notice_unpack_failed, r.message.take(160))
+                notifyError(R.string.term_notice_unpack_failed, r.message.take(160))
             }
         }
     }
@@ -755,7 +754,7 @@ class TerminalViewModel @Inject constructor(
     fun cancelUbuntuInstall() {
         viewModelScope.launch {
             val r = ubuntuLifecycle.cancelInstall()
-            if (!r.cancelled) _notice.value = r.message
+            if (!r.cancelled) notifyRaw(r.message, TerminalNotice.Kind.INFO)
         }
     }
 
@@ -763,9 +762,9 @@ class TerminalViewModel @Inject constructor(
     fun repairUbuntu() {
         viewModelScope.launch {
             // T84：IO —— repair 链是文件/子进程操作。
-            val r = withContext(kotlinx.coroutines.Dispatchers.IO) { ubuntuLifecycle.repair() }
-            _notice.value = if (r.verifiedHealthy) lang.getString(R.string.term_notice_repair_ok)
-            else lang.getString(R.string.term_notice_repair_unresolved, r.detail ?: r.actions.joinToString().take(120))
+            val r = withContext(Dispatchers.IO) { ubuntuLifecycle.repair() }
+            if (r.verifiedHealthy) notifyInfo(R.string.term_notice_repair_ok)
+            else notifyError(R.string.term_notice_repair_unresolved, r.detail ?: r.actions.joinToString().take(120))
         }
     }
 
@@ -773,8 +772,8 @@ class TerminalViewModel @Inject constructor(
     fun removeUbuntu() {
         viewModelScope.launch {
             // T84：IO —— 删除 1GB+ 版本目录是重 IO。
-            val r = withContext(kotlinx.coroutines.Dispatchers.IO) { ubuntuLifecycle.removeRootfs() }
-            _notice.value = r.message
+            val r = withContext(Dispatchers.IO) { ubuntuLifecycle.removeRootfs() }
+            notifyRaw(r.message, TerminalNotice.Kind.INFO)
             if (r.removed) refreshRootfsSize()
         }
     }
@@ -816,8 +815,68 @@ class TerminalViewModel @Inject constructor(
         }
     }
 
-    // ═══ 终端设置 ═══
-    // T87：配色方案状态（TerminalColorSchemeSettings 持久化 + 热切换）。
+    // ═══ 终端设置（P0-1：持久化与状态在 TerminalSettingsStore，VM 只委托）═══
+
+    data class TerminalSettings(
+        val fontSize: Int = 13,
+        val monochrome: Boolean = false,
+        /** 键盘辅助行（ESC/TAB/CTRL/箭头…）显隐 —— 小屏手机可隐藏换取显示区。 */
+        val showKeybar: Boolean = true,
+        /**
+         * 响铃（BEL 0x07）时振动一下 —— Termux/ConnectBot 的常规反馈，
+         * tab 补全失败、Ctrl+G、命令报错都会发 BEL。默认开。
+         */
+        val vibrateOnBell: Boolean = true,
+        /**
+         * 终端页保持屏幕常亮 —— 看长任务输出（编译 / apt / 训练日志）时不会被息屏打断。
+         * Termux 默认持有 wakelock，此项对齐该行为（默认关，交用户选择）。
+         */
+        val keepScreenOn: Boolean = false
+    ) {
+        /** 字号合法区间（双指捏合缩放也走这个钳制）。 */
+        companion object {
+            const val MIN_FONT_SIZE = 8
+            const val MAX_FONT_SIZE = 24
+        }
+    }
+
+    val settings: StateFlow<TerminalSettings> = settingsStore.settings
+
+    fun updateSettings(block: TerminalSettings.() -> TerminalSettings) =
+        settingsStore.update(block)
+
+    /** 字号调整（钳制在 [TerminalSettings.MIN_FONT_SIZE]..[TerminalSettings.MAX_FONT_SIZE]）。 */
+    fun setFontSize(size: Int) {
+        val clamped = size.coerceIn(TerminalSettings.MIN_FONT_SIZE, TerminalSettings.MAX_FONT_SIZE)
+        if (clamped == settingsStore.settings.value.fontSize) return
+        settingsStore.update { copy(fontSize = clamped) }
+    }
+
+    // ═══ T87：命令历史（委托 TerminalCommandHistory）═══
+
+    /** 历史（最新在前；Termux history 的可视化等价物）。 */
+    val commandHistoryEntries: StateFlow<List<String>> = commandHistory.entries
+
+    /** 清空历史（设置抽屉「清空」确认后调用）。 */
+    fun clearCommandHistory() = commandHistory.clear()
+
+    // ═══ T87：扩展键（用户自定义宏行 —— Termux extra-keys 等价物）═══
+    // 持久化读写缝拆在 TerminalExtraKeysStore.kt（守 1200 行预算）。
+
+    /** 扩展键（用户宏；空 = 不渲染扩展行）。 */
+    val extraKeys: StateFlow<List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>> =
+        settingsStore.extraKeys
+
+    /** 追加一个扩展键（spec 形如 `标签=cmd:apt-get update`；非法 spec 静默拒绝）。 */
+    fun addExtraKey(spec: String) = settingsStore.addExtraKey(spec)
+
+    /** 移除指定标签的扩展键。 */
+    fun removeExtraKey(label: String) = settingsStore.removeExtraKey(label)
+
+    /** 重置为默认布局（设置抽屉「恢复默认」）。 */
+    fun resetExtraKeys() = settingsStore.resetExtraKeys()
+
+    // ═══ 终端配色（T87：TerminalColorSchemeSettings 持久化 + 热切换）═══
     // 零方案代码进 VM（SRP）：id/boldAsBright 透传给渲染树。
     private val schemeSettings = com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeSettings(
         com.apex.agent.ui.screen.terminal.scheme.TerminalColorSchemeSettings.PrefsStore(
@@ -855,320 +914,35 @@ class TerminalViewModel @Inject constructor(
         }.getOrDefault(false)
     }
 
-    data class TerminalSettings(
-        val fontSize: Int = 13,
-        val monochrome: Boolean = false,
-        /** 键盘辅助行（ESC/TAB/CTRL/箭头…）显隐 —— 小屏手机可隐藏换取显示区。 */
-        val showKeybar: Boolean = true,
-        /**
-         * 响铃（BEL 0x07）时振动一下 —— Termux/ConnectBot 的常规反馈，
-         * tab 补全失败、Ctrl+G、命令报错都会发 BEL。默认开。
-         */
-        val vibrateOnBell: Boolean = true,
-        /**
-         * 终端页保持屏幕常亮 —— 看长任务输出（编译 / apt / 训练日志）时不会被息屏打断。
-         * Termux 默认持有 wakelock，此项对齐该行为（默认关，交用户选择）。
-         */
-        val keepScreenOn: Boolean = false
-    ) {
-        /** 字号合法区间（双指捏合缩放也走这个钳制）。 */
-        companion object {
-            const val MIN_FONT_SIZE = 8
-            const val MAX_FONT_SIZE = 24
-        }
-    }
+    // ═══ 黑名单 / 白名单命令（P0-1：持久化与门禁在 CommandPolicyStore）═══
 
-    private val _settings = MutableStateFlow(loadSettings())
-    val settings: StateFlow<TerminalSettings> = _settings.asStateFlow()
+    val blacklist: StateFlow<Set<String>> = policyStore.blacklist
 
-    // ═══ T87：命令历史（提交时刻记录；设置抽屉可查看/清空）═══
-    private val commandHistory =
-        com.apex.agent.ui.screen.terminal.history.TerminalCommandHistory(context)
+    val whitelist: StateFlow<Set<String>> = policyStore.whitelist
 
-    /** 历史（最新在前；Termux history 的可视化等价物）。 */
-    val commandHistoryEntries: StateFlow<List<String>> = commandHistory.entries
+    fun addBlacklist(cmd: String) = policyStore.addBlacklist(cmd)
+    fun removeBlacklist(cmd: String) = policyStore.removeBlacklist(cmd)
+    fun addWhitelist(cmd: String) = policyStore.addWhitelist(cmd)
+    fun removeWhitelist(cmd: String) = policyStore.removeWhitelist(cmd)
 
-    /** 清空历史（设置抽屉「清空」确认后调用）。 */
-    fun clearCommandHistory() = commandHistory.clear()
+    /** 交互输入的命令头检查（语义详见 [CommandPolicyStore.isCommandAllowed]）。 */
+    fun isCommandAllowed(command: String): Boolean = policyStore.isCommandAllowed(command)
 
-    // ═══ T87：扩展键（用户自定义宏行 —— Termux extra-keys 等价物）═══
-    // 持久化读写缝拆在 TerminalExtraKeysStore.kt（守 1200 行预算）。
-    private val _extraKeys = MutableStateFlow(loadExtraKeys(prefs))
+    // ═══ 环境依赖下载中心（P0-1：编排在 [TerminalDepCenter]，VM 只入口委托）═══
 
-    /** 扩展键（用户宏；空 = 不渲染扩展行）。 */
-    val extraKeys: StateFlow<List<com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.ExtraKey>> =
-        _extraKeys.asStateFlow()
+    val depItems: List<TerminalDepCenter.DepItem> = depCenter.depItems
 
-    /** 追加一个扩展键（spec 形如 `标签=cmd:apt-get update`；非法 spec 静默拒绝）。 */
-    fun addExtraKey(spec: String) {
-        val key = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.parseKey(spec.trim())
-            ?: return
-        val next = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.appendKey(
-            listOf(_extraKeys.value), key
-        ).flatten()
-        _extraKeys.value = next
-        persistExtraKeys(prefs, next)
-    }
+    val useMirror: StateFlow<Boolean> = depCenter.useMirror
 
-    /** 移除指定标签的扩展键。 */
-    fun removeExtraKey(label: String) {
-        val next = _extraKeys.value.filterNot { it.label == label }
-        _extraKeys.value = next
-        persistExtraKeys(prefs, next)
-    }
+    fun setUseMirror(on: Boolean) = depCenter.setUseMirror(on)
 
-    /** 重置为默认布局（设置抽屉「恢复默认」）。 */
-    fun resetExtraKeys() {
-        val next = com.apex.agent.ui.screen.terminal.extrakeys.ExtraKeysConfig.DEFAULT_LAYOUT.flatten()
-        _extraKeys.value = next
-        persistExtraKeys(prefs, next)
-    }
+    val install: StateFlow<TerminalDepCenter.InstallState> = depCenter.install
 
-    fun updateSettings(block: TerminalSettings.() -> TerminalSettings) {
-        val next = _settings.value.block().let {
-            // v1.4.4 UX 审查：设置抽屉旧上限 32 与捏合钳制 24 不一致 —— 用户调到 25..32 后
-            // 一次缩放即 8 级跳变；抽屉上限已统一为常量，持久化前再钳制兑底
-            // （防旧版本已落盘的越界值继续生效）。
-            it.copy(fontSize = it.fontSize.coerceIn(TerminalSettings.MIN_FONT_SIZE, TerminalSettings.MAX_FONT_SIZE))
-        }
-        prefs.edit()
-            .putInt("term_font_size", next.fontSize)
-            .putBoolean("term_monochrome", next.monochrome)
-            .putBoolean("term_show_keybar", next.showKeybar)
-            .putBoolean("term_vibrate_bell", next.vibrateOnBell)
-            .putBoolean("term_keep_screen_on", next.keepScreenOn)
-            .apply()
-        _settings.value = next
-    }
+    fun installDep(item: TerminalDepCenter.DepItem) = depCenter.installDep(item)
 
-    private fun loadSettings() = TerminalSettings(
-        fontSize = prefs.getInt("term_font_size", 13),
-        monochrome = prefs.getBoolean("term_monochrome", false),
-        showKeybar = prefs.getBoolean("term_show_keybar", true),
-        vibrateOnBell = prefs.getBoolean("term_vibrate_bell", true),
-        keepScreenOn = prefs.getBoolean("term_keep_screen_on", false)
-    )
+    fun installAll(onProgress: (Int, Int) -> Unit = { _, _ -> }) = depCenter.installAll(onProgress)
 
-    /** 字号调整（钳制在 [TerminalSettings.MIN_FONT_SIZE]..[TerminalSettings.MAX_FONT_SIZE]）。 */
-    fun setFontSize(size: Int) {
-        val clamped = size.coerceIn(TerminalSettings.MIN_FONT_SIZE, TerminalSettings.MAX_FONT_SIZE)
-        if (clamped == _settings.value.fontSize) return
-        updateSettings { copy(fontSize = clamped) }
-    }
-
-    // ═══ 黑名单 / 白名单命令 ═══
-    private val _blacklist = MutableStateFlow(loadSet("cmd_blacklist"))
-    val blacklist: StateFlow<Set<String>> = _blacklist.asStateFlow()
-
-    private val _whitelist = MutableStateFlow(loadSet("cmd_whitelist"))
-    val whitelist: StateFlow<Set<String>> = _whitelist.asStateFlow()
-
-    fun addBlacklist(cmd: String) = editSet("cmd_blacklist", _blacklist) { add(normalize(cmd)) }
-    fun removeBlacklist(cmd: String) = editSet("cmd_blacklist", _blacklist) { remove(normalize(cmd)) }
-    fun addWhitelist(cmd: String) = editSet("cmd_whitelist", _whitelist) { add(normalize(cmd)) }
-    fun removeWhitelist(cmd: String) = editSet("cmd_whitelist", _whitelist) { remove(normalize(cmd)) }
-
-    /**
-     * 交互输入的命令头检查（与 TerminalModule 动态策略同源的 prefs 数据，
-     * 但仅消费用户名单；交互路径的内置默认危险命令拦截由用户自行把条目
-     * 加入黑名单完成 —— 自己敲的命令接 Termux 哲学：不过滤）。
-     *
-     * 匹配 = 命令头 token 精确等值（与 CommandPolicy 的 token 语义一致，
-     * 消除旧 startsWith 前缀误拦：“rm” 不再误拦 “rmdir...” 的头 token）。
-     */
-    fun isCommandAllowed(command: String): Boolean {
-        val head = command.trim().substringBefore(' ').lowercase()
-        if (head.isEmpty()) return true
-        if (_blacklist.value.any { head == it }) return false
-        val wl = _whitelist.value
-        if (wl.isNotEmpty()) {
-            return head in wl
-        }
-        return true
-    }
-
-    private fun normalize(cmd: String) = cmd.trim().lowercase().substringBefore(' ')
-
-    private fun loadSet(key: String): Set<String> =
-        prefs.getStringSet(key, emptySet()) ?: emptySet()
-
-    private fun editSet(key: String, flow: MutableStateFlow<Set<String>>, mutate: MutableSet<String>.() -> Unit) {
-        val next = flow.value.toMutableSet().apply(mutate)
-        prefs.edit().putStringSet(key, next).apply()
-        flow.value = next
-    }
-
-    // ═══ 环境依赖下载中心（保留原有职责）═══
-    data class DepItem(
-        val id: String,
-        val name: String,
-        val group: DepGroup,
-        val installOfficial: String,
-        val installMirror: String,
-        val checkCommand: String
-    )
-
-    enum class DepGroup { GENERAL, ANDROID }
-
-    val depItems: List<DepItem> =
-        com.apex.agent.environment.DepCatalog.ALL.map {
-            DepItem(it.id, it.name, DepGroup.valueOf(it.group.name), it.installOfficial, it.installMirror, it.checkCommand)
-        }
-
-    private val _useMirror = MutableStateFlow(prefs.getBoolean("dep_use_mirror", true))
-    val useMirror: StateFlow<Boolean> = _useMirror.asStateFlow()
-
-    fun setUseMirror(on: Boolean) {
-        prefs.edit().putBoolean("dep_use_mirror", on).apply()
-        _useMirror.value = on
-        provisioner.setUseMirror(on)
-    }
-
-    /** 依赖安装运行态（runningId = 正在安装的条目 id；log = 安装输出滚动窗）。 */
-    data class InstallState(
-        val runningId: String? = null,
-        val log: String = ""
-    )
-
-    private val _install = MutableStateFlow(InstallState())
-    val install: StateFlow<InstallState> = _install.asStateFlow()
-
-    /** M2：ensureDepInstallSession 在 IO 线程写、主线程读（sendInput 门禁）——
-     *  跨线程可见性用 @Volatile 保证（旧版普通 var 可能读到陈旧值）。 */
-    @Volatile
-    private var depSessionId: Long? = null
-
-    fun installDep(item: DepItem) {
-        val useMirror = _useMirror.value
-        val cmd = if (useMirror) item.installMirror else item.installOfficial
-        runCommand(item.id, cmd)
-    }
-
-    fun installAll(onProgress: (Int, Int) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            _install.update { it.copy(runningId = "__all__", log = it.log + lang.getString(R.string.term_notice_install_all_start, _useMirror.value.toString())) }
-            // T92：try/finally 兑底 —— 旧行为循环中任一异常（ensureReady 抛出等）
-            // 杀死协程后 runningId 永不复位 → 环境中心全部安装按钮灰死到 VM 销毁。
-            try {
-                depItems.forEachIndexed { index, item ->
-                    onProgress(index, depItems.size)
-                    val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
-                    execAndAppend(item.id, cmd)
-                }
-                _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_install_all_done)) }
-            } finally {
-                _install.update { it.copy(runningId = null) }
-            }
-        }
-    }
-
-    fun installAndroidOnly(onProgress: (Int, Int) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            val items = depItems.filter { it.group == DepGroup.ANDROID }
-            _install.update { it.copy(runningId = "__android__", log = it.log + lang.getString(R.string.term_notice_install_android_start, _useMirror.value.toString())) }
-            try {
-                items.forEachIndexed { index, item ->
-                    onProgress(index, items.size)
-                    val cmd = if (_useMirror.value) item.installMirror else item.installOfficial
-                    execAndAppend(item.id, cmd)
-                }
-                _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_install_android_done)) }
-            } finally {
-                _install.update { it.copy(runningId = null) }
-            }
-        }
-    }
-
-    private fun runCommand(id: String, cmd: String) {
-        viewModelScope.launch {
-            _install.update { it.copy(runningId = id, log = it.log + "\n▶ [$id] $cmd\n") }
-            try {
-                execAndAppend(id, cmd)
-            } finally {
-                _install.update { it.copy(runningId = null) }
-            }
-        }
-    }
-
-    private suspend fun execAndAppend(id: String, cmd: String) {
-        // T92：会话拉起（含 proot 探测/forkpty）全部在 IO 线程 —— 旧行为
-        // ensureDepInstallSession 在 withContext(IO) **之外**，主线程 fork +
-        // StrictMode 违例（createSessionInternal 已修同类问题，此路径漏修）。
-        val sid = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            ensureDepInstallSession()
-        } ?: run {
-            _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_no_pty)) }
-            return
-        }
-        val output = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val runResult = terminalRuntime.run(sid, cmd, InputOwner.SYSTEM, background = false)
-            val run = runResult.getOrElse { return@withContext lang.getString(R.string.term_notice_run_failed, it.message ?: "") }
-            // T92：300s + SIGTERM 温和终止 —— 旧行为 120s 后直接 SIGKILL：
-            // openjdk/SDK 类 apt 在慢网普遍 >120s，被硬杀留下半安装状态，日志
-            // 还误报「等待超时」（实际是被自己杀的）。与 Provisioner 300s 对齐。
-            val waitResult = terminalRuntime.wait(sid, com.apex.agent.platform.terminal.wait.WaitCondition.ProcessExited(jobId = run.jobId), 300_000)
-            val wait = waitResult.getOrElse { return@withContext lang.getString(R.string.term_notice_wait_failed, it.message ?: "") }
-            val exitCode = when (wait) {
-                is com.apex.agent.platform.terminal.wait.WaitResult.Matched -> {
-                    val ev = wait.event
-                    if (ev is com.apex.agent.platform.terminal.events.TerminalEvent.ProcessExited) ev.exitCode ?: -1 else 0
-                }
-                is com.apex.agent.platform.terminal.wait.WaitResult.Timeout -> {
-                    terminalRuntime.signal(sid, com.apex.agent.platform.terminal.io.UnixSignal.SIGTERM, InputOwner.SYSTEM, run.jobId)
-                    return@withContext lang.getString(R.string.term_notice_wait_timeout)
-                }
-                is com.apex.agent.platform.terminal.wait.WaitResult.SessionGone -> return@withContext lang.getString(R.string.term_notice_session_gone)
-            }
-            val obs = terminalRuntime.observe(sid, TerminalRuntime.ObserveMode.RAW, run.startCursor, 65536)
-                .getOrNull()?.raw ?: ""
-            val tail = if (obs.length > 4000) lang.getString(R.string.term_notice_truncated) + obs.takeLast(4000) else obs
-            tail + if (exitCode != 0) "\n[exit=$exitCode]\n" else "\n"
-        }
-        _install.update { it.copy(log = it.log + output) }
-    }
-
-    /**
-     * T92：实时存活探测（安装链专用）—— `_sessions` 来自 2s 轮询，可能滞后；
-     * 写入死 PTY 会让 job 挂到超时。安装前直查 runtime（快照 SESSIONS 模式，
-     * 低频调用成本可忽略）。
-     */
-    private suspend fun isSessionAliveRealtime(sid: Long): Boolean {
-        val snap = terminalRuntime.snapshot(TerminalRuntime.SnapshotMode.SESSIONS, sessionId = sid)
-            .getOrNull() ?: return false
-        return snap.sessions.any { it.session.id == sid && it.session.state in ALIVE_STATES }
-    }
-
-    /**
-     * T82 断点修复：依赖安装的会话路由 —— DepCatalog 的 apt 命令必须跑在
-     * linux-ubuntu 会话（Android shell 里只有 command not found）。Ubuntu
-     * 拉起失败时诚实降级到 local session（输出真实报错，绝不伪造成功）。
-     * T92：depSessionId 存活校验改为**实时**（旧用 2s 轮询快照，会话死亡后
-     * 最长 2s 内误判存活 → 写死 PTY 假超时）。
-     */
-    private suspend fun ensureDepInstallSession(): Long? {
-        val cached = depSessionId
-        if (cached != null && isSessionAliveRealtime(cached)) return cached
-        if (cached != null) depSessionId = null  // 死亡 → 清缓存重建
-        provisioner.ensureUbuntuSession()?.let {
-            depSessionId = it
-            return it
-        }
-        // 降级：复用当前活跃的 local 会话（无则新建）
-        val active = _activeSessionId.value
-        if (active != null && _sessions.value.any { it.id == active && it.isAlive }) {
-            depSessionId = active
-            return active
-        }
-        _install.update { it.copy(log = it.log + lang.getString(R.string.term_notice_fallback_android)) }
-        val r = terminalRuntime.create(backendId = BACKEND_LOCAL)
-        return if (r.isSuccess) {
-            val sid = r.getOrThrow().sessionId
-            sessionBackends[sid] = BACKEND_LOCAL to "ANDROID_LOCAL"
-            depSessionId = sid
-            refreshSessions()
-            sid
-        } else null
-    }
+    fun installAndroidOnly(onProgress: (Int, Int) -> Unit = { _, _ -> }) = depCenter.installAndroidOnly(onProgress)
 
     override fun onCleared() {
         // Runtime owns session lifecycle; explicit close via terminal.close() by Agent/UI.
@@ -1181,13 +955,5 @@ class TerminalViewModel @Inject constructor(
 
         /** OSC 52 剪贴板长度上限（1M 字符 ≈ 1MB UTF-8 —— Termux 同款基本护栏）。 */
         private const val MAX_OSC52_CLIPBOARD_CHARS = 1 shl 20
-        private val ALIVE_STATES = setOf(
-            com.apex.agent.platform.terminal.session.SessionState.CREATED,
-            com.apex.agent.platform.terminal.session.SessionState.STARTING,
-            com.apex.agent.platform.terminal.session.SessionState.READY,
-            com.apex.agent.platform.terminal.session.SessionState.RUNNING,
-            com.apex.agent.platform.terminal.session.SessionState.WAITING_INPUT,
-            com.apex.agent.platform.terminal.session.SessionState.INTERRUPTED
-        )
     }
 }

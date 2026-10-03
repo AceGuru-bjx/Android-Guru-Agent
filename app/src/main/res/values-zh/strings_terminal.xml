@@ -168,4 +168,13 @@
     <string name="term_extra_keys_desc">键盘上方的自定义宏按钮（如 apt修复=cmd:apt-fix）。格式：标签=cmd:…（执行）/ 标签=text:…（输入）/ 标签=key:F1 / 标签=ctrl:c / 标签=paste</string>
     <string name="term_extra_keys_hint">标签=cmd:apt-get update</string>
     <string name="term_extra_keys_reset">恢复默认</string>
+    <!-- P2-3: 会话状态短标签（tab 徽章；此前硬编码英文缩写）-->
+    <string name="term_state_starting">…</string>
+    <string name="term_state_run">运行</string>
+    <string name="term_state_input">输入</string>
+    <string name="term_state_interrupted">中断</string>
+    <string name="term_state_exited">退出</string>
+    <string name="term_state_broken">损坏</string>
+    <!-- P2-4: View 层新增菜单 id 未在 app 侧登记时的回落钩子 -->
+    <string name="term_menu_unknown">%1$s</string>
 </resources>
