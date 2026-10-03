@@ -86,7 +86,11 @@ jobs:
 
       - name: Compile core:llm-adapter
         run: |
-          CLASSPATH=$(find /tmp/apex-libs -name "*.jar" | tr '\n' ':')
+          # #298：llm-adapter 新增 core:logging 依赖（StreamingOpenAiClient 的
+          # SSE 解析失败限次日志）—— Gradle 侧 build.gradle.kts 已声明
+          # implementation(project(":core:logging"))，本镜像编译同步挂载
+          # /tmp/build/logging，否则 AppLogger/LogCategory 解析失败。
+          CLASSPATH="$(find /tmp/apex-libs -name '*.jar' | tr '\n' ':')/tmp/build/logging"
           SER_PLUGIN=$HOME/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar
           kotlinc -Xplugin=$SER_PLUGIN -cp "$CLASSPATH" -d /tmp/build/llm-adapter \
             $(find core/llm-adapter/src/main/kotlin -name "*.kt") \
