@@ -139,6 +139,15 @@ dependencies {
     implementation(project(":platform:mcp-host"))
     implementation(project(":plugin-sdk:plugin-host"))
 
+    // ── 浏览器库（拆库 E1 迁移期 composite build）──────────────────────────
+    // 从本仓库抽出的 apex-browser-kit（兄弟目录 includeBuild 时自动替换为本地构建；
+    // 无本地目录时走远端坐标 —— E3 GitHub Packages 发布后生效）。
+    // BrowserAgentTools（browser_* 工具协议，留在 app）消费这三层：
+    //   core（DomParser 剪枝）+ engine（BrowserEngine 自动化）+ chrome（Overlay 浮窗）。
+    implementation("com.apex.browser:browser-core:1.0.0")
+    implementation("com.apex.browser:browser-engine:1.0.0")
+    implementation("com.apex.browser:browser-chrome:1.0.0")
+
     // Compose
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

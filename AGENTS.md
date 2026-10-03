@@ -9,6 +9,14 @@
 
 - **模块**：多模块 Gradle（app / core×6 / platform×5 / 终端双模块），
   Kotlin 2.0.21 + AGP 8.7.3 + JDK 17 + Compose BOM 2024.12.01；
+- **浏览器库（拆库后）**：BrowserEngine / chrome UI / DOM 解析已抽出为
+  [apex-browser-kit](https://github.com/AceGuru-mjh/apex-browser-kit)
+  （坐标 `com.apex.browser:{core,engine,chrome}`）。本地构建把库克隆成
+  **兄弟目录** `../apex-browser-kit` 即自动 composite build（settings
+  条件 includeBuild）；CI 由 workflow 检出兄弟目录。改浏览器行为去库仓库
+  提 PR（其 consumer-check 会对本仓库跑编译防下游崩）；宿主只保留
+  BrowserAgentTools（工具协议）/ CyberNeonBallManager / NeonRingView
+  （视觉装饰）与 DI 接线（`di/BrowserKitModule.kt`）；
 - **本地验证顺序**：改 core 层先跑对应模块 `test`，改 app 层跑
   `:app:compileDebugKotlin`；CI（pr 触发）跑静态分析 + app 编译 +
   9 步测试 + debug APK + 结构质量四门禁；

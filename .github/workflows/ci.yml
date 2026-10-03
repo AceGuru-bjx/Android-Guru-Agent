@@ -224,6 +224,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 浏览器库 composite build 兄弟目录（settings.gradle.kts 条件 includeBuild 命中）
+      # —— 拆库 E1 迁移期：app 依赖 com.apex.browser:{core,engine,chrome}，
+      #    本地构建时由 ../apex-browser-kit 自动替换；远端坐标待 E3 发布后启用。
+      - name: Checkout apex-browser-kit (browser-kit composite build sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: AceGuru-mjh/apex-browser-kit
+          path: ../apex-browser-kit
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -467,6 +476,15 @@ jobs:
       pull-requests: write  # APK size report comment (no-op outside PRs)
     steps:
       - uses: actions/checkout@v4
+
+      # 浏览器库 composite build 兄弟目录（settings.gradle.kts 条件 includeBuild 命中）
+      # —— 拆库 E1 迁移期：app 依赖 com.apex.browser:{core,engine,chrome}，
+      #    本地构建时由 ../apex-browser-kit 自动替换；远端坐标待 E3 发布后启用。
+      - name: Checkout apex-browser-kit (browser-kit composite build sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: AceGuru-mjh/apex-browser-kit
+          path: ../apex-browser-kit
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

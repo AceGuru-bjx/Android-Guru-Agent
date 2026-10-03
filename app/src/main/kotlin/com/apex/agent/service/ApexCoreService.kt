@@ -12,8 +12,8 @@ import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import com.apex.agent.MainActivity
 import com.apex.agent.R
-import com.apex.agent.browser.BrowserEngine
-import com.apex.agent.browser.BrowserOverlay
+import com.apex.browser.engine.BrowserEngine
+import com.apex.browser.chrome.BrowserOverlay
 import com.apex.agent.browser.CyberNeonBallManager
 import com.apex.agent.notify.ForegroundTracker
 import com.apex.agent.plugin.host.PluginManager

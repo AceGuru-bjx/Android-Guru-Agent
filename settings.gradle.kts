@@ -25,6 +25,19 @@ dependencyResolutionManagement {
 
 rootProject.name = "apex-agent"
 
+// ── 浏览器库 composite build（拆库 E1 迁移期）─────────────────────────────
+// apex-browser-kit 从本仓库抽出为独立库（com.apex.browser:{core,engine,chrome}）。
+// 兄弟目录存在时自动接入 composite build：本地开发「改一处两边生效」；
+// CI 由 workflow 把库检出为兄弟目录（ci.yml / apk.yml / release.yml 的
+// sibling checkout 步骤）。目录不存在时跳过 —— 走远端 Maven 坐标（E3 稳定期
+// GitHub Packages 发布后切换）。子目录兜底位供 consumer-check 等双仓布局复用。
+val browserKitSibling = file("../apex-browser-kit")
+val browserKitNested = file("apex-browser-kit")
+when {
+    browserKitSibling.isDirectory -> includeBuild(browserKitSibling)
+    browserKitNested.isDirectory -> includeBuild(browserKitNested)
+}
+
 // 主APK
 include(":app")
 

@@ -4,7 +4,9 @@ import android.content.Context
 import com.apex.agent.core.tools.AgentTool
 import com.apex.agent.core.tools.StreamingAgentTool
 import com.apex.agent.core.tools.ToolStreamEvent
-import com.apex.agent.core.tools.builtin.browser.DomParser
+import com.apex.browser.core.DomParser
+import com.apex.browser.engine.BrowserEngine
+import com.apex.browser.engine.BrowserTracer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
