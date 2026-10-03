@@ -65,7 +65,7 @@ class AgentChatViewModel @Inject constructor(
     // 亦供 AgentChatHtmlPreview.kt 扩展（God-file 预算拆分）。
     @ApplicationContext internal val context: Context,
     // T76：任务运行时控制器（execute/abort 经此获得 checkpoint/恢复能力）
-    private val taskController: AgentTaskStatusController,
+    internal val taskController: AgentTaskStatusController,
     // 历史对话仓库（归档/恢复/删除；逻辑主体在 AgentChatHistoryController.kt）
     internal val chatHistory: ChatHistoryManager,
     // 工作区根解析（HTML 预览路径用）：code_* 工具写的 HTML 按此根解析相对路径；
@@ -75,7 +75,7 @@ class AgentChatViewModel @Inject constructor(
     // i18n：用户可见 toast / 系统行 / 工具步骤文案按当前语言取词（组合外场景）
     private val languageManager: LanguageManager,
     // v2：斜杠路由需要 MCP 连接快照（/mcp:<id> 引导提示词据此生成）
-    private val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
+    internal val mcpManager: com.apex.agent.core.tools.mcp.McpManager,
     // P2：删除/清空历史会话时同步清理附件文件（AgentChatHistoryController 扩展使用）
     internal val attachmentCleanup: AttachmentCleanupManager,
     // 技能渐进披露：自动装备（消息命中 tags 零成本预激活）+ 斜杠装备写入。
@@ -342,7 +342,7 @@ class AgentChatViewModel @Inject constructor(
      * a persistent state — repeated `/mcp:github` attempts while still
      * unconnected should re-open the dialog each time.
      */
-    private val _requestGithubConnect = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    internal val _requestGithubConnect = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val requestGithubConnect: SharedFlow<Unit> = _requestGithubConnect.asSharedFlow()
 
     /** 一次性 UI 反馈（Toast 级）：异步动作真实结果由 Screen 收集展示。UX-1：internal（非 private）供 AgentMessageActions.kt 同包扩展访问。 */
@@ -391,32 +391,45 @@ class AgentChatViewModel @Inject constructor(
         savedStateHandle[KEY_DRAFT_INPUT] = text
     }
 
-    // ═══ 流水线指令胶囊（斜杠菜单选中 → 结构化挂起，不再裸文本入框）═══
+    // ═══ 技能 chip 集合（斜杠菜单多选 → 输入框内 chip，v5 单胶囊改多选）═══
 
-    private val _pendingCommand = MutableStateFlow<PendingPipelineCommand?>(null)
-
-    /** 当前挂在输入栏的流水线指令胶囊（null = 无）。发送时拼回 `/type:id` 走斜杠管线。 */
-    val pendingCommand: StateFlow<PendingPipelineCommand?> = _pendingCommand.asStateFlow()
+    private val _pendingCommands = MutableStateFlow<List<PendingPipelineCommand>>(emptyList())
 
     /**
-     * 挂起一条流水线指令胶囊（Skill / MCP / 连接器 / 插件）。
-     *
-     * - 已有胶囊时**替换**（单条语义：一次发送触发一条流水线，避免多指令
-     *   组合出 `/skill:a /mcp:b` 这种解析器不认识的复合命令）；
-     * - 输入框里若已有同源斜杠残文（如手动输入了 `/skill:` 前缀），顺手清掉，
-     *   避免胶囊 + 残文双份指令。
+     * 当前挂在输入框内的技能 chip 列表（顺序 = 追加顺序）。
+     * 发送时：单条拼回 `/type:id` 走既有斜杠管线；多条逐个路由后合并为
+     * 一轮引擎执行（见 [sendMessage]）。
      */
-    fun setPendingCommand(command: PendingPipelineCommand) {
-        _pendingCommand.value = command
+    val pendingCommands: StateFlow<List<PendingPipelineCommand>> = _pendingCommands.asStateFlow()
+
+    /**
+     * 追加一枚技能 chip（斜杠菜单/实时联想选中项）。
+     *
+     * - 按 `type:id` 去重（重复选择不重复挂载）；
+     * - 输入框里若已有同源斜杠残文（如手动输入了 `/skill:` 前缀），顺手清掉，
+     *   避免 chip + 残文双份指令。
+     */
+    fun addPendingCommand(command: PendingPipelineCommand) {
+        val key = command.type + ":" + command.id
+        _pendingCommands.value =
+            if (_pendingCommands.value.any { (it.type + ":" + it.id) == key }) _pendingCommands.value
+            else _pendingCommands.value + command
         val draft = inputText.value
         if (draft.isNotBlank() && draft.trimStart().startsWith("/")) {
             updateInputText("")
         }
     }
 
-    /** 移除胶囊（胶囊行 × 按钮）。 */
-    fun clearPendingCommand() {
-        _pendingCommand.value = null
+    /**
+     * 整体同步 chip 集合（输入框内退格/点击删除 → 回报新集合；幂等）。
+     */
+    fun setPendingCommands(commands: List<PendingPipelineCommand>) {
+        _pendingCommands.value = commands.distinctBy { it.type + ":" + it.id }
+    }
+
+    /** 清空全部 chip（发送后收尾 / 外部重置）。 */
+    fun clearPendingCommands() {
+        _pendingCommands.value = emptyList()
     }
 
     /**
@@ -627,9 +640,9 @@ class AgentChatViewModel @Inject constructor(
         // 二轮审计 A-1：不计入 ERROR 占位附件——「空文本 + 全部附件读取失败」时
         // 不应发出空消息（P2-9 的 enabled 判定与 drainAttachments 的过滤口径对齐）。
         val hasUsableAttachment = attachmentManager.attachments.value.any { it.status != UploadStatus.ERROR }
-        // 胶囊挂起时输入框文本视为"附加要求"（可为空）——胶囊本身即指令主体。
-        val pendingCmd = _pendingCommand.value
-        if (trimmedText.isEmpty() && !hasUsableAttachment && pendingCmd == null) return
+        // chip 挂起时输入框文本视为"附加要求"（可为空）——chip 本身即指令主体。
+        val pendingCmds = _pendingCommands.value
+        if (trimmedText.isEmpty() && !hasUsableAttachment && pendingCmds.isEmpty()) return
 
         // 取消前一个尚未完成的流式任务
         currentJob?.cancel()
@@ -640,12 +653,29 @@ class AgentChatViewModel @Inject constructor(
         // ★ 缺陷 2 修复：无条件收集并清空附件，避免斜杠指令分支 return 后附件永久残留
         val currentAttachments = attachmentManager.drainAttachments()
 
-        // 清空草稿（无论是否斜杠指令，发送后都应清空输入框）+ 摘下胶囊
+        // 清空草稿（无论是否斜杠指令，发送后都应清空输入框）+ 摘下全部 chip
         updateInputText("")
-        _pendingCommand.value = null
+        _pendingCommands.value = emptyList()
 
-        // 胶囊 → 拼回斜杠命令：`/type:id` +（输入框有文本时）附加要求。
+        // ═══ v5 多 chip 链路：≥2 枚时逐个路由（副作用：skill 装备）合并为一轮引擎执行 ═══
+        if (pendingCmds.size >= 2) {
+            // 附件与流水线互斥（与单 chip 路径同口径：提示后丢弃）
+            if (currentAttachments.isNotEmpty()) {
+                _uiState.update { s ->
+                    s.copy(
+                        messages = s.messages + AgentUiMessage.System(
+                            strFmt(R.string.chat_slash_attachments_removed, currentAttachments.size)
+                        )
+                    )
+                }
+            }
+            handleMultiChipPipeline(pendingCmds, trimmedText)
+            return
+        }
+
+        // 单 chip（或无 chip）→ 既有路径：拼回斜杠命令 `/type:id` +（输入框有文本时）附加要求。
         // 附件与斜杠指令互斥（下方分支提示后丢弃），胶囊路径同样遵循。
+        val pendingCmd = pendingCmds.firstOrNull()
         val effectiveText = if (pendingCmd != null) {
             if (trimmedText.isEmpty()) pendingCmd.toCommandToken()
             else pendingCmd.toCommandToken() + " " + trimmedText
@@ -1050,104 +1080,6 @@ class AgentChatViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         attachmentManager.dispose()
-    }
-
-    // ═══ 斜杠指令处理 ═══
-
-    /**
-     * 处理斜杠指令。
-     *
-     * 解析格式：`/skill:code_interpreter [key=value ...] 附加的用户要求...`
-     *
-     * 解析与路由职责已下沉到 [SlashCommands]（其内部再委托
-     * SlashCommandParser + SlashCommandRouter），本方法只负责：
-     * - 把解析/路由结果（banner + agentPrompt）应用到 UI 状态；
-     * - GitHub 未连接特例下发射 [requestGithubConnect] 信号；
-     * - 把 agentPrompt 交给 [agentEngine] 执行。
-     *
-     * 特例：当路由器返回 `requestGithubConnect = true`（目前仅 `/mcp:github`
-     * 在未连接时触发）时，本方法只追加 systemMessage 并发射
-     * [requestGithubConnect] 信号让 UI 打开 GitHub 连接对话框，**不**调用
-     * agentEngine.execute —— 因为没有可执行的上下文。
-     *
-     * 与 [sendMessage] 共用同一个 [currentJob]：发送新指令会取消上一个流式任务。
-     */
-    private fun handleSlashCommand(command: String) {
-        // mcpConnected 快照：路由器据此对已连接的 /mcp:<id> 注入「用 mcp_call 调
-        // server=<id>」引导提示词（旧实现恒空集，模型面对 MCP 指令只能瞎猜）。
-        val result = SlashCommands.handle(
-            command,
-            githubTokenManager,
-            mcpConnected = runCatching { mcpManager.getConnectedServers().toSet() }.getOrDefault(emptySet()),
-            // /skill:<id> 路由时同步装备（写入激活存储，本轮提示词即携带方法论）
-            skillActivation = skillActivation
-        )
-
-        // 指令会取消上一个流式任务：先清空流式缓冲，防残留文本串入新一轮。
-        streamBuffers.reset()
-
-        // 始终追加反馈消息，让用户看到指令被识别 + 当前状态：
-        // Skill/连接器/插件指令使用专用横幅（PipelineBanner），其余指令用 System 行。
-        _uiState.update { s ->
-            s.copy(
-                messages = s.messages + result.banner,
-                isLoading = result.isLoading,
-                currentThinking = "",
-                currentResponse = ""
-            )
-        }
-
-        if (result is SlashCommands.Result.RequestGithubConnect) {
-            // 请求 UI 打开 GitHub 连接流程；不进入 Agent 主循环。
-            // tryEmit 因为 extraBufferCapacity=1，订阅者存在时一定成功；
-            // 即便 UI 尚未订阅（冷启动竞态），缓冲区也会保留一次事件。
-            _requestGithubConnect.tryEmit(Unit)
-            return
-        }
-
-        // Hub 生态门控：路由器对「未运行的 MCP」返回空 agentPrompt（引导去
-        // 市场启动）——不进入 Agent 主循环，不向模型发空转提示词。
-        val execute = result as SlashCommands.Result.Execute
-        if (execute.agentPrompt.isBlank()) {
-            _uiState.update { s -> s.copy(isLoading = false) }
-            return
-        }
-
-        // 记录流水线路由上下文，循环内产生的工具调用会携带对应来源徽章。
-        routeContextKind = execute.contextKind
-        routeContextName = execute.contextName
-        activeBannerId = execute.banner.id
-
-        currentJob = viewModelScope.launch {
-            // P0 修复（闪退）：taskController.execute 的互斥拒绝
-            // （IllegalStateException：上一轮执行仍在途）发生在作为参数求值时 ——
-            // 位于 collectEngineFlowSafely 的 try/catch **之前**，异常冒泡到
-            // viewModelScope（无 handler）直接闪退。这里先安全求值，拒绝时转
-            // 可读错误气泡（与 executeNormalMessage 的兑底一致）。
-            val flow = try {
-                taskController.cancel() // 先串行化释放（同 sendMessage）
-                taskController.execute(com.apex.agent.core.engine.UserInput.text(execute.agentPrompt))
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _uiState.update { s ->
-                    s.copy(
-                        messages = s.messages + AgentUiMessage.Error(
-                            message = "执行失败：${e.message ?: e::class.simpleName}",
-                            canRetry = true
-                        ),
-                        isLoading = false
-                    )
-                }
-                return@launch
-            }
-            collectEngineFlowSafely(flow)
-        }.apply {
-            invokeOnCompletion {
-                routeContextKind = null
-                routeContextName = null
-            }
-        }
     }
 
     companion object {

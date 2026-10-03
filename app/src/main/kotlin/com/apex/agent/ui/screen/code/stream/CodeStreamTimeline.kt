@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -28,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.apex.agent.R
 import com.apex.agent.core.code.stream.CodeStreamSnapshot
@@ -35,6 +37,8 @@ import com.apex.agent.core.code.stream.StreamEntry
 import com.apex.agent.core.code.stream.StreamEntryGroup
 import com.apex.agent.core.code.stream.StreamToolCall
 import com.apex.agent.core.code.stream.ToolKind
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.launch
 
 /**
@@ -50,12 +54,21 @@ import kotlinx.coroutines.launch
  *
  * [rememberStreamAnchor]：流式即时跟随 + 阅读模式保护 + 收尾动画；
  * 底部 FAB（不在底部时出现）一键回底。
+ *
+ * ## v5 玻璃接线
+ *
+ * - [hazeState]：时间轴 = 玻璃采样源（悬浮输入栏 GlassCard 的 backdrop
+ *   来源；null = 不接线，独立预览场景用）；
+ * - [bottomInset]：底部悬浮栈（终端尾窗/输入栏等）高度 —— 列表
+ *   contentPadding 与 FAB 底部偏移同步补偿，最后一条不被遮挡。
  */
 @Composable
 internal fun CodeStreamTimeline(
     snapshot: CodeStreamSnapshot,
     isStreaming: Boolean,
-    onToolClick: (StreamToolCall) -> Unit
+    onToolClick: (StreamToolCall) -> Unit,
+    bottomInset: Dp = 0.dp,
+    hazeState: HazeState? = null
 ) {
     val listState = rememberLazyListState()
     val grouped = remember(snapshot.entries) { groupConsecutive(snapshot.entries) }
@@ -75,7 +88,11 @@ internal fun CodeStreamTimeline(
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (hazeState != null) Modifier.hazeSource(hazeState) else Modifier),
+            // v5：底部悬浮栈（终端尾窗/输入栏）动态补偿 —— 最后一条不被遮挡
+            contentPadding = PaddingValues(bottom = 12.dp + bottomInset)
         ) {
             grouped.forEach { segment ->
                 when (segment) {
@@ -117,7 +134,7 @@ internal fun CodeStreamTimeline(
                 },
                 text = { Text(stringResource(R.string.code_stream_fab_bottom)) },
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.padding(bottom = 8.dp)
+                modifier = Modifier.padding(bottom = 8.dp + bottomInset)
             )
         }
     }

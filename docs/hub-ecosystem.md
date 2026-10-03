@@ -77,7 +77,7 @@ requiresRootfs/vendor/tags），一次请求即完整目录。收录 8 台：
 | 门控 | `slash/SlashCommandRouter` | 未运行 MCP → 空 agentPrompt + 引导语（两 VM 均有 isNotBlank 门，不发空转提示词） |
 | UI | `code/CodeThinkingSelector`（重写） | 28dp 胶囊 + 300dp 结构化下拉（深度七档段 / AUTO 段 / 指南段；Check 当前档、预算徽标、仅选中档展开说明、本地化短档名） |
 | UI | `code/CodeScreen` | 「新会话」文字按钮 → Add 图标按钮（28/18dp，对齐 Agent 屏）；去掉根部重复 `.imePadding()`（双重 IME 抬升根因） |
-| UI | `agent/PipelineCapsuleRow`（重写胶囊） | 28dp 紧凑档（视觉 12dp 关闭钮、触区 28dp 圆形；48dp 红线保留给时间轴大胶囊） |
+| UI | `component/SkillChipInputField`（v5 取代 PipelineCapsuleRow） | 技能/MCP/连接器以**行内 chip** 直接追加进输入框文字后（`\uFFFC` + ReplacementSpan 自绘胶囊）：多选依次追加、`type:id` 去重、退格/点击删除；发送时纯文本与 chip 集合分通道上报 —— 独立胶囊行与输入框的重叠观感消除（PipelineCapsuleRow 已删除） |
 
 ## 4. 门控语义总表
 

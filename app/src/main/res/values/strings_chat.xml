@@ -178,11 +178,12 @@
     <string name="chat_cd_toolkit">Toolkit menu</string>
     <string name="chat_web_search">Web search</string>
     <string name="chat_time">Time</string>
-    <string name="chat_function_calls">Function calls</string>
-    <string name="chat_function_calls_n">Function calls (%1$d)</string>
     <string name="chat_function_forced">Force function calls</string>
     <string name="chat_function_forced_n">Forced calls (%1$d)</string>
-    <string name="chat_function_forced_hint">Checked functions MUST be invoked this turn (tool_choice forced). Leave empty to use the default tool set (full catalog stays discoverable).</string>
+    <!-- v5 文案纠偏（用户口径）：函数调用 ≠ 「让模型更聪明」的开关，而是模型
+         结构化请求外部操作的协议；全部工具默认开启，勾选仅表示强制调用。 -->
+    <string name="chat_function_forced_hint">All tools are ON by default and discoverable via the catalog. Function calling is not a "make the model smarter" switch — it is a protocol for the model to request external actions in structured form. Useful when tasks need live/private data or external actions; overkill for plain text work.</string>
+    <string name="chat_function_force_section">Force-invoke below (optional)</string>
     <string name="chat_expose_all_tools">Send all tools</string>
     <string name="chat_category_other">Other</string>
     <string name="chat_structured_output_fmt">Structured output: %1$s</string>
@@ -206,6 +207,19 @@
     <string name="chat_time_aware_on">Time awareness on</string>
     <string name="chat_rules_loaded">%1$d rules loaded</string>
     <string name="chat_cd_close">Close</string>
+
+    <!-- ═══ SlashCommandButton（弹出菜单 i18n，原硬编码中文）═══ -->
+    <string name="chat_slash_menu_title">Quick commands</string>
+    <string name="chat_slash_refresh">Refresh menu</string>
+    <string name="chat_slash_empty">No items available</string>
+    <string name="chat_cd_slash_menu">Open slash command menu</string>
+    <string name="chat_slash_status_connected">Connected</string>
+    <string name="chat_slash_status_offline">Offline</string>
+    <string name="chat_slash_status_not_installed">Not installed</string>
+    <string name="chat_slash_status_external">Sample</string>
+    <string name="chat_slash_cd_selected">Selected. Tap again to remove</string>
+    <!-- 输入框内技能 chip（SkillChipInputField）-->
+    <string name="chat_chip_cd_remove">Remove skill %1$s</string>
 
     <!-- ═══ AgentModeSelector ═══ -->
     <string name="chat_mode_selector_cd">Task mode: %1$s. Tap to switch</string>

@@ -178,11 +178,12 @@
     <string name="chat_cd_toolkit">工具菜单</string>
     <string name="chat_web_search">网络搜索</string>
     <string name="chat_time">时间</string>
-    <string name="chat_function_calls">函数调用</string>
-    <string name="chat_function_calls_n">函数调用 (%1$d)</string>
     <string name="chat_function_forced">强制函数调用</string>
     <string name="chat_function_forced_n">强制调用 (%1$d)</string>
-    <string name="chat_function_forced_hint">勾选的函数本轮必须被调用（tool_choice 强制）；不勾选则使用默认工具集（全部能力仍可经目录检索）。</string>
+    <!-- v5 文案纠偏（用户口径）：函数调用 ≠ 「让模型更聪明」的开关，而是模型
+         结构化请求外部操作的协议；全部工具默认开启，勾选仅表示强制调用。 -->
+    <string name="chat_function_forced_hint">全部工具默认开启，并可经目录按需检索——函数调用不是「让模型更聪明」的开关，而是模型结构化请求外部操作的一套协议。需要实时/私有数据或外部动作时有用；纯文本任务属过度设计。</string>
+    <string name="chat_function_force_section">强制调用以下函数（可选）</string>
     <string name="chat_expose_all_tools">全量工具模式</string>
     <string name="chat_category_other">其他</string>
     <string name="chat_structured_output_fmt">结构化输出: %1$s</string>
@@ -206,6 +207,19 @@
     <string name="chat_time_aware_on">时间感知已开启</string>
     <string name="chat_rules_loaded">已加载 %1$d 条规则</string>
     <string name="chat_cd_close">关闭</string>
+
+    <!-- ═══ SlashCommandButton（弹出菜单 i18n，原硬编码中文）═══ -->
+    <string name="chat_slash_menu_title">快捷指令</string>
+    <string name="chat_slash_refresh">刷新菜单</string>
+    <string name="chat_slash_empty">暂无可用项</string>
+    <string name="chat_cd_slash_menu">打开斜杠指令菜单</string>
+    <string name="chat_slash_status_connected">已连接</string>
+    <string name="chat_slash_status_offline">离线</string>
+    <string name="chat_slash_status_not_installed">未安装</string>
+    <string name="chat_slash_status_external">示例</string>
+    <string name="chat_slash_cd_selected">已选中，再次点击移除</string>
+    <!-- 输入框内技能 chip（SkillChipInputField）-->
+    <string name="chat_chip_cd_remove">移除技能 %1$s</string>
 
     <!-- ═══ AgentModeSelector ═══ -->
     <string name="chat_mode_selector_cd">任务模式：%1$s，点击切换</string>

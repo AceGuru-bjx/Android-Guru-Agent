@@ -68,7 +68,7 @@ import dagger.hilt.android.EntryPointAccessors
 import androidx.annotation.StringRes
 import com.apex.agent.R
 import com.apex.agent.core.engine.AgentMode
-import com.apex.agent.ui.component.AdaptiveInputField
+import com.apex.agent.ui.component.SkillChipInputField
 import com.apex.agent.ui.component.AttachButton
 import com.apex.agent.ui.component.AttachmentPreviewBar
 import com.apex.agent.ui.component.FeedbackSeverity
@@ -111,7 +111,7 @@ fun AgentChatScreen(
     // 与点击回调（即时读 .value），按键只重组输入行本身。
     val inputTextState = viewModel.inputText.collectAsStateWithLifecycle()
     // 流水线指令胶囊：斜杠菜单选中项（[</> skill: 名字] 形态挂在输入栏上方）
-    val pendingCommand by viewModel.pendingCommand.collectAsStateWithLifecycle()
+    val pendingCommands by viewModel.pendingCommands.collectAsStateWithLifecycle()
     val pendingQuestion by viewModel.pendingQuestion.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -265,6 +265,12 @@ fun AgentChatScreen(
         // 内部胶囊统一 28dp（AgentModeSelector / AgentRoleSelector / ThinkingLevelSelector
         // 已同步紧凑化）→ 整行 ~36dp（原 ~52dp），叠 TopAppBar+ContextMeter 后顶部
         // 从 ~164dp 收敛到 ~114dp。
+        // ═══ 顶部模式栏（v4 紧凑化 + v5 按钮防挤压）═══
+        // v5 修复（用户反馈「新对话/历史对话按钮没了」）：角色胶囊 + 模式胶囊 +
+        // 思考菜单依次加入同一行后，窄屏上 340dp 宽度被前序元素吃完，尾部两个
+        // 34dp 按钮（历史/新会话）被剩余空间 coerce 到近乎 0 宽 —— 视觉上
+        // 「按钮和图标消失」。修复：前段选择器放进 weight(1f) 的横向滚动行
+        // （空间不够时滚动，永不挤压），尾部两个按钮固定在行尾**永远可见**。
         Surface(
             tonalElevation = 2.dp,
             modifier = Modifier.fillMaxWidth()
@@ -275,44 +281,52 @@ fun AgentChatScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // ═══ Agent 角色选择器（人设胶囊 + 下拉菜单）═══
-                // 选中即持久化 → VM collector patchConfig（下一轮请求生效，
-                // 无需重启）。自定义角色的创建/编辑入口在 设置 → Agent →
-                // Agent 角色分区。
-                AgentRoleSelector(
-                    current = activeRole,
-                    roles = roles,
-                    onSelect = { roleId -> viewModel.setAgentRole(roleId) }
-                )
+                // ═══ 前段：选择器区（可横向滚动，空间不足时不再挤压尾部按钮）═══
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // ═══ Agent 角色选择器（人设胶囊 + 下拉菜单）═══
+                    // 选中即持久化 → VM collector patchConfig（下一轮请求生效，
+                    // 无需重启）。自定义角色的创建/编辑入口在 设置 → Agent →
+                    // Agent 角色分区。
+                    AgentRoleSelector(
+                        current = activeRole,
+                        roles = roles,
+                        onSelect = { roleId -> viewModel.setAgentRole(roleId) }
+                    )
 
-                // ═══ 任务模式选择器（v3：胶囊 + 下拉菜单）═══
-                // 旧实现 6 个 FilterChip 横排在 weight(1f, fill=false) 的滚动行里，
-                // 窄屏只露出第一个「Build」—— 其余模式被裁在视口外且无任何提示，
-                // 用户表现为「只有 Build 一个模式，没法切换」。换成显式菜单后
-                // 全部 6 个模式在任何屏宽下都单次点击可达。
-                AgentModeSelector(
-                    current = uiState.mode,
-                    onSelect = { mode ->
-                        viewModel.setMode(mode)
-                    },
-                    onOpenGuide = { showModeGuide = true },
-                    modes = AGENT_SCREEN_MODES
-                )
+                    // ═══ 任务模式选择器（v3：胶囊 + 下拉菜单）═══
+                    // 旧实现 6 个 FilterChip 横排在 weight(1f, fill=false) 的滚动行里，
+                    // 窄屏只露出第一个「Build」—— 其余模式被裁在视口外且无任何提示，
+                    // 用户表现为「只有 Build 一个模式，没法切换」。换成显式菜单后
+                    // 全部 6 个模式在任何屏宽下都单次点击可达。
+                    AgentModeSelector(
+                        current = uiState.mode,
+                        onSelect = { mode ->
+                            viewModel.setMode(mode)
+                        },
+                        onOpenGuide = { showModeGuide = true },
+                        modes = AGENT_SCREEN_MODES
+                    )
 
-                // #197：CUSTOM 模式已随双工位拆分退役（Agent 屏只剩 Chat/Agent），
-                // 预设 chip 编辑入口移除；模板/预设统一在「模板工坊」页管理。
+                    // #197：CUSTOM 模式已随双工位拆分退役（Agent 屏只剩 Chat/Agent），
+                    // 预设 chip 编辑入口移除；模板/预设统一在「模板工坊」页管理。
 
-                // ═══ 双级思考控制（RikkaHub 式）：第一级 = 模型原生 reasoning effort（API 参数），
-                // 第二级 = 强制深度思考（提示词层，任何模型生效）═══
-                ThinkingControlMenu(
-                    reasoningEffort = uiState.reasoningEffort,
-                    forceDeepThinking = uiState.forceDeepThinking,
-                    onReasoningEffortSelect = { viewModel.setReasoningEffort(it) },
-                    onForceDeepThinkingChange = { viewModel.setForceDeepThinking(it) }
-                )
+                    // ═══ 双级思考控制（RikkaHub 式）：第一级 = 模型原生 reasoning effort（API 参数），
+                    // 第二级 = 强制深度思考（提示词层，任何模型生效）═══
+                    ThinkingControlMenu(
+                        reasoningEffort = uiState.reasoningEffort,
+                        forceDeepThinking = uiState.forceDeepThinking,
+                        onReasoningEffortSelect = { viewModel.setReasoningEffort(it) },
+                        onForceDeepThinkingChange = { viewModel.setForceDeepThinking(it) }
+                    )
+                }
 
-                Spacer(modifier = Modifier.weight(1f))
-
+                // ═══ 尾段：固定按钮（永不滚动/挤压，窄屏也永远可见）═══
                 // 历史对话入口：消息流自动归档，点击恢复接续上下文
                 IconButton(
                     onClick = { showHistory = true },
@@ -534,7 +548,8 @@ fun AgentChatScreen(
 
                 // ═══ 玻璃输入栏（/ 斜杠 + GitHub + 旋转加号 + 输入框 + 发送）═══
                 // GlassStyle.Floating：悬浮主面 —— 比卡片更强的 blur/边缘/高光；
-                // 文本/光标/IME 行为零改动（AdaptiveInputField 原样保留）。
+                // v5：输入框换 SkillChipInputField（技能 chip 内联），IME 行为
+                // 兜底（焦点/按下显式 show + requestApplyInsets）随组件移植。
                 GlassCard(
                     state = glassState,
                     style = GlassStyle.Floating,
@@ -554,14 +569,8 @@ fun AgentChatScreen(
                     onRemove = { index -> viewModel.removeAttachment(index) }
                 )
 
-                // ═══ 流水线指令胶囊行（[</> skill: 名字 ×] —— 无挂起指令时不占位）═══
-                // 斜杠菜单选中的 Skill / MCP / 连接器 / 插件以迷你胶囊挂在输入栏，
-                // 输入框不再出现 `/skill:xxx` 裸文本；发送时 VM 拼回斜杠管线。
-                PipelineCapsuleRow(
-                    pending = pendingCommand,
-                    onRemove = { viewModel.clearPendingCommand() }
-                )
-
+                // ═══ v5：技能 chip 已内联进输入框（SkillChipInputField），独立的
+                // 胶囊行移除 —— 不再出现「胶囊行叠在输入框上方」的重叠观感。
                 // #197 「小圆环」函数调用/工具菜单已迁至 Coding 屏（Agent 屏
                 // 保留纯聊天体验：斜杠技能/MCP 选择 + 附件 + 模型小大脑）。
 
@@ -574,14 +583,27 @@ fun AgentChatScreen(
                         .horizontalScroll(rememberScrollState())
                 ) {
                     // ═══ / 斜杠指令按钮 ═══
-                    // 选中项挂成输入栏迷你胶囊（[</> skill: 名字]），不再裸文本入框；
+                    // 选中项以 chip 形式内联进输入框文字后面（多选追加、自动去重）；
                     // 解析失败的非管线命令（理论上不存在）回退旧文本插入路径。
+                    // 返回 true = 菜单保持展开（流水线条目可继续多选）。
                     SlashCommandButton(
                         slashMenuProvider = slashMenuProvider,
+                        isSelected = { item ->
+                            PendingPipelineCommand.fromCommand(item.command, item.label)
+                                ?.let { c -> pendingCommands.any { it.type == c.type && it.id == c.id } }
+                                ?: false
+                        },
                         onItemSelected = { item ->
                             val capsule = PendingPipelineCommand.fromCommand(item.command, item.label)
                             if (capsule != null) {
-                                viewModel.setPendingCommand(capsule)
+                                // 已选中 → 再点一次摘除（菜单内 toggle）；否则追加
+                                val exists = pendingCommands.any { it.type == capsule.type && it.id == capsule.id }
+                                if (exists) {
+                                    viewModel.setPendingCommands(pendingCommands.filterNot { it.type == capsule.type && it.id == capsule.id })
+                                } else {
+                                    viewModel.addPendingCommand(capsule)
+                                }
+                                true // 流水线条目：保持展开，继续多选
                             } else {
                                 // 插入而非覆盖：已输入内容时空格拼接保留原意图；
                                 // 指令自带尾随空格，选中后可继续输入参数。
@@ -592,6 +614,7 @@ fun AgentChatScreen(
                                     inputTextState.value.trimEnd() + " " + command
                                 }
                                 viewModel.updateInputText(merged)
+                                false // 普通指令：插入后收起菜单
                             }
                         }
                     )
@@ -635,12 +658,16 @@ fun AgentChatScreen(
                     // State 读取订阅的是最近的 composable 作用域（本 Row content），
                     // 按键只重组本行，不再牵动整个 Screen。
                     val inputText = inputTextState.value
-                    // ═══ 输入框（自适应高度 + 手势扩展 + 双击全屏 + IME 发送）═══
-                    //（斜杠实时联想收纳进输入框 Box：菜单锚定在文本框下方而非整行左缘）
+                    // ═══ v5 技能 chip 输入框（EditText + ReplacementSpan）═══
+                    // 选中的 Skill/MCP/连接器/插件以行内 chip 追加到文字后面，
+                    // 多选去重、退格/点击删除；发送时纯文本与 chip 集合分离上报。
+                    //（斜杠实时联想仍锚定在本 Box：菜单锚定在文本框下方）
                     Box(modifier = Modifier.weight(1f)) {
-                        AdaptiveInputField(
+                        SkillChipInputField(
                             value = inputText,
                             onValueChange = { viewModel.updateInputText(it) },
+                            chips = pendingCommands,
+                            onChipsChange = { viewModel.setPendingCommands(it) },
                             // 发送键行为：send → 回车直接发送；newline → 回车仅换行（设置页可配）
                             sendKeyBehavior = uiSettings.sendKeyBehavior,
                             onSend = {
@@ -648,40 +675,35 @@ fun AgentChatScreen(
                                 // （避免撞 NoOpLlmClient 静默空转，用户无从知晓）。
                                 if (!llmConfigured) {
                                     showApiMissingNotice = true
-                                    return@AdaptiveInputField
+                                    return@SkillChipInputField
                                 }
                                 // P2-9（6-c）：附件-only 消息同样可发（仅计可用附件；二轮审计 A-1 口径对齐）
-                                // 胶囊-only（输入框空文本）同样可发：VM 拼回 /type:id 走斜杠管线
+                                // chip-only（输入框空文本）同样可发：VM 走斜杠管线
                                 val hasUsableAttachment = attachments.any { it.status != UploadStatus.ERROR }
-                                if ((inputText.isNotBlank() || hasUsableAttachment || pendingCommand != null) && !uiState.isLoading) {
+                                if ((inputText.isNotBlank() || hasUsableAttachment || pendingCommands.isNotEmpty()) && !uiState.isLoading) {
                                     viewModel.sendMessage(inputText.trim())
                                 }
                             },
-                            placeholder = {
-                                Text(
-                                    text = when (uiState.mode) {
-                                        AgentMode.CHAT -> stringResource(R.string.chat_hint_chat)
-                                        AgentMode.AGENT -> stringResource(R.string.chat_hint_agent)
-                                        AgentMode.PLAN -> stringResource(R.string.chat_hint_plan)
-                                        AgentMode.SPEC -> stringResource(R.string.chat_hint_spec)
-                                        AgentMode.REFLECTION -> stringResource(R.string.chat_hint_reflection)
-                                        AgentMode.HUMAN_ASSIST -> stringResource(R.string.chat_hint_human_assist)
-                                        AgentMode.CUSTOM -> stringResource(R.string.chat_hint_custom)
-                                        AgentMode.BUILD -> stringResource(R.string.chat_hint_build)
-                                    },
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            placeholder = when (uiState.mode) {
+                                AgentMode.CHAT -> stringResource(R.string.chat_hint_chat)
+                                AgentMode.AGENT -> stringResource(R.string.chat_hint_agent)
+                                AgentMode.PLAN -> stringResource(R.string.chat_hint_plan)
+                                AgentMode.SPEC -> stringResource(R.string.chat_hint_spec)
+                                AgentMode.REFLECTION -> stringResource(R.string.chat_hint_reflection)
+                                AgentMode.HUMAN_ASSIST -> stringResource(R.string.chat_hint_human_assist)
+                                AgentMode.CUSTOM -> stringResource(R.string.chat_hint_custom)
+                                AgentMode.BUILD -> stringResource(R.string.chat_hint_build)
                             }
                         )
-                        // ═══ / 实时联想（输入以 / 开头时弹出命令候选，点击挂胶囊）═══
+                        // ═══ / 实时联想（输入以 / 开头时弹出命令候选，点击挂 chip）═══
                         SlashAutoCompleteHost(
                             inputText = inputText,
                             slashMenuProvider = slashMenuProvider,
                             onItemSelected = { item ->
                                 val capsule = PendingPipelineCommand.fromCommand(item.command, item.label)
                                 if (capsule != null) {
-                                    // 选中即挂胶囊（VM 清掉框内 / 残文），附加要求直接继续打字
-                                    viewModel.setPendingCommand(capsule)
+                                    // 选中即挂 chip（VM 清掉框内 / 残文），附加要求直接继续打字
+                                    viewModel.addPendingCommand(capsule)
                                 } else {
                                     viewModel.updateInputText(item.command)
                                 }
@@ -716,12 +738,12 @@ fun AgentChatScreen(
                                     return@FilledIconButton
                                 }
                                 val hasUsableAttachment = attachments.any { it.status != UploadStatus.ERROR }
-                                if (inputText.isNotBlank() || hasUsableAttachment || pendingCommand != null) {
+                                if (inputText.isNotBlank() || hasUsableAttachment || pendingCommands.isNotEmpty()) {
                                     viewModel.sendMessage(inputText.trim())
-                                    // ★ viewModel.sendMessage 内部已调用 updateInputText("") + 摘胶囊
+                                    // ★ viewModel.sendMessage 内部已调用 updateInputText("") + 摘全部 chip
                                 }
                             },
-                            enabled = inputText.isNotBlank() || attachments.any { it.status != UploadStatus.ERROR } || pendingCommand != null,
+                            enabled = inputText.isNotBlank() || attachments.any { it.status != UploadStatus.ERROR } || pendingCommands.isNotEmpty(),
                             interactionSource = sendInteraction,
                             modifier = Modifier
                                 .size(40.dp)

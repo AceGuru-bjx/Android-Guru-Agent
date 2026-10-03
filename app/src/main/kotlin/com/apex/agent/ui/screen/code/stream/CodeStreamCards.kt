@@ -41,6 +41,8 @@ import com.apex.agent.R
 import com.apex.agent.core.code.stream.StreamEntry
 import com.apex.agent.core.code.stream.StreamToolCall
 import com.apex.agent.ui.component.MarkdownText
+import com.apex.agent.ui.glass.GlassCard
+import com.apex.agent.ui.glass.GlassStyle
 
 /**
  * # Code Stream Cards — 时间轴卡片族
@@ -90,18 +92,26 @@ private fun UserBubble(text: String) {
 
 @Composable
 private fun AssistantBubble(text: String, isStreaming: Boolean) {
-    Column(
+    // v5 流式玻璃（用户反馈「coding 屏流式输出无玻璃」）：结论气泡从裸铺
+    // 背景改为 GlassCard Frosted 档 —— 与 Agent 屏 StreamingResponseBubble
+    // 同一套玻璃语言（薄霜渐变 + 边缘光）；流式光标保留。
+    GlassCard(
+        style = GlassStyle.Card,
+        shape = RoundedCornerShape(topStart = 4.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 16.dp),
+        accent = MaterialTheme.colorScheme.primary,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
-        MarkdownText(markdown = text)
-        if (isStreaming) {
-            Text(
-                text = "▍",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            MarkdownText(markdown = text)
+            if (isStreaming) {
+                Text(
+                    text = "▍",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
     }
 }
@@ -113,15 +123,21 @@ private fun ThinkingCard(text: String, isStreaming: Boolean) {
     // 注意 key：不能用 text.isEmpty() 这类派生值——空思考卡点开后首个
     // token 到达（isEmpty 翻转）会重置展开态，吞掉用户的点击
     var expanded by remember { mutableStateOf(false) }
-    Surface(
+    // v5 流式玻璃：思考卡 Surface → GlassCard Frosted（accent=secondary
+    // 与思考色系一致）；折叠/展开点击收在内容层，涟漪经玻璃层裁剪。
+    GlassCard(
+        style = GlassStyle.Card,
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        accent = MaterialTheme.colorScheme.secondary,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 2.dp)
-            .clickable { expanded = !expanded }
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
+        Column(
+            modifier = Modifier
+                .padding(10.dp)
+                .clickable { expanded = !expanded }
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Default.Psychology,
