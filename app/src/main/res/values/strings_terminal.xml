@@ -168,4 +168,13 @@
     <string name="term_extra_keys_desc">Custom macro buttons above the keyboard (e.g. apt-fix=cmd:apt-get update). Formats: label=cmd:… (run), label=text:… (type), label=key:F1, label=ctrl:c, label=paste</string>
     <string name="term_extra_keys_hint">label=cmd:apt-get update</string>
     <string name="term_extra_keys_reset">Reset to defaults</string>
+    <!-- P2-3: session state short labels (tab badges; were hardcoded EN abbreviations) -->
+    <string name="term_state_starting">…</string>
+    <string name="term_state_run">RUN</string>
+    <string name="term_state_input">INPUT</string>
+    <string name="term_state_interrupted">INT</string>
+    <string name="term_state_exited">EXIT</string>
+    <string name="term_state_broken">BROKEN</string>
+    <!-- P2-4: fallback hook for context-menu ids not yet registered app-side -->
+    <string name="term_menu_unknown">%1$s</string>
 </resources>
