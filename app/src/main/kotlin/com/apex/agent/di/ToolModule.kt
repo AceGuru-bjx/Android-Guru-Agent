@@ -64,6 +64,7 @@ import com.apex.agent.tools.AskUserChoiceTool
 import com.apex.agent.tools.AskUserTool
 import com.apex.agent.tools.RiskAwareToolGate
 import com.apex.agent.tools.ToolAuditLogger
+import com.apex.agent.permission.PermissionMode
 import com.apex.agent.permission.PermissionModeGate
 import com.apex.agent.permission.PermissionAwareToolGate
 import com.apex.agent.permission.PermissionSnapshot
@@ -542,7 +543,9 @@ object ToolModule {
         // #172 上下文回顾三件套的数据源：当前会话持久化消息（SharedPrefs 单例）。
         conversationMemory: com.apex.agent.core.engine.ConversationMemory,
         // 技能渐进披露：skill_activate 工具 + 子代理引擎工厂共享的激活存储。
-        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore
+        skillActivation: com.apex.agent.core.tools.skill.SkillActivationStore,
+        // 全自动模式（BYPASS）短路命令级确认门的设置源（实时读取，改设置即生效）。
+        settingsRepository: SettingsRepository
     ): ToolRegistry {
         val registry = DefaultToolRegistry()
 
@@ -569,7 +572,12 @@ object ToolModule {
         // ShellExecResult。via 为 VIA_GATE_DENIED / VIA_EXCEPTION 时 output 已是
         // 面向模型的最终错误文案（与旧版逐字节一致）。
         val shellExecResult: suspend (String) -> ShellExecResult = { cmd ->
-            if (!commandPermissionGate.ensureAllowed(cmd)) {
+            // 全自动模式（BYPASS）：跳过命令级确认门 —— 「完全不用用户确认」
+            // 的承诺必须覆盖 shell 高危命令，否则全放行只放了一半。实时读
+            // 设置（非构造期快照），用户切回其他模式后立即恢复拦截。
+            val bypassCommandGate = settingsRepository.agentSettings.value.permissionMode ==
+                PermissionMode.BYPASS
+            if (!bypassCommandGate && !commandPermissionGate.ensureAllowed(cmd)) {
                 // #F-⑯：工具层审计（拒绝也留痕）；结构化结果见下方 T92 注释。
                 toolAuditLogger.log(ToolAuditLogger.Event(
                     tool = "shell_execute", decision = "denied_by_user", command = cmd,
@@ -676,10 +684,16 @@ object ToolModule {
                 capabilities = capabilitySource::invoke
             )),
             approvalGate = { cmd ->
-                if (commandPermissionGate.ensureAllowed(cmd)) {
+                // 全自动模式（BYPASS）与 shell_execute 同口径：跳过命令级确认门。
+                val bypassCommandGate = settingsRepository.agentSettings.value.permissionMode ==
+                    PermissionMode.BYPASS
+                if (bypassCommandGate || commandPermissionGate.ensureAllowed(cmd)) {
                     toolAuditLogger.log(ToolAuditLogger.Event(
-                        tool = "terminal.exec", decision = "approved", command = cmd,
-                        detail = "CommandPermissionGate allowed"
+                        tool = "terminal.exec",
+                        decision = "approved",
+                        command = cmd,
+                        detail = if (bypassCommandGate) "BYPASS mode auto-allowed"
+                        else "CommandPermissionGate allowed"
                     ))
                     null
                 } else {

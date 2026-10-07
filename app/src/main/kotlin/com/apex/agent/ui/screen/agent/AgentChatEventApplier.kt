@@ -159,6 +159,21 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
         is AgentEvent.ToolCallStart -> {
             // 流式回复/思考暂停：先刷出缓冲，保证已有文本先于工具卡落盘。
             streamBuffers.flush()
+            // 长对话时序修复：把工具前已流出的叙述文本落为独立 Agent 消息，
+            // 再追加工具卡 —— 旧实现叙述文本滞留 currentResponse（固定渲染在
+            // 列表末尾），工具卡全部叠在它上方，时序错乱；收尾
+            // ResponseComplete 的 fullText 又只含末轮文本，跨轮叙述被静默
+            // 丢弃。先落盘再清空，文本→工具→文本的真实顺序得以保留。
+            _uiState.update { state ->
+                state.copy(
+                    messages = if (state.currentResponse.isNotBlank()) {
+                        state.messages + AgentUiMessage.Agent(state.currentResponse)
+                    } else {
+                        state.messages
+                    },
+                    currentResponse = ""
+                )
+            }
             // 重置缓冲区 + 节流状态，记录当前活跃工具 callId 用于 chunk 路由。
             activeToolCallId = event.callId
             toolOutputBuffer.clear()
@@ -340,8 +355,11 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
             // 最终 flush：把仍在缓冲中的回复文本刷入 UI 后再落为完整消息。
             streamBuffers.flush()
             _uiState.update { state ->
+                // 优先取 currentResponse（含全部实际流出的内容，如肌肉记忆
+                // 旁路提示行）；引擎 fullText 只含末轮迭代文本，作为兜底。
+                val finalText = state.currentResponse.ifBlank { event.fullText }
                 state.copy(
-                    messages = state.messages + AgentUiMessage.Agent(event.fullText),
+                    messages = state.messages + AgentUiMessage.Agent(finalText),
                     currentResponse = "",
                     isLoading = false
                 )
@@ -461,11 +479,20 @@ internal suspend fun AgentChatViewModel.handleEvent(event: AgentEvent) {
         is AgentEvent.Aborted -> {
             finishActiveBanner()
             thinkingStartElapsed = 0
+            // 中止时把半截回复落为 isPartial 消息（与 Error 路径同口径），
+            // 避免流式气泡永久悬挂 + 半截内容静默丢失。
+            streamBuffers.flush()
             _uiState.update { state ->
+                val partial = state.currentResponse
                 state.copy(
-                    messages = state.messages + AgentUiMessage.System(str(R.string.chat_aborted)),
+                    messages = state.messages +
+                        (if (partial.isNotBlank())
+                            listOf(AgentUiMessage.Agent(text = partial, isPartial = true))
+                        else emptyList()) +
+                        AgentUiMessage.System(str(R.string.chat_aborted)),
                     isLoading = false,
                     currentThinking = "",
+                    currentResponse = "",
                     currentThinkingStartElapsed = 0,
                     currentStepIndex = -1
                 )

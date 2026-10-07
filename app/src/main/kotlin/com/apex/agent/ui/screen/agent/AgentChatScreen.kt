@@ -210,6 +210,7 @@ fun AgentChatScreen(
     // 出现时自动滚动定位到对话框上方；FAB 回底同样用此值）。
     // P3-i（6-c）：UserInputDialog 已提升到屏级（不再占列表项），去掉 pendingUserInput
     // 计数，修复 off-by-one（原自动滚动目标索引多 1，仅靠 clamp 兼底）。
+    // 注：尾部另有 1dp 尾哨兵项（见 LazyColumn 末尾），索引 = totalListItems。
     val totalListItems by remember {
         derivedStateOf {
             uiState.messages.size +
@@ -226,15 +227,19 @@ fun AgentChatScreen(
     // key 只含"列表结构变化"（总项数 / 加载态），不含 currentResponse 文本——
     // 否则每 token 重启动画导致抖动。
     // 流式期间用即时 scrollToItem（跟手、无动画叠加）；非流式收尾保留动画。
+    // 目标 = 尾哨兵项（索引 totalListItems）：scrollToItem 把目标项顶边对齐
+    // 视口顶，末条长气泡（如长结论）会被钉在顶部、尾部在视口外——用户观感
+    // 即「结论出现在对话最上方」。1dp 哨兵恒为末条，贴它 = 贴真底
+    //（与 Coding 屏 CodeStreamTimeline 的尾哨兵同款修复）。
     LaunchedEffect(
         totalListItems,
         uiState.isLoading
     ) {
         if (totalListItems > 0 && (isAtBottom || !userScrolledUp)) {
             if (uiState.isLoading) {
-                listState.scrollToItem(totalListItems - 1)
+                listState.scrollToItem(totalListItems)
             } else {
-                listState.animateScrollToItem(totalListItems - 1)
+                listState.animateScrollToItem(totalListItems)
             }
             userScrolledUp = false
         }
@@ -247,7 +252,7 @@ fun AgentChatScreen(
     // 重启 effect）；档位推进且用户在底部附近 / 未进入阅读模式时即时跟随末项。
     LaunchedEffect((uiState.currentResponse.length + uiState.currentThinking.length) / 200) {
         if (uiState.isLoading && totalListItems > 0 && (isAtBottom || !userScrolledUp)) {
-            listState.scrollToItem(totalListItems - 1)
+            listState.scrollToItem(totalListItems)
         }
     }
 
@@ -470,6 +475,13 @@ fun AgentChatScreen(
                     )
                 }
             }
+
+            // 尾哨兵（1dp）：auto-scroll 目标。scrollToItem(末条内容项) 会把
+            // 长气泡顶边钉在视口顶——长结论「出现在对话最上方」的根因；
+            // 贴哨兵即贴真底（与 Coding 屏同款修复，见上方滚动注释）。
+            item(key = "chat-tail-sentinel") {
+                Spacer(modifier = Modifier.height(1.dp))
+            }
         }
 
             // ═══ 玻璃悬浮层：FAB + 加载条 + 输入栏 —— 悬浮于消息源之上 ═══
@@ -496,7 +508,7 @@ fun AgentChatScreen(
                             userScrolledUp = false
                             scrollScope.launch {
                                 if (totalListItems > 0) {
-                                    listState.animateScrollToItem(totalListItems - 1)
+                                    listState.animateScrollToItem(totalListItems)
                                 }
                             }
                         },

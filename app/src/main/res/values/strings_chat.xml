@@ -106,8 +106,6 @@
     <string name="chat_cd_expand">Expand</string>
     <string name="chat_json_more">… %1$d more</string>
     <string name="chat_run_stats">Run stats</string>
-    <string name="chat_stat_iterations">%1$d iterations</string>
-    <string name="chat_stat_tool_calls">%1$d tool calls</string>
     <string name="chat_step">Step %1$d</string>
 
     <!-- ═══ AgentChatToolCards ═══ -->

@@ -106,8 +106,6 @@
     <string name="chat_cd_expand">展开</string>
     <string name="chat_json_more">… 还有 %1$d 项</string>
     <string name="chat_run_stats">运行统计</string>
-    <string name="chat_stat_iterations">迭代 %1$d</string>
-    <string name="chat_stat_tool_calls">工具调用 %1$d</string>
     <string name="chat_step">步骤 %1$d</string>
 
     <!-- ═══ AgentChatToolCards ═══ -->
